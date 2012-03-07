@@ -215,6 +215,7 @@ extern unsigned int nr_free_pagecache_pages(void);
 
 
 /* linux/mm/swap.c */
+extern void ____lru_cache_add(struct page *, enum lru_list lru, bool tail);
 extern void __lru_cache_add(struct page *, enum lru_list lru);
 extern void lru_cache_add_lru(struct page *, enum lru_list lru);
 extern void lru_add_page_tail(struct zone* zone,
@@ -238,9 +239,14 @@ static inline void lru_cache_add_anon(struct page *page)
 	__lru_cache_add(page, LRU_INACTIVE_ANON);
 }
 
+static inline void lru_cache_add_file_tail(struct page *page, bool tail)
+{
+	____lru_cache_add(page, LRU_INACTIVE_FILE, tail);
+}
+
 static inline void lru_cache_add_file(struct page *page)
 {
-	__lru_cache_add(page, LRU_INACTIVE_FILE);
+	____lru_cache_add(page, LRU_INACTIVE_FILE, false);
 }
 
 /* linux/mm/vmscan.c */

@@ -481,15 +481,21 @@ out:
 }
 EXPORT_SYMBOL(add_to_page_cache_locked);
 
-int add_to_page_cache_lru(struct page *page, struct address_space *mapping,
-				pgoff_t offset, gfp_t gfp_mask)
+int __add_to_page_cache_lru(struct page *page, struct address_space *mapping,
+				pgoff_t offset, gfp_t gfp_mask, bool tail)
 {
 	int ret;
 
 	ret = add_to_page_cache(page, mapping, offset, gfp_mask);
 	if (ret == 0)
-		lru_cache_add_file(page);
+		lru_cache_add_file_tail(page, tail);
 	return ret;
+}
+
+int add_to_page_cache_lru(struct page *page, struct address_space *mapping,
+				pgoff_t offset, gfp_t gfp_mask)
+{
+	return __add_to_page_cache_lru(page, mapping, offset, gfp_mask, false);
 }
 EXPORT_SYMBOL_GPL(add_to_page_cache_lru);
 
