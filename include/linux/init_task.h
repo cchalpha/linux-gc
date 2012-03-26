@@ -142,7 +142,6 @@ extern struct cred init_cred;
 	.normal_prio	= NORMAL_PRIO,					\
 	.deadline	= 0,						\
 	.policy		= SCHED_NORMAL,					\
-	.sticky		= false,					\
 	.cpus_allowed	= CPU_MASK_ALL,					\
 	.mm		= NULL,						\
 	.active_mm	= &init_mm,					\
