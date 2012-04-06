@@ -628,7 +628,7 @@ static void uksm_drop_anon_vma(struct rmap_item *rmap_item)
 {
 	struct anon_vma *anon_vma = rmap_item->anon_vma;
 
-	drop_anon_vma(anon_vma);
+	put_anon_vma(anon_vma);
 }
 
 
