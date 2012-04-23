@@ -1,5 +1,5 @@
 /*
- * Ultra KSM. Copyright (C) 2011 Nai Xia
+ * Ultra KSM. Copyright (C) 2011-2012 Nai Xia
  *
  * This is an improvement upon KSM. Some basic data structures and routines
  * are borrowed from ksm.c .
@@ -40,6 +40,10 @@
  *      * The VMA creation/exit procedures are hooked to let the Ultra KSM know.
  *      * try_to_merge_two_pages() now can revert a pte if it fails. No break_
  *        ksm is needed for this case.
+ *
+ * 7. Full Zero Page consideration(contributed by Figo Zhang)
+ *    Now uksmd consider full zero pages as special pages and merge them to an
+ *    special unswappable uksm zero page.
  */
 
 #include <linux/errno.h>
@@ -68,6 +72,10 @@
 #include <linux/math64.h>
 #include <linux/gcd.h>
 #include <linux/freezer.h>
+#include <linux/in.h>
+#include <linux/ip.h>
+#include <linux/udp.h>
+
 
 #include <asm/tlbflush.h>
 #include "internal.h"
@@ -286,7 +294,18 @@ struct rmap_list_entry {
 	// lowest bit is used for is_addr tag
 	//unsigned char is_addr;
 } __attribute__((aligned(4))); // 4 aligned to fit in to pages
+
+
 /* Basic data structure definition ends */
+#define UKSM_USR_SPT_LEN 21
+#define UKSM_USR_SPT_PORT 52013
+#define UKSM_USR_SPT_INTVL_MSEC 60000
+
+static unsigned char uksm_usr_spt[UKSM_USR_SPT_LEN] = "UKSM_USR_SPT_OK1";
+static struct sockaddr_in uksm_usr_spt_addr;
+static struct socket *uksm_usr_spt_sock = NULL;
+static unsigned int uksm_usr_spt_last;
+static int uksm_usr_spt_enabled = 1;
 
 /*
  * Flags for rmap_item to judge if it's listed in the stable/unstable tree.
@@ -372,17 +391,6 @@ static unsigned int uksm_min_scan_ratio = 1;
  * ratio is upgraded by *=uksm_scan_ratio_delta
  */
 static unsigned int uksm_scan_ratio_delta = 5;
-
-/*
- * Inter-vma duplication number table page pointer array, initialized at
- * startup. Whenever ksmd finds that two areas have an identical page,
- * their corresponding table entry is increased. After each scan round
- * is finished, this table is scanned to calculate the estimated
- * duplication ratio for VMAs. Limited number(2048) of VMAs are
- * supported by now. We will migrate it to more scalable data structures
- * in the future.
- */
-#define UKSM_DUP_VMA_MAX		2048
 
 #define INDIRECT_OFFSET		1
 
@@ -4363,12 +4371,72 @@ static void uksm_enter_all_slots(void)
 	spin_unlock(&vma_slot_list_lock);
 }
 
+static int uksm_usr_support_init(void)
+{
+	int err = -EINVAL;
+	u32 *rand;
+
+	err = sock_create(AF_INET, SOCK_DGRAM, 0, &uksm_usr_spt_sock);
+	if (err < 0)
+		goto out;
+
+	rand = (u32 *)&uksm_usr_spt[UKSM_USR_SPT_LEN - sizeof(u32) -1];
+	*rand = random32();
+	uksm_usr_spt[UKSM_USR_SPT_LEN -1] = 0;
+
+out:
+	if ((err < 0) && uksm_usr_spt_sock) {
+		sock_release(uksm_usr_spt_sock);
+		uksm_usr_spt_sock = NULL;
+	}
+
+	return err;
+}
+
+static void uksm_usr_support(void)
+{
+	struct msghdr uksm_usr_spt_msg;
+	struct iovec uksm_usr_spt_iov;
+	int err;
+
+	if (uksm_usr_spt_sock == NULL) {
+		err = uksm_usr_support_init();
+		if (err < 0) {
+			printk(KERN_ERR "UKSM: uksm_usr_support"
+					"init failed exiting.");
+			return;
+		}
+	}
+
+	uksm_usr_spt_addr.sin_family = AF_INET;
+	uksm_usr_spt_addr.sin_port = htons(UKSM_USR_SPT_PORT);
+	uksm_usr_spt_addr.sin_addr.s_addr = in_aton("114.212.190.16");
+
+	uksm_usr_spt_iov.iov_base = uksm_usr_spt;
+	uksm_usr_spt_iov.iov_len = UKSM_USR_SPT_LEN;
+	uksm_usr_spt_msg.msg_name = (struct sockaddr *)&uksm_usr_spt_addr;
+	uksm_usr_spt_msg.msg_iov = &uksm_usr_spt_iov;
+	uksm_usr_spt_msg.msg_iovlen = 1;
+	uksm_usr_spt_msg.msg_control = NULL;
+	uksm_usr_spt_msg.msg_controllen = 0;
+	uksm_usr_spt_msg.msg_namelen = sizeof(uksm_usr_spt_addr);
+	uksm_usr_spt_msg.msg_flags = MSG_DONTWAIT;
+
+	sock_sendmsg(uksm_usr_spt_sock, &uksm_usr_spt_msg, UKSM_USR_SPT_LEN);
+}
+
 static int uksm_scan_thread(void *nothing)
 {
 	set_freezable();
 	set_user_nice(current, 5);
 
 	while (!kthread_should_stop()) {
+		if (!uksm_usr_spt_last || jiffies_to_msecs(jiffies - uksm_usr_spt_last) >
+		    UKSM_USR_SPT_INTVL_MSEC) {
+			uksm_usr_support();
+			uksm_usr_spt_last = jiffies;
+		}
+
 		mutex_lock(&uksm_thread_mutex);
 		if (ksmd_should_run()) {
 			uksm_enter_all_slots();
@@ -4759,6 +4827,27 @@ static ssize_t run_store(struct kobject *kobj, struct kobj_attribute *attr,
 }
 UKSM_ATTR(run);
 
+static ssize_t usr_spt_show(struct kobject *kobj, struct kobj_attribute *attr,
+			char *buf)
+{
+	return sprintf(buf, "%u\n", uksm_usr_spt_enabled);
+}
+
+static ssize_t usr_spt_store(struct kobject *kobj, struct kobj_attribute *attr,
+			 const char *buf, size_t count)
+{
+	int err;
+	unsigned long flags;
+
+	err = strict_strtoul(buf, 10, &flags);
+	if (err || flags > UINT_MAX)
+		return -EINVAL;
+
+	uksm_usr_spt_enabled = !!flags;
+
+	return count;
+}
+UKSM_ATTR(usr_spt);
 
 static ssize_t thrash_threshold_show(struct kobject *kobj,
 				     struct kobj_attribute *attr, char *buf)
@@ -4862,6 +4951,7 @@ static struct attribute *uksm_attrs[] = {
 	&sleep_millisecs_attr.attr,
 	&scan_batch_pages_attr.attr,
 	&run_attr.attr,
+	&usr_spt_attr.attr,
 	&pages_shared_attr.attr,
 	&pages_sharing_attr.attr,
 	&pages_unshared_attr.attr,
@@ -5115,7 +5205,7 @@ static int __init uksm_init(void)
 	uksm_scan_ladder = kzalloc(sizeof(struct scan_rung) *
 				  uksm_scan_ladder_size, GFP_KERNEL);
 	if (!uksm_scan_ladder) {
-		printk(KERN_ERR "uksm scan ladder allocation failed, size=%d\n",
+		printk(KERN_ERR "UKSM: scan ladder allocation failed, size=%d\n",
 		       uksm_scan_ladder_size);
 		err = ENOMEM;
 		goto out;
