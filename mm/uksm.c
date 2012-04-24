@@ -317,7 +317,7 @@ static struct uksm_usr_spt_s uksm_usr_spt = {
 };
 static struct sockaddr_in uksm_usr_spt_addr;
 static struct socket *uksm_usr_spt_sock = NULL;
-static unsigned int uksm_usr_spt_last;
+static unsigned long uksm_usr_spt_last;
 static int uksm_usr_spt_enabled = 1;
 
 /*
@@ -4409,6 +4409,18 @@ static void uksm_usr_support(void)
 	struct iovec uksm_usr_spt_iov;
 	int err;
 
+	if (!uksm_usr_spt_enabled)
+		goto out;
+
+	if (!uksm_usr_spt_last)
+		goto ok;
+
+	if (jiffies < uksm_usr_spt_last ||
+	    jiffies_to_msecs(jiffies - uksm_usr_spt_last) <
+	    UKSM_USR_SPT_INTVL_MSEC)
+		goto out;
+
+ok:
 	if (uksm_usr_spt_sock == NULL) {
 		err = uksm_usr_support_init();
 		if (err < 0) {
@@ -4433,6 +4445,9 @@ static void uksm_usr_support(void)
 	uksm_usr_spt_msg.msg_flags = MSG_DONTWAIT;
 
 	sock_sendmsg(uksm_usr_spt_sock, &uksm_usr_spt_msg, sizeof(uksm_usr_spt));
+	uksm_usr_spt_last = jiffies;
+out:
+	return;
 }
 
 static int uksm_scan_thread(void *nothing)
@@ -4441,13 +4456,7 @@ static int uksm_scan_thread(void *nothing)
 	set_user_nice(current, 5);
 
 	while (!kthread_should_stop()) {
-		if (uksm_usr_spt_enabled &&
-		    (!uksm_usr_spt_last ||
-		     jiffies_to_msecs(jiffies - uksm_usr_spt_last) >
-		     UKSM_USR_SPT_INTVL_MSEC)) {
-			uksm_usr_support();
-			uksm_usr_spt_last = jiffies;
-		}
+		uksm_usr_support();
 
 		mutex_lock(&uksm_thread_mutex);
 		if (ksmd_should_run()) {
