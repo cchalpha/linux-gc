@@ -21,7 +21,7 @@ extern unsigned long uksm_zero_pfn __read_mostly;
 extern struct page *empty_uksm_zero_page;
 
 /* must be done before linked to mm */
-extern inline void uksm_vma_add_new(struct vm_area_struct *vma);
+extern void uksm_vma_add_new(struct vm_area_struct *vma);
 extern void uksm_remove_vma(struct vm_area_struct *vma);
 
 struct vma_slot {

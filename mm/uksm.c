@@ -974,7 +974,7 @@ static inline int vma_can_enter(struct vm_area_struct *vma)
  * is created and inserted into a global list Must be called.
  * after vma is inserted to its mm      		    .
  */
-inline void uksm_vma_add_new(struct vm_area_struct *vma)
+void uksm_vma_add_new(struct vm_area_struct *vma)
 {
 	struct vma_slot *slot;
 
