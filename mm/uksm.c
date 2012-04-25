@@ -4415,8 +4415,13 @@ static void uksm_usr_support(void)
 	if (!uksm_usr_spt_last)
 		goto ok;
 
-	if (jiffies < uksm_usr_spt_last ||
-	    jiffies_to_msecs(jiffies - uksm_usr_spt_last) <
+	/* timer wrap around, reset uksm_usr_spt_last. */
+	if (jiffies < uksm_usr_spt_last) {
+		uksm_usr_spt_last = jiffies;
+		goto out;
+	}
+
+	if (jiffies_to_msecs(jiffies - uksm_usr_spt_last) <
 	    UKSM_USR_SPT_INTVL_MSEC)
 		goto out;
 
