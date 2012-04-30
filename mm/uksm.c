@@ -378,7 +378,7 @@ static unsigned long uksm_pages_unshared;
 static unsigned long uksm_scan_batch_pages = 60000;
 
 /* Milliseconds ksmd should sleep between batches */
-static unsigned int uksm_sleep_jiffies = 2;
+static unsigned int uksm_sleep_jiffies;
 
 /*
  * The threshold used to filter out thrashing areas,
@@ -5268,6 +5268,8 @@ static int __init uksm_init(void)
 	struct task_struct *uksm_thread;
 	int err;
 	unsigned int sr = uksm_min_scan_ratio;
+
+	uksm_sleep_jiffies = msecs_to_jiffies(10);
 
 	uksm_scan_ladder_size = 1;
 	while (sr < UKSM_SCAN_RATIO_MAX) {
