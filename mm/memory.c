@@ -1584,8 +1584,8 @@ split_fallthrough:
 	page = vm_normal_page(vma, address, pte);
 	if (unlikely(!page)) {
 		if ((flags & FOLL_DUMP) ||
-		    !is_zero_pfn(pte_pfn(pte)) ||
-		    !is_uksm_zero_pfn(pte_pfn(pte)))
+		    !(is_zero_pfn(pte_pfn(pte)) ||
+		      is_uksm_zero_pfn(pte_pfn(pte))))
 			goto bad_page;
 		page = pte_page(pte);
 	}
