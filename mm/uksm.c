@@ -2747,6 +2747,7 @@ static void cmp_and_merge_page(struct rmap_item *rmap_item)
 			inc_dup_vma(rmap_item->slot, rmap_item->slot);
 			rmap_item->slot->pages_merged++;
 			__inc_zone_page_state(page, NR_UKSM_ZERO_PAGES);
+			dec_mm_counter(rmap_item->slot->mm, MM_ANONPAGES);
 			return ;
 		} else {
 			inc_rshash_neg(memcmp_cost / 2);
