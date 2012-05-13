@@ -959,11 +959,7 @@ failout_up:
  */
 static inline int vma_can_enter(struct vm_area_struct *vma)
 {
-	return !(vma->vm_flags & (VM_PFNMAP | VM_IO  | VM_DONTEXPAND |
-				  VM_RESERVED  | VM_HUGETLB | VM_INSERTPAGE |
-				  VM_NONLINEAR | VM_MIXEDMAP | VM_SAO |
-				  VM_SHARED  | VM_MAYSHARE | VM_GROWSUP
-				  | VM_GROWSDOWN));
+	return uksm_flags_can_scan(vma->vm_flags);
 }
 
 /*

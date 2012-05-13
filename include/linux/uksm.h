@@ -74,6 +74,20 @@ static inline void uksm_cow_pte(struct vm_area_struct *vma, pte_t pte)
 		vma->uksm_vma_slot->pages_cowed++;
 }
 
+static inline int uksm_flags_can_scan(unsigned long vm_flags)
+{
+	return !(vm_flags & (VM_PFNMAP | VM_IO  | VM_DONTEXPAND |
+				  VM_RESERVED  | VM_HUGETLB | VM_INSERTPAGE |
+				  VM_NONLINEAR | VM_MIXEDMAP | VM_SAO |
+				  VM_SHARED  | VM_MAYSHARE | VM_GROWSUP
+				  | VM_GROWSDOWN));
+}
+
+static inline void uksm_vm_flags_mod(unsigned long *vm_flags_p)
+{
+	if (uksm_flags_can_scan(*vm_flags_p))
+		*vm_flags_p |= VM_MERGEABLE;
+}
 
 /*
  * Just a wrapper for BUG_ON for where ksm_zeropage must not be. TODO: it will
@@ -105,6 +119,15 @@ static inline void uksm_cow_page(struct vm_area_struct *vma, struct page *page)
 }
 
 static inline void uksm_cow_pte(struct vm_area_struct *vma, pte_t pte)
+{
+}
+
+static inline int uksm_flags_can_scan(unsigned long vm_flags)
+{
+	return 0;
+}
+
+static inline void uksm_vm_flags_mod(unsigned long *vm_flags_p)
 {
 }
 
