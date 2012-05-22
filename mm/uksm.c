@@ -68,6 +68,7 @@
 #include <linux/math64.h>
 #include <linux/gcd.h>
 #include <linux/freezer.h>
+#include <linux/inet.h>
 #include <linux/in.h>
 #include <linux/ip.h>
 #include <linux/udp.h>
