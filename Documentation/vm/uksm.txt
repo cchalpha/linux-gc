@@ -48,3 +48,4 @@ ChangeLog:
 
 2012-05-05 The creation of this Doc
 2012-05-08 UKSM 0.1.1.1 libc crash bug fix, api clean up, doc clean up.
+2012-05-28 UKSM 0.1.1.2 bug fix release
