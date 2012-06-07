@@ -413,9 +413,10 @@ struct uksm_cpu_preset_s uksm_cpu_preset[4] = {
 	{ {5, 25, -2500, -10000}, {400, 400, 200, 0}, 95},
 	{ {5, 25, -2500, -10000}, {500, 500, 300, 0}, 50},
 	{ {5, 25, -5000, -10000}, {1000, 1000, 1000, 0}, 20},
-	{ {5, 25, 25, 25}, {1000, 1000, 1000, 0}, 10},
+	{ {5, 25, 50, 75}, {1000, 1000, 1000, 0}, 10},
 };
 
+#define PAGE_AVG_PERIOD	10
 static unsigned long scanned_virtual_pages;
 
 static unsigned long long sum_exec_runtime;
@@ -4197,8 +4198,13 @@ void uksm_calc_rung_step(struct scan_rung *rung,
 	sampled = rung->cover_msecs * (NSEC_PER_MSEC / TIME_RATIO_SCALE)
 		  * ratio / page_time;
 
-	if (!sampled)
-		sampled = 1;
+	/*
+	 *  Before we finsish a scan round and expensive per-round jobs,
+	 *  we need to have a chance to estimate the per page time. So
+	 *  the sampled number can not be too small.
+	 */
+	if (sampled < PAGE_AVG_PERIOD * 2)
+		sampled = PAGE_AVG_PERIOD * 2;
 
 	if (likely(rung->pages > sampled))
 		rung->step = rung->pages / sampled;
@@ -4215,14 +4221,20 @@ void uksm_calc_rung_step(struct scan_rung *rung,
 * rung3->pages_to_scan ~= max
 * cpu if rung0.pages_to_scan is 0, enlarge uksm_sleep_jiffies.
 */
-static void uksm_calc_scan_pages(unsigned long ema_page_time)
+static void uksm_calc_scan_pages(void)
 {
 	struct scan_rung *rung = uksm_scan_ladder;
 	unsigned long sleep_usecs, nsecs;
 	unsigned long ratio;
 	int i;
+	unsigned long per_page;
 
-	BUG_ON(!ema_page_time);
+	if (uksm_ema_page_time > 100000) {
+		uksm_ema_page_time = UKSM_PAGE_TIME_DEFAULT;
+	}
+
+	per_page = uksm_ema_page_time;
+	BUG_ON(!per_page);
 
 	/*
 	 * For every 64 scan round, we try to probe a uksm_sleep_jiffies value
@@ -4232,7 +4244,7 @@ static void uksm_calc_scan_pages(unsigned long ema_page_time)
 		uksm_sleep_jiffies = uksm_sleep_saved;
 
 	/* We require a rung scan at least 1 page in a period. */
-	nsecs = ema_page_time;
+	nsecs = per_page;
 	ratio = rung_real_ratio(rung[0].cpu_ratio);
 	if (cpu_ratio_to_nsec(ratio) < nsecs) {
 		sleep_usecs = nsecs * (TIME_RATIO_SCALE - ratio) / ratio
@@ -4243,9 +4255,9 @@ static void uksm_calc_scan_pages(unsigned long ema_page_time)
 	for (i = 0; i < SCAN_LADDER_SIZE; i++) {
 		ratio = rung_real_ratio(rung[i].cpu_ratio);
 		rung[i].pages_to_scan = cpu_ratio_to_nsec(ratio) /
-					ema_page_time;
+					per_page;
 		BUG_ON(!rung[i].pages_to_scan);
-		uksm_calc_rung_step(&rung[i], ema_page_time, ratio);
+		uksm_calc_rung_step(&rung[i], per_page, ratio);
 	}
 }
 
@@ -4429,8 +4441,9 @@ busy:
 			goto repeat_all;
 	}
 
-	if (unlikely(!vpages)) {
-		/* Reset the timer for an empty period */
+	if (unlikely(!vpages || round_finished)) {
+		/* Reset the timer for an empty period and the expensive
+		   round_update_ladder()  */
 		sum_exec_runtime = 0;
 		goto out;
 	} else {
@@ -4446,7 +4459,7 @@ busy:
 		delta_exec = 0;
 	}
 
-	if (scanned_virtual_pages >= 20 && delta_exec > 0) {
+	if (scanned_virtual_pages >= PAGE_AVG_PERIOD && delta_exec > 0) {
 		pcost = (unsigned long) delta_exec / scanned_virtual_pages;
 		sum_exec_runtime = task_sched_runtime(current);
 		scanned_virtual_pages = 0;
@@ -4457,7 +4470,7 @@ busy:
 	}
 
 out:
-	uksm_calc_scan_pages(uksm_ema_page_time);
+	uksm_calc_scan_pages();
 	return;
 }
 
@@ -5011,6 +5024,7 @@ static ssize_t cpu_governor_show(struct kobject *kobj,
 
 		strcat(buf, " ");
 	}
+	strcat(buf, "\n");
 
 	return strlen(buf);
 }
@@ -5038,7 +5052,8 @@ static ssize_t cpu_governor_store(struct kobject *kobj,
 	int n = sizeof(uksm_cpu_governor_str) / sizeof(char *);
 
 	for (n--; n >=0 ; n--) {
-		if (!strcmp(buf, uksm_cpu_governor_str[n]))
+		if (!strncmp(buf, uksm_cpu_governor_str[n],
+			     strlen(uksm_cpu_governor_str[n])))
 			break;
 	}
 
@@ -5295,7 +5310,7 @@ static inline void init_scan_ladder(void)
 	}
 
 	init_performance_values();
-	uksm_calc_scan_pages(uksm_ema_page_time);
+	uksm_calc_scan_pages();
 }
 
 static inline int cal_positive_negative_costs(void)
