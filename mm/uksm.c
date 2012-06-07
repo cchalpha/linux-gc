@@ -416,7 +416,9 @@ struct uksm_cpu_preset_s uksm_cpu_preset[4] = {
 	{ {5, 25, 50, 75}, {1000, 1000, 1000, 0}, 10},
 };
 
-#define PAGE_AVG_PERIOD	10
+#define PAGE_AVG_PERIOD		10
+#define RUNG_SAMPLED_MIN	(PAGE_AVG_PERIOD * 2)
+
 static unsigned long scanned_virtual_pages;
 
 static unsigned long long sum_exec_runtime;
@@ -3325,6 +3327,8 @@ struct list_head *reset_current_scan(struct scan_rung *rung, int finished)
 	struct list_head *iter;
 	unsigned long offset;
 
+	if (!rung->pages)
+		return NULL;
 
 	if (finished)
 		rung->flags |= UKSM_RUNG_ROUND_FINISHED;
@@ -3338,6 +3342,9 @@ struct list_head *reset_current_scan(struct scan_rung *rung, int finished)
 		offset -= slot->pages;
 		iter = iter->next;
 	}
+
+	/* This can NOT be possible. Since offset_init < step < rung->pages */
+	BUG_ON(iter == &rung->vma_list);
 	rung->current_scan = iter;
 	rung->current_offset = offset;
 	rung->offset_init = (rung->offset_init + 1) % rung->step;
@@ -3378,42 +3385,86 @@ struct list_head *advance_current_scan(struct scan_rung *rung)
 	}
 }
 
-static void vma_rung_enter(struct vma_slot *slot,
-				  struct scan_rung *rung)
+static inline
+void uksm_calc_rung_step(struct scan_rung *rung,
+			 unsigned long page_time, unsigned long ratio)
 {
-	//unsigned long pages_to_scan;
-	struct scan_rung *old_rung = slot->rung;
+	unsigned long sampled;
 
-	/* leave the old rung it was in */
-	BUG_ON(list_empty(&slot->uksm_list));
+	/* will be fully scanned ? */
+	if (!rung->cover_msecs) {
+		rung->step = 1;
+		return;
+	}
 
-	if (old_rung->current_scan == &slot->uksm_list)
-		advance_current_scan(old_rung);
+	sampled = rung->cover_msecs * (NSEC_PER_MSEC / TIME_RATIO_SCALE)
+		  * ratio / page_time;
+
+	/*
+	 *  Before we finsish a scan round and expensive per-round jobs,
+	 *  we need to have a chance to estimate the per page time. So
+	 *  the sampled number can not be too small.
+	 */
+	if (sampled < RUNG_SAMPLED_MIN)
+		sampled = RUNG_SAMPLED_MIN;
+
+	if (likely(rung->pages > sampled))
+		rung->step = rung->pages / sampled;
+	else
+		rung->step = 1;
+
+	rung->offset_init %= rung->step;
+}
+
+static inline void rung_rm_slot(struct vma_slot *slot)
+{
+	struct scan_rung *rung = slot->rung;
+
+	BUG_ON(list_empty(&slot->uksm_list) || !rung);
+
+	if (rung->current_scan == &slot->uksm_list)
+		advance_current_scan(rung);
 
 	list_del_init(&slot->uksm_list);
-	old_rung->vma_num--;
-	old_rung->pages -= slot->pages;
+	rung->vma_num--;
+	rung->pages -= slot->pages;
+	if (rung->pages &&
+	    rung->step > rung->pages / RUNG_SAMPLED_MIN)
+		uksm_calc_rung_step(rung, uksm_ema_page_time, rung->cpu_ratio);
+
 	if (slot->flags & UKSM_SLOT_FUL_SCANNED)
-		old_rung->fully_scanned_slots--;
+		rung->fully_scanned_slots--;
 
-	BUG_ON(old_rung->current_scan == &old_rung->vma_list &&
-	       !list_empty(&old_rung->vma_list));
+	/* In case advance_current_scan loop back to this slot again */
+	if (rung->current_scan == &slot->uksm_list)
+		reset_current_scan(slot->rung, 1);
 
+	BUG_ON(rung->current_scan == &rung->vma_list &&
+	       !list_empty(&rung->vma_list));
+}
+
+static inline void rung_add_slot(struct scan_rung *rung, struct vma_slot *slot)
+{
 	list_add_tail(&slot->uksm_list, &rung->vma_list);
+	slot->rung = rung;
+	rung->vma_num++;
+	rung->pages += slot->pages;
 	if (list_is_singular(&rung->vma_list)) {
 		reset_rung_scan(rung);
 		reset_current_scan(rung, 0);
 	}
 
-	slot->rung = rung;
-	//slot->pages_to_scan = pages_to_scan;
-	rung->vma_num++;
-	rung->pages += slot->pages;
 	if (slot->flags & UKSM_SLOT_FUL_SCANNED)
 		rung->fully_scanned_slots++;
 
 	BUG_ON(rung->current_scan == &rung->vma_list &&
 	       !list_empty(&rung->vma_list));
+}
+
+static void vma_rung_enter(struct vma_slot *slot, struct scan_rung *rung)
+{
+	rung_rm_slot(slot);
+	rung_add_slot(rung, slot);
 }
 
 static inline void vma_rung_up(struct vma_slot *slot)
@@ -3485,8 +3536,10 @@ static unsigned long cal_dedup_ratio(struct vma_slot *slot)
 
 	/* Thrashing area filtering */
 	if (uksm_thrash_threshold) {
-		if (slot->pages_cowed * 100 / slot->pages_merged
-		    > uksm_thrash_threshold) {
+		if (slot->pages_cowed > slot->pages_merged) {
+			ret = 0;
+		} else if (slot->pages_cowed * 100 / slot->pages_merged
+			   > uksm_thrash_threshold) {
 			ret = 0;
 		} else {
 			ret = ret * (slot->pages_merged - slot->pages_cowed)
@@ -4057,24 +4110,7 @@ static void uksm_del_vma_slot(struct vma_slot *slot)
 	struct rmap_list_entry *entry;
 	struct vma_slot *tmp;
 
-	/* mutex lock contention maybe intensive, other idea ? */
-	BUG_ON(list_empty(&slot->uksm_list) || !slot->rung);
-
-	if (slot->rung->current_scan == &slot->uksm_list)
-		advance_current_scan(slot->rung);
-
-	list_del_init(&slot->uksm_list);
-	slot->rung->vma_num--;
-	slot->rung->pages -= slot->pages;
-	if (slot->flags & UKSM_SLOT_FUL_SCANNED)
-		slot->rung->fully_scanned_slots--;
-
-	/* In case advance_current_scan loop back to this slot again */
-	if (slot->rung->current_scan == &slot->uksm_list)
-		reset_current_scan(slot->rung, 1);
-
-	BUG_ON(slot->rung->current_scan == &slot->rung->vma_list
-	       && !list_empty(&slot->rung->vma_list));
+	rung_rm_slot(slot);
 
 	if (slot->uksm_index == -1)
 		goto skip;
@@ -4181,35 +4217,6 @@ static inline unsigned long rung_real_ratio(int cpu_time_ratio)
 		ret = -cpu_time_ratio * uksm_max_cpu_percentage / 100;
 
 	return ret ? ret : 1;
-}
-
-static inline
-void uksm_calc_rung_step(struct scan_rung *rung,
-			 unsigned long page_time, unsigned long ratio)
-{
-	unsigned long sampled;
-
-	/* will be fully scanned ? */
-	if (!rung->cover_msecs) {
-		rung->step = 1;
-		return;
-	}
-
-	sampled = rung->cover_msecs * (NSEC_PER_MSEC / TIME_RATIO_SCALE)
-		  * ratio / page_time;
-
-	/*
-	 *  Before we finsish a scan round and expensive per-round jobs,
-	 *  we need to have a chance to estimate the per page time. So
-	 *  the sampled number can not be too small.
-	 */
-	if (sampled < PAGE_AVG_PERIOD * 2)
-		sampled = PAGE_AVG_PERIOD * 2;
-
-	if (likely(rung->pages > sampled))
-		rung->step = rung->pages / sampled;
-	else
-		rung->step = 1;
 }
 
 /*
@@ -4506,15 +4513,7 @@ static int uksm_vma_enter(struct vma_slot *slot)
 
 	BUG_ON(!list_empty(&slot->uksm_list));
 
-	list_add_tail(&slot->uksm_list, &rung->vma_list);
-	slot->rung = rung;
-	rung->vma_num++;
-	rung->pages += slot->pages;
-	if (list_is_singular(&rung->vma_list)) {
-		reset_rung_scan(rung);
-		reset_current_scan(rung, 0);
-	}
-
+	rung_add_slot(rung, slot);
 
 	BUG_ON(PAGE_SIZE % sizeof(struct rmap_list_entry) != 0);
 
