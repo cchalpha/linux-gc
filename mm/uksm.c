@@ -4089,14 +4089,15 @@ static void round_update_ladder(void)
 
 		list_for_each_entry(slot, &uksm_scan_ladder[i].vma_list,
 				    uksm_list) {
-			slot->last_scanned = slot->pages_scanned;
 			slot->flags &= ~UKSM_SLOT_SCANNED;
 			slot->pages_cowed = 0;
 			slot->pages_merged = 0;
 			if (slot->flags & UKSM_SLOT_FUL_SCANNED) {
 				slot->flags &= ~UKSM_SLOT_FUL_SCANNED;
 				uksm_scan_ladder[i].fully_scanned_slots--;
+				slot->pages_scanned = slot->pages;
 			}
+			slot->last_scanned = slot->pages_scanned;
 			BUG_ON(slot->uksm_index != -1);
 		}
 
