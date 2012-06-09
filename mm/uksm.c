@@ -4320,6 +4320,8 @@ static void uksm_do_scan(void)
 
 	rest_pages = 0;
 	vpages = 0;
+
+	cleanup_vma_slots();
 	start_time = task_sched_runtime(current);
 	max_cpu_ratio = 0;
 
@@ -4425,6 +4427,8 @@ busy:
 		if (freezing(current))
 			break;
 	}
+	end_time = task_sched_runtime(current);
+	delta_exec = end_time - start_time;
 
 	if (freezing(current))
 		return;
@@ -4468,41 +4472,9 @@ busy:
 		free_all_tree_nodes(&unstable_tree_node_list);
 	}
 
-	for (i = 0; i < SCAN_LADDER_SIZE; i++) {
-		struct scan_rung *rung = &uksm_scan_ladder[i];
 
-		/*
-		 * Before we can go sleep, we should make sure that all the
-		 * pages_to_scan quota for this scan has been finished
-		 */
-		if (!list_empty(&rung->vma_list) && rung->pages_to_scan)
-			goto repeat_all;
-	}
-
-	end_time = task_sched_runtime(current);
-
-	if (unlikely(!vpages || round_finished)) {
-		/* Reset the timer for an empty period and the expensive
-		   round_update_ladder()  */
-		sum_exec_runtime = 0;
-		goto out;
-	} else {
-		scanned_virtual_pages += vpages;
-	}
-
-	if (likely(sum_exec_runtime)) {
-		delta_exec = end_time - sum_exec_runtime;
-		BUG_ON(delta_exec > ULONG_MAX || delta_exec < -ULONG_MAX);
-	} else {
-		sum_exec_runtime = end_time;
-		scanned_virtual_pages = 0;
-		delta_exec = 0;
-	}
-
-	if (scanned_virtual_pages >= PAGE_AVG_PERIOD && delta_exec > 0) {
-		pcost = (unsigned long) delta_exec / scanned_virtual_pages;
-		sum_exec_runtime = end_time;
-		scanned_virtual_pages = 0;
+	if (vpages && delta_exec > 0) {
+		pcost = (unsigned long) delta_exec / vpages;
 		if (likely(uksm_ema_page_time))
 			uksm_ema_page_time = ema(pcost, uksm_ema_page_time);
 		else
@@ -4519,7 +4491,7 @@ out:
 		expected_jiffies = msecs_to_jiffies(
 			scan_time_to_sleep(scan_time, max_cpu_ratio));
 
-		if (expected_jiffies > uksm_sleep_jiffies)
+		if (expected_jiffies)
 			uksm_sleep_real = expected_jiffies;
 	}
 
