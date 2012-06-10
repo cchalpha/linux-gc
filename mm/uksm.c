@@ -286,7 +286,7 @@ struct rmap_item {
 	struct page *page;
 	unsigned long address;	/* + low bits used for flags below */
 	/* Appendded to (un)stable tree on which scan round */
-	unsigned long append_round;
+	unsigned long stable_round;
 	unsigned long entry_index;
 	union {
 		struct {/* when in unstable tree */
@@ -368,8 +368,17 @@ static struct kmem_cache *tree_node_cache;
 #define SCAN_LADDER_SIZE 4
 static struct scan_rung uksm_scan_ladder[SCAN_LADDER_SIZE];
 
-/* The scan rounds ksmd is currently in */
-static unsigned long long uksm_scan_round = 1;
+/* The evaluation rounds uksmd has finished */
+static unsigned long long uksm_eval_round = 1;
+
+/*
+ * we add 1 to this var when we consider we should rebuild the whole
+ * unstable tree.
+ */
+static unsigned long long uksm_stable_round = 1;
+
+/* The total number of virtual pages of all vma slots */
+static u64 uksm_pages_total;
 
 /* The number of pages has been scanned since the start up */
 static u64 uksm_pages_scanned;
@@ -417,7 +426,7 @@ struct uksm_cpu_preset_s {
 };
 
 struct uksm_cpu_preset_s uksm_cpu_preset[4] = {
-	{ {10, 50, -2500, -10000}, {500, 600, 400, 0}, 95},
+	{ {10, 50, -2500, -10000}, {600, 600, 400, 0}, 95},
 	{ {10, 50, -2500, -10000}, {1000, 600, 400, 0}, 50},
 	{ {25, 50, -5000, -10000}, {1000, 1000, 1000, 0}, 20},
 	{ {25, 50, 70, 80}, {1000, 1000, 1000, 0}, 1},
@@ -426,13 +435,13 @@ struct uksm_cpu_preset_s uksm_cpu_preset[4] = {
 #define PAGE_AVG_PERIOD		10
 #define RUNG_SAMPLED_MIN	(PAGE_AVG_PERIOD * 2)
 
-static unsigned long scanned_virtual_pages;
+static u64 scanned_virtual_pages;
 
 static unsigned long long sum_exec_runtime;
 
 
 /* The default value for uksm_ema_page_time if it's not initialized */
-#define UKSM_PAGE_TIME_DEFAULT	5000
+#define UKSM_PAGE_TIME_DEFAULT	2000
 
 /*cost to scan one page by expotional moving average in nsecs */
 static unsigned long uksm_ema_page_time = UKSM_PAGE_TIME_DEFAULT;
@@ -859,7 +868,7 @@ static inline void remove_rmap_item_from_tree(struct rmap_item *rmap_item)
 		 * if this rmap_item was inserted by this scan, rather
 		 * than left over from before.
 		 */
-		if (rmap_item->append_round == uksm_scan_round) {
+		if (rmap_item->stable_round == uksm_stable_round) {
 			rb_erase(&rmap_item->node,
 				 &rmap_item->tree_node->sub_root);
 			if (RB_EMPTY_ROOT(&rmap_item->tree_node->sub_root)) {
@@ -1346,7 +1355,8 @@ out:
 
 #define MERGE_ERR_PGERR		1 /* the page is invalid cannot continue */
 #define MERGE_ERR_COLLI		2 /* there is a collision */
-#define MERGE_ERR_CHANGED	3 /* the page has changed since last hash */
+#define MERGE_ERR_COLLI_MAX	3 /* collision at the max hash strength */
+#define MERGE_ERR_CHANGED	4 /* the page has changed since last hash */
 
 
 /**
@@ -1739,12 +1749,16 @@ static int try_to_merge_two_pages(struct rmap_item *rmap_item,
 		goto out; /* success */
 
 	} else {
-		if (page_hash(page, hash_strength, 0) ==
+		if (tree_rmap_item->hash_max &&
+		    tree_rmap_item->hash_max == rmap_item->hash_max) {
+			err = MERGE_ERR_COLLI_MAX;
+		} else if (page_hash(page, hash_strength, 0) ==
 		    page_hash(tree_page, hash_strength, 0)) {
 			inc_rshash_neg(memcmp_cost + hash_strength * 2);
 			err = MERGE_ERR_COLLI;
-		} else
+		} else {
 			err = MERGE_ERR_CHANGED;
+		}
 
 		unlock_page(tree_page);
 	}
@@ -2359,7 +2373,7 @@ struct rmap_item *unstable_tree_search_insert(struct rmap_item *rmap_item,
 	/* did not found even in sub-tree */
 	rmap_item->tree_node = tree_node;
 	rmap_item->address |= UNSTABLE_FLAG;
-	rmap_item->append_round = uksm_scan_round;
+	rmap_item->stable_round = uksm_stable_round;
 	rb_link_node(&rmap_item->node, parent, new);
 	rb_insert_color(&rmap_item->node, &tree_node->sub_root);
 
@@ -2502,7 +2516,7 @@ static void stable_tree_append(struct rmap_item *rmap_item,
 
 	BUG_ON(!stable_node);
 	rmap_item->address |= STABLE_FLAG;
-	rmap_item->append_round = uksm_scan_round;
+	rmap_item->stable_round = uksm_stable_round;
 
 	if (hlist_empty(&stable_node->hlist)) {
 		uksm_pages_shared++;
@@ -2512,7 +2526,7 @@ static void stable_tree_append(struct rmap_item *rmap_item,
 	}
 
 	hlist_for_each_entry(node_vma, hlist, &stable_node->hlist, hlist) {
-		if (node_vma->last_update == uksm_scan_round)
+		if (node_vma->last_update == uksm_eval_round)
 			inc_dup_vma(rmap_item->slot, node_vma->slot);
 
 		if (node_vma->key >= key)
@@ -2522,7 +2536,7 @@ static void stable_tree_append(struct rmap_item *rmap_item,
 	cont_p = hlist;
 
 	if (node_vma && node_vma->key == key) {
-		if (node_vma->last_update == uksm_scan_round) {
+		if (node_vma->last_update == uksm_eval_round) {
 			/**
 			 * we consider this page a inner duplicate, cancel
 			 * other updates
@@ -2534,7 +2548,7 @@ static void stable_tree_append(struct rmap_item *rmap_item,
 
 				/* only need to increase the same vma */
 				if (node_vma_iter->last_update ==
-				    uksm_scan_round) {
+				    uksm_eval_round) {
 					dec_dup_vma(rmap_item->slot,
 						    node_vma_iter->slot);
 				}
@@ -2547,7 +2561,7 @@ static void stable_tree_append(struct rmap_item *rmap_item,
 			hlist_for_each_entry_continue(node_vma_iter,
 						      hlist, hlist) {
 				if (node_vma_iter->last_update ==
-				    uksm_scan_round) {
+				    uksm_eval_round) {
 					inc_dup_vma(rmap_item->slot,
 						    node_vma_iter->slot);
 				}
@@ -2574,7 +2588,7 @@ node_vma_new:
 			hlist_for_each_entry_continue(node_vma_iter, cont_p,
 						      hlist) {
 				if (node_vma_iter->last_update ==
-				    uksm_scan_round) {
+				    uksm_eval_round) {
 					inc_dup_vma(rmap_item->slot,
 						    node_vma_iter->slot);
 				}
@@ -2589,7 +2603,7 @@ node_vma_new:
 node_vma_ok: /* ok, ready to add to the list */
 	rmap_item->head = node_vma;
 	hlist_add_head(&rmap_item->hlist, &node_vma->rmap_hlist);
-	node_vma->last_update = uksm_scan_round;
+	node_vma->last_update = uksm_eval_round;
 	hold_anon_vma(rmap_item, rmap_item->slot->vma->anon_vma);
 	rmap_item->slot->pages_merged++;
 }
@@ -2865,11 +2879,10 @@ static void cmp_and_merge_page(struct rmap_item *rmap_item)
 				break_cow(tree_rmap_item);
 
 		} else if (err == MERGE_ERR_COLLI) {
-			if (tree_rmap_item->tree_node->count == 1) {
-				rmap_item_hash_max(tree_rmap_item,
-				tree_rmap_item->tree_node->hash);
-			} else
-				BUG_ON(!(tree_rmap_item->hash_max));
+			BUG_ON(tree_rmap_item->tree_node->count > 1);
+
+			rmap_item_hash_max(tree_rmap_item,
+					   tree_rmap_item->tree_node->hash);
 
 			hash_max = rmap_item_hash_max(rmap_item, hash);
 			cmp = hash_cmp(hash_max, tree_rmap_item->hash_max);
@@ -2883,11 +2896,18 @@ static void cmp_and_merge_page(struct rmap_item *rmap_item)
 
 			rmap_item->tree_node = tree_rmap_item->tree_node;
 			rmap_item->address |= UNSTABLE_FLAG;
-			rmap_item->append_round = uksm_scan_round;
+			rmap_item->stable_round = uksm_stable_round;
 			rb_link_node(&rmap_item->node, parent, new);
 			rb_insert_color(&rmap_item->node,
 					&tree_rmap_item->tree_node->sub_root);
 			rmap_item->tree_node->count++;
+		} else {
+			/*
+			 * either one of the page has changed or they collide
+			 * at the max hash, we consider them as ill items.
+			 */
+			remove_rmap_item_from_tree(tree_rmap_item);
+			remove_rmap_item_from_tree(rmap_item);
 		}
 put_up_out:
 		put_page(tree_rmap_item->page);
@@ -3825,7 +3845,7 @@ static inline int judge_rshash_direction(void)
 	int ret = STILL;
 
 	/* In case the system are still for a long time. */
-	if (uksm_scan_round % 1024 == 3) {
+	if (uksm_eval_round % 1024 == 3) {
 		ret = OBSCURE;
 		goto out;
 	}
@@ -4174,6 +4194,8 @@ skip:
 
 out:
 	slot->rung = NULL;
+	BUG_ON(uksm_pages_total < slot->pages);
+	uksm_pages_total -= slot->pages;
 	free_vma_slot(slot);
 	BUG_ON(!uksm_vma_slot_num);
 	uksm_vma_slot_num--;
@@ -4217,9 +4239,6 @@ static noinline unsigned long ema(unsigned long curr, unsigned long last_ema)
 	 */
 	if (curr > last_ema * 10)
 		return last_ema * 2;
-
-	if (curr < last_ema / 10)
-		return last_ema / 2;
 
 	return (EMA_ALPHA * curr + (100 - EMA_ALPHA) * last_ema) / 100;
 }
@@ -4266,10 +4285,10 @@ static void uksm_calc_scan_pages(void)
 	BUG_ON(!per_page);
 
 	/*
-	 * For every 64 scan round, we try to probe a uksm_sleep_jiffies value
+	 * For every 64 eval round, we try to probe a uksm_sleep_jiffies value
 	 * based on saved user input.
 	 */
-	if (((unsigned long) uksm_scan_round & (64UL - 1)) == 0UL)
+	if (((unsigned long) uksm_eval_round & (64UL - 1)) == 0UL)
 		uksm_sleep_jiffies = uksm_sleep_saved;
 
 	/* We require a rung scan at least 1 page in a period. */
@@ -4354,6 +4373,8 @@ static int uksm_vma_enter(struct vma_slot *slot)
 	       !list_empty(&rung->vma_list));
 
 	uksm_vma_slot_num++;
+	BUG_ON(CAN_OVERFLOW_U64(uksm_pages_total, slot->pages));
+	uksm_pages_total += slot->pages;
 	BUG_ON(!uksm_vma_slot_num);
 	return 1;
 
@@ -4400,6 +4421,16 @@ static void uksm_enter_all_slots(void)
 	}
 	spin_unlock(&vma_slot_list_lock);
 }
+
+/*
+ * What is the best way to decide this?
+ */
+static inline int stable_round_finished(void)
+{
+	return scanned_virtual_pages > uksm_pages_total;
+}
+
+
 
 #define UKSM_MMSEM_BATCH	5
 
@@ -4544,6 +4575,8 @@ busy:
 	}
 	end_time = task_sched_runtime(current);
 	delta_exec = end_time - start_time;
+	BUG_ON(CAN_OVERFLOW_U64(scanned_virtual_pages, vpages));
+	scanned_virtual_pages += vpages;
 
 	if (freezing(current))
 		return;
@@ -4568,6 +4601,7 @@ busy:
 
 	if (round_finished) {
 		round_update_ladder();
+		uksm_eval_round++;
 
 		/*
 		 * A number of pages can hang around indefinitely on per-cpu
@@ -4581,14 +4615,17 @@ busy:
 		 */
 		lru_add_drain_all();
 
-		/* sync with uksm_remove_vma for rb_erase */
-		uksm_scan_round++;
-		root_unstable_tree = RB_ROOT;
-		free_all_tree_nodes(&unstable_tree_node_list);
+		/* When will update the whole unstable tree? */
+		if (stable_round_finished()) {
+			scanned_virtual_pages = 0;
+			uksm_stable_round++;
+			root_unstable_tree = RB_ROOT;
+			free_all_tree_nodes(&unstable_tree_node_list);
+		}
 	}
 
 
-	if (vpages > 10 && delta_exec > 0) {
+	if (vpages && delta_exec > 0) {
 		pcost = (unsigned long) delta_exec / vpages;
 		if (likely(uksm_ema_page_time))
 			uksm_ema_page_time = ema(pcost, uksm_ema_page_time);
@@ -5250,7 +5287,7 @@ UKSM_ATTR_RO(pages_unshared);
 static ssize_t full_scans_show(struct kobject *kobj,
 			       struct kobj_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%llu\n", uksm_scan_round);
+	return sprintf(buf, "%llu\n", uksm_eval_round);
 }
 UKSM_ATTR_RO(full_scans);
 
