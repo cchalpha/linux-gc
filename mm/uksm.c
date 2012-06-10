@@ -4241,6 +4241,7 @@ static noinline void uksm_do_scan(void)
 
 
 			if (slot->flags & UKSM_SLOT_FUL_SCANNED) {
+				BUG_ON(mmsem_batch);
 				advance_current_scan(rung);
 				continue;
 			}
@@ -4311,6 +4312,13 @@ busy:
 
 			cond_resched();
 		}
+
+		if (mmsem_batch) {
+			up_read(&slot->vma->vm_mm->mmap_sem);
+			mmsem_batch = 0;
+		}
+
+
 
 		/*
 		 * if a higher rung is fully scanned, its rest pages should be
