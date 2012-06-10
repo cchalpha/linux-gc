@@ -417,7 +417,7 @@ struct uksm_cpu_preset_s {
 };
 
 struct uksm_cpu_preset_s uksm_cpu_preset[4] = {
-	{ {10, 50, -2500, -10000}, {800, 500, 400, 0}, 95},
+	{ {10, 50, -2500, -10000}, {500, 600, 400, 0}, 95},
 	{ {10, 50, -2500, -10000}, {1000, 600, 400, 0}, 50},
 	{ {25, 50, -5000, -10000}, {1000, 1000, 1000, 0}, 20},
 	{ {25, 50, 70, 80}, {1000, 1000, 1000, 0}, 1},
@@ -4022,7 +4022,7 @@ static void free_vma_dup_tree(struct vma_slot *slot)
  * round_update_ladder() - The main function to do update of all the
  * adjustments whenever a scan round is finished.
  */
-static void round_update_ladder(void)
+static noinline void round_update_ladder(void)
 {
 	int i;
 	struct vma_slot *slot, *tmp_slot;
@@ -4047,12 +4047,21 @@ static void round_update_ladder(void)
 		slot = radix_tree_lookup(&uksm_vma_tree, i);
 
 		if (slot) {
-			if (slot->dedup_ratio &&
-			    slot->dedup_ratio >= threshold) {
+			/*
+			 * If a slot is fully scanned, it's quite possible that
+			 * all the pages in it has been merged. We return it
+			 * back to the lowest. Only one exception - we are
+			 * doing very aggressive scan.
+			 */
+			if (slot->flags & UKSM_SLOT_FUL_SCANNED &&
+			    slot->rung != &uksm_scan_ladder[0] &&
+			    uksm_thrash_threshold)
+				vma_rung_enter(slot, &uksm_scan_ladder[0]);
+			else if (slot->dedup_ratio &&
+				 slot->dedup_ratio >= threshold)
 				vma_rung_up(slot);
-			} else {
+			else
 				vma_rung_down(slot);
-			}
 
 			free_vma_dup_tree(slot);
 			radix_tree_delete(&uksm_vma_tree, i);
@@ -4068,16 +4077,19 @@ static void round_update_ladder(void)
 		list_for_each_entry_safe(slot, tmp_slot,
 					 &uksm_scan_ladder[i].vma_list,
 					 uksm_list) {
+
+			BUG_ON(slot->dedup_ratio != 0);
+			if (slot->flags & UKSM_SLOT_FUL_SCANNED &&
+			    slot->rung != &uksm_scan_ladder[0])
+				vma_rung_enter(slot, &uksm_scan_ladder[0]);
+
 			/*
 			 * The slots were scanned but not in inter_tab, their
 			 * dedup must be 0.
 			 */
-			if (slot->flags & UKSM_SLOT_SCANNED) {
-				BUG_ON(slot->dedup_ratio != 0);
+			if (slot->flags & UKSM_SLOT_SCANNED)
 				vma_rung_down(slot);
-			}
-
-			slot->dedup_ratio = 0;
+			//slot->dedup_ratio = 0;
 		}
 	}
 
@@ -4300,210 +4312,6 @@ unsigned int scan_time_to_sleep(unsigned long long scan_time, unsigned long rati
 			       (TIME_RATIO_SCALE - ratio) / ratio);
 }
 
-/**
- * uksm_do_scan()  - the main worker function.
- */
-static void uksm_do_scan(void)
-{
-	struct vma_slot *slot, *iter;
-	struct list_head *iter_head;
-	struct mm_struct *busy_mm;
-	unsigned char round_finished, all_rungs_emtpy;
-	int i, err;
-	unsigned long rest_pages;
-	unsigned long pcost;
-	long long delta_exec;
-	unsigned long vpages, max_cpu_ratio;
-	unsigned long long start_time, end_time, scan_time;
-	unsigned int expected_jiffies;
-
-	might_sleep();
-
-	rest_pages = 0;
-	vpages = 0;
-
-	cleanup_vma_slots();
-	start_time = task_sched_runtime(current);
-	max_cpu_ratio = 0;
-
-repeat_all:
-	for (i = SCAN_LADDER_SIZE - 1; i >= 0; i--) {
-		struct scan_rung *rung = &uksm_scan_ladder[i];
-
-		if (!rung->pages_to_scan && !rest_pages)
-			continue;
-
-		if (list_empty(&rung->vma_list)) {
-			rung->pages_to_scan = 0;
-			continue;
-		}
-
-		if (!max_cpu_ratio)
-			max_cpu_ratio = rung_real_ratio(rung->cpu_ratio);
-
-		rung->pages_to_scan += rest_pages;
-		while (rung->pages_to_scan && likely(!freezing(current))
-		       && !rung_covered(rung)) {
-cleanup:
-			cleanup_vma_slots();
-
-			if (list_empty(&rung->vma_list))
-				break;
-
-rescan:
-			BUG_ON(rung->current_scan == &rung->vma_list &&
-			       !list_empty(&rung->vma_list));
-
-			slot = list_entry(rung->current_scan,
-					 struct vma_slot, uksm_list);
-
-
-			if (slot->flags & UKSM_SLOT_FUL_SCANNED){
-				advance_current_scan(rung);
-				continue;
-			}
-
-			err = try_down_read_slot_mmap_sem(slot);
-			if (err == -ENOENT)
-				goto cleanup;
-
-			busy_mm = slot->mm;
-
-busy:
-			if (err == -EBUSY) {
-				/* skip other vmas on the same mm */
-				do {
-					iter_head = advance_current_scan(rung);
-					iter = list_entry(iter_head,
-							  struct vma_slot,
-							  uksm_list);
-					if (iter->vma->vm_mm != busy_mm)
-						break;
-				} while (!(rung->flags & UKSM_RUNG_ROUND_FINISHED));
-
-				if (!(rung->flags & UKSM_RUNG_ROUND_FINISHED)) {
-					BUG_ON(rung->current_scan != &iter->uksm_list);
-					goto rescan;
-				} else {
-					/* scan round finsished */
-					break;
-				}
-			}
-
-			BUG_ON(!vma_can_enter(slot->vma));
-			if (uksm_test_exit(slot->vma->vm_mm)) {
-				busy_mm = slot->vma->vm_mm;
-				up_read(&slot->vma->vm_mm->mmap_sem);
-				err = -EBUSY;
-				goto busy;
-			}
-
-			/* Ok, we have take the mmap_sem, ready to scan */
-			scan_vma_one_page(slot);
-			up_read(&slot->vma->vm_mm->mmap_sem);
-			rung->pages_to_scan--;
-			vpages++;
-
-			if (rung->current_offset + rung->step > slot->pages - 1
-			    || (slot->flags & UKSM_SLOT_FUL_SCANNED))
-				advance_current_scan(rung);
-			else
-				rung->current_offset += rung->step;
-
-			cond_resched();
-		}
-
-		/*
-		 * if a higher rung is fully scanned, its rest pages should be
-		 * propagated to the lower rungs. This can prevent the higher
-		 * rung from waiting a long time while it still has its
-		 * pages_to_scan quota.
-		 *
-		 */
-		if (rung_covered(rung)) {
-			rest_pages += rung->pages_to_scan;
-			rung->pages_to_scan = 0;
-		}
-
-		if (freezing(current))
-			break;
-	}
-	end_time = task_sched_runtime(current);
-	delta_exec = end_time - start_time;
-
-	if (freezing(current))
-		return;
-
-	round_finished = 1;
-	all_rungs_emtpy = 1;
-	for (i = 0; i < SCAN_LADDER_SIZE; i++) {
-		struct scan_rung *rung = &uksm_scan_ladder[i];
-
-		if (!list_empty(&rung->vma_list)) {
-			all_rungs_emtpy = 0;
-			if (!(rung->flags & UKSM_RUNG_ROUND_FINISHED))
-				round_finished = 0;
-			break;
-		}
-	}
-
-	if (all_rungs_emtpy)
-		round_finished = 0;
-
-	cleanup_vma_slots();
-
-	if (round_finished) {
-		round_update_ladder();
-
-		/*
-		 * A number of pages can hang around indefinitely on per-cpu
-		 * pagevecs, raised page count preventing write_protect_page
-		 * from merging them.  Though it doesn't really matter much,
-		 * it is puzzling to see some stuck in pages_volatile until
-		 * other activity jostles them out, and they also prevented
-		 * LTP's KSM test from succeeding deterministically; so drain
-		 * them here (here rather than on entry to uksm_do_scan(),
-		 * so we don't IPI too often when pages_to_scan is set low).
-		 */
-		lru_add_drain_all();
-
-		/* sync with uksm_remove_vma for rb_erase */
-		uksm_scan_round++;
-		root_unstable_tree = RB_ROOT;
-		free_all_tree_nodes(&unstable_tree_node_list);
-	}
-
-
-	if (vpages && delta_exec > 0) {
-		pcost = (unsigned long) delta_exec / vpages;
-		if (likely(uksm_ema_page_time))
-			uksm_ema_page_time = ema(pcost, uksm_ema_page_time);
-		else
-			uksm_ema_page_time = pcost;
-	}
-
-out:
-	uksm_calc_scan_pages();
-
-	uksm_sleep_real = uksm_sleep_jiffies;
-	/* in case of radical cpu bursts, apply the upper bound */
-	if (max_cpu_ratio) {
-		scan_time = end_time - start_time;
-		expected_jiffies = msecs_to_jiffies(
-			scan_time_to_sleep(scan_time, max_cpu_ratio));
-
-		if (expected_jiffies)
-			uksm_sleep_real = expected_jiffies;
-	}
-
-	return;
-}
-
-static int ksmd_should_run(void)
-{
-	return uksm_run & UKSM_RUN_MERGE;
-}
-
 #define __round_mask(x, y) ((__typeof__(x))((y)-1))
 #define round_up(x, y) ((((x)-1) | __round_mask(x, y))+1)
 
@@ -4513,14 +4321,6 @@ static inline unsigned long vma_pool_size(struct vm_area_struct *vma)
 			PAGE_SIZE) >> PAGE_SHIFT;
 }
 
-/**
- *
- *
- *
- * @param slot
- *
- * @return int , 1 on success, 0 on failure
- */
 static int uksm_vma_enter(struct vma_slot *slot)
 {
 	struct scan_rung *rung;
@@ -4561,7 +4361,6 @@ failed:
 	return 0;
 }
 
-
 static void uksm_enter_all_slots(void)
 {
 	struct vma_slot *slot;
@@ -4601,6 +4400,219 @@ static void uksm_enter_all_slots(void)
 	}
 	spin_unlock(&vma_slot_list_lock);
 }
+
+#define UKSM_MMSEM_BATCH	5
+
+/**
+ * uksm_do_scan()  - the main worker function.
+ */
+static noinline void uksm_do_scan(void)
+{
+	struct vma_slot *slot, *iter;
+	struct list_head *iter_head;
+	struct mm_struct *busy_mm;
+	unsigned char round_finished, all_rungs_emtpy;
+	int i, err, mmsem_batch;
+	unsigned long rest_pages;
+	unsigned long pcost;
+	long long delta_exec;
+	unsigned long vpages, max_cpu_ratio;
+	unsigned long long start_time, end_time, scan_time;
+	unsigned int expected_jiffies;
+
+	might_sleep();
+
+	rest_pages = 0;
+	vpages = 0;
+
+	uksm_enter_all_slots();
+	start_time = task_sched_runtime(current);
+	max_cpu_ratio = 0;
+	mmsem_batch = 0;
+
+	for (i = SCAN_LADDER_SIZE - 1; i >= 0; i--) {
+		struct scan_rung *rung = &uksm_scan_ladder[i];
+
+		if (!rung->pages_to_scan && !rest_pages)
+			continue;
+
+		if (list_empty(&rung->vma_list)) {
+			rung->pages_to_scan = 0;
+			continue;
+		}
+
+		if (!max_cpu_ratio)
+			max_cpu_ratio = rung_real_ratio(rung->cpu_ratio);
+
+		rung->pages_to_scan += rest_pages;
+		while (rung->pages_to_scan && likely(!freezing(current))
+		       && !rung_covered(rung)) {
+
+			BUG_ON(rung->current_scan == &rung->vma_list &&
+			       !list_empty(&rung->vma_list));
+
+			slot = list_entry(rung->current_scan,
+					 struct vma_slot, uksm_list);
+
+
+			if (slot->flags & UKSM_SLOT_FUL_SCANNED) {
+				advance_current_scan(rung);
+				continue;
+			}
+
+			if (mmsem_batch) {
+				err = 0;
+			} else {
+				err = try_down_read_slot_mmap_sem(slot);
+			}
+
+			if (err == -ENOENT) {
+				advance_current_scan(rung);
+				continue;
+			}
+
+			busy_mm = slot->mm;
+
+busy:
+			if (err == -EBUSY) {
+				/* skip other vmas on the same mm */
+				do {
+					iter_head = advance_current_scan(rung);
+					iter = list_entry(iter_head,
+							  struct vma_slot,
+							  uksm_list);
+					if (iter->vma->vm_mm != busy_mm)
+						break;
+				} while (!(rung->flags & UKSM_RUNG_ROUND_FINISHED));
+
+				if (!(rung->flags & UKSM_RUNG_ROUND_FINISHED)) {
+					BUG_ON(rung->current_scan != &iter->uksm_list);
+					continue;
+				} else {
+					/* scan round finsished */
+					break;
+				}
+			}
+
+			BUG_ON(!vma_can_enter(slot->vma));
+			if (uksm_test_exit(slot->vma->vm_mm)) {
+				busy_mm = slot->vma->vm_mm;
+				mmsem_batch = 0;
+				up_read(&slot->vma->vm_mm->mmap_sem);
+				err = -EBUSY;
+				goto busy;
+			}
+
+			if (mmsem_batch)
+				mmsem_batch--;
+			else
+				mmsem_batch = UKSM_MMSEM_BATCH;
+
+			/* Ok, we have take the mmap_sem, ready to scan */
+			scan_vma_one_page(slot);
+			rung->pages_to_scan--;
+			vpages++;
+
+			if (rung->current_offset + rung->step > slot->pages - 1
+			    || (slot->flags & UKSM_SLOT_FUL_SCANNED)) {
+				advance_current_scan(rung);
+				up_read(&slot->vma->vm_mm->mmap_sem);
+				mmsem_batch = 0;
+			} else {
+				rung->current_offset += rung->step;
+				if (!mmsem_batch)
+					up_read(&slot->vma->vm_mm->mmap_sem);
+			}
+
+			cond_resched();
+		}
+
+		/*
+		 * if a higher rung is fully scanned, its rest pages should be
+		 * propagated to the lower rungs. This can prevent the higher
+		 * rung from waiting a long time while it still has its
+		 * pages_to_scan quota.
+		 *
+		 */
+		if (rung_covered(rung)) {
+			rest_pages += rung->pages_to_scan;
+			rung->pages_to_scan = 0;
+		}
+
+		if (freezing(current))
+			break;
+	}
+	end_time = task_sched_runtime(current);
+	delta_exec = end_time - start_time;
+
+	if (freezing(current))
+		return;
+
+	cleanup_vma_slots();
+
+	round_finished = 1;
+	all_rungs_emtpy = 1;
+	for (i = 0; i < SCAN_LADDER_SIZE; i++) {
+		struct scan_rung *rung = &uksm_scan_ladder[i];
+
+		if (!list_empty(&rung->vma_list)) {
+			all_rungs_emtpy = 0;
+			if (!(rung->flags & UKSM_RUNG_ROUND_FINISHED))
+				round_finished = 0;
+			break;
+		}
+	}
+
+	if (all_rungs_emtpy)
+		round_finished = 0;
+
+	if (round_finished) {
+		round_update_ladder();
+
+		/*
+		 * A number of pages can hang around indefinitely on per-cpu
+		 * pagevecs, raised page count preventing write_protect_page
+		 * from merging them.  Though it doesn't really matter much,
+		 * it is puzzling to see some stuck in pages_volatile until
+		 * other activity jostles them out, and they also prevented
+		 * LTP's KSM test from succeeding deterministically; so drain
+		 * them here (here rather than on entry to uksm_do_scan(),
+		 * so we don't IPI too often when pages_to_scan is set low).
+		 */
+		lru_add_drain_all();
+
+		/* sync with uksm_remove_vma for rb_erase */
+		uksm_scan_round++;
+		root_unstable_tree = RB_ROOT;
+		free_all_tree_nodes(&unstable_tree_node_list);
+	}
+
+
+	if (vpages > 10 && delta_exec > 0) {
+		pcost = (unsigned long) delta_exec / vpages;
+		if (likely(uksm_ema_page_time))
+			uksm_ema_page_time = ema(pcost, uksm_ema_page_time);
+		else
+			uksm_ema_page_time = pcost;
+	}
+
+out:
+	uksm_calc_scan_pages();
+
+	uksm_sleep_real = uksm_sleep_jiffies;
+	/* in case of radical cpu bursts, apply the upper bound */
+	if (max_cpu_ratio) {
+		scan_time = task_sched_runtime(current) - start_time;
+		expected_jiffies = msecs_to_jiffies(
+			scan_time_to_sleep(scan_time, max_cpu_ratio));
+
+		if (expected_jiffies)
+			uksm_sleep_real = expected_jiffies;
+	}
+
+	return;
+}
+
 
 static int uksm_usr_support_init(void)
 {
@@ -4673,6 +4685,11 @@ out:
 	return;
 }
 
+static int ksmd_should_run(void)
+{
+	return uksm_run & UKSM_RUN_MERGE;
+}
+
 static int uksm_scan_thread(void *nothing)
 {
 	set_freezable();
@@ -4683,7 +4700,6 @@ static int uksm_scan_thread(void *nothing)
 
 		mutex_lock(&uksm_thread_mutex);
 		if (ksmd_should_run()) {
-			uksm_enter_all_slots();
 			uksm_do_scan();
 		}
 		mutex_unlock(&uksm_thread_mutex);
