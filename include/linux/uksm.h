@@ -29,8 +29,6 @@ struct vma_slot {
 	struct list_head slot_list;
 	unsigned long dedup_ratio;
 	unsigned long dedup_num;
-	int uksm_index; /* -1 if vma is not in inter-table,
-				positive otherwise */
 	unsigned long pages_scanned;
 	unsigned long last_scanned;
 	unsigned long pages_to_scan;
@@ -46,8 +44,8 @@ struct vma_slot {
 	unsigned long pages_cowed; /* pages cowed this round */
 	unsigned long pages_merged; /* pages merged this round */
 
-	/* used for dup vma pair */
-	struct radix_tree_root dup_tree;
+	/* when it has page merged in this eval round */
+	struct list_head dedup_list;
 };
 
 static inline void uksm_unmap_zero_page(pte_t pte)

@@ -437,8 +437,6 @@ struct uksm_cpu_preset_s uksm_cpu_preset[4] = {
 
 static u64 scanned_virtual_pages;
 
-static unsigned long long sum_exec_runtime;
-
 
 /* The default value for uksm_ema_page_time if it's not initialized */
 #define UKSM_PAGE_TIME_DEFAULT	2000
@@ -457,15 +455,8 @@ static unsigned long uksm_ema_page_time = UKSM_PAGE_TIME_DEFAULT;
  */
 static unsigned int uksm_thrash_threshold = 50;
 
-#define INDIRECT_OFFSET		1
-
-/*
- * For mapping of vma_slot and its index in inter-vma duplication number
- * table
- */
-static struct radix_tree_root uksm_vma_tree;
-static unsigned long uksm_vma_tree_num;
-static unsigned long uksm_vma_tree_index_end;
+/* All slots having merged pages in this eval round. */
+struct list_head vma_slot_dedup = LIST_HEAD_INIT(vma_slot_dedup);
 
 /* The number of VMAs we are keeping track of */
 static unsigned long uksm_vma_slot_num;
@@ -626,8 +617,7 @@ static inline struct vma_slot *alloc_vma_slot(void)
 	if (slot) {
 		INIT_LIST_HEAD(&slot->uksm_list);
 		INIT_LIST_HEAD(&slot->slot_list);
-		INIT_RADIX_TREE(&slot->dup_tree, GFP_KERNEL);
-		slot->uksm_index = -1;
+		INIT_LIST_HEAD(&slot->dedup_list);
 		slot->flags |= UKSM_SLOT_NEED_RERAND;
 	}
 	return slot;
@@ -2390,110 +2380,6 @@ get_page_out:
 	return tree_rmap_item;
 }
 
-static void enter_vma_tree(struct vma_slot *slot)
-{
-	unsigned long i;
-	int ret;
-
-	i = uksm_vma_tree_index_end;
-
-	ret = radix_tree_insert(&uksm_vma_tree, i, slot);
-	BUG_ON(ret);
-
-	slot->uksm_index = i;
-	uksm_vma_tree_num++;
-	uksm_vma_tree_index_end++;
-}
-
-static inline void get_sub_dup_vma(struct vma_slot **slot,
-				   struct vma_slot **sub_slot)
-{
-	struct vma_slot *tmp;
-
-	if ((*slot)->uksm_index > (*sub_slot)->uksm_index) {
-		tmp = *slot;
-		*slot = *sub_slot;
-		*sub_slot = tmp;
-	}
-}
-
-/*
- * Inc or dec the dup pages stored in a slot, return the dup page num after
- * the operation.
- */
-static inline unsigned long dup_pages_mod(void **slot, int inc)
-{
-	unsigned long item, ret;
-
-	item = (unsigned long)(*slot) >> INDIRECT_OFFSET;
-	if (inc) {
-		item++;
-		BUG_ON(!item);
-	} else {
-		BUG_ON(!item);
-		item--;
-	}
-	ret = item;
-	item <<= INDIRECT_OFFSET;
-	*slot = (void *)item;
-
-	return ret;
-}
-
-static void inc_dup_vma(struct vma_slot *slot,	struct vma_slot *sub_slot)
-{
-	void **dup_slot;
-	unsigned long dup_pages;
-	int ret;
-
-	if (slot->uksm_index == -1)
-		enter_vma_tree(slot);
-
-	if (sub_slot->uksm_index == -1)
-		enter_vma_tree(sub_slot);
-
-	get_sub_dup_vma(&slot, &sub_slot);
-
-	dup_slot = radix_tree_lookup_slot(&slot->dup_tree, sub_slot->uksm_index);
-	if (dup_slot)
-		goto found;
-
-	/*
-	 * In order to store dup_pages in radix tree, we must make
-	 * radix_tree_is_indirect_ptr() happy.
-	 */
-	dup_pages = 1 << INDIRECT_OFFSET;
-
-	/* no such entry yet, insert one */
-	ret = radix_tree_insert(&slot->dup_tree, sub_slot->uksm_index,
-				(void *)dup_pages);
-	BUG_ON(ret);
-
-	return;
-
-found:
-	dup_pages_mod(dup_slot, 1);
-}
-
-static void dec_dup_vma(struct vma_slot *slot, struct vma_slot *sub_slot)
-{
-	void **dup_slot;
-	unsigned long dup_pages;
-
-	BUG_ON(slot->uksm_index == -1 || sub_slot->uksm_index == -1);
-
-	get_sub_dup_vma(&slot, &sub_slot);
-
-	dup_slot = radix_tree_lookup_slot(&slot->dup_tree, sub_slot->uksm_index);
-	BUG_ON(!dup_slot);
-
-	dup_pages = dup_pages_mod(dup_slot, 0);
-
-	/* dup_pages == 0, we need to kick it out */
-	if (!dup_pages)
-		radix_tree_delete(&slot->dup_tree, sub_slot->uksm_index);
-}
-
 static void hold_anon_vma(struct rmap_item *rmap_item,
 			  struct anon_vma *anon_vma)
 {
@@ -2510,8 +2396,8 @@ static void hold_anon_vma(struct rmap_item *rmap_item,
 static void stable_tree_append(struct rmap_item *rmap_item,
 			       struct stable_node *stable_node)
 {
-	struct node_vma *node_vma = NULL, *new_node_vma, *node_vma_iter = NULL;
-	struct hlist_node *hlist, *cont_p = NULL;
+	struct node_vma *node_vma = NULL, *new_node_vma;
+	struct hlist_node *hlist;
 	unsigned long key = (unsigned long)rmap_item->slot;
 
 	BUG_ON(!stable_node);
@@ -2526,51 +2412,12 @@ static void stable_tree_append(struct rmap_item *rmap_item,
 	}
 
 	hlist_for_each_entry(node_vma, hlist, &stable_node->hlist, hlist) {
-		if (node_vma->last_update == uksm_eval_round)
-			inc_dup_vma(rmap_item->slot, node_vma->slot);
-
 		if (node_vma->key >= key)
 			break;
 	}
 
-	cont_p = hlist;
-
-	if (node_vma && node_vma->key == key) {
-		if (node_vma->last_update == uksm_eval_round) {
-			/**
-			 * we consider this page a inner duplicate, cancel
-			 * other updates
-			 */
-			hlist_for_each_entry(node_vma_iter, hlist,
-					     &stable_node->hlist, hlist) {
-				if (node_vma_iter->key == key)
-					break;
-
-				/* only need to increase the same vma */
-				if (node_vma_iter->last_update ==
-				    uksm_eval_round) {
-					dec_dup_vma(rmap_item->slot,
-						    node_vma_iter->slot);
-				}
-			}
-		} else {
-			/**
-			 * Although it's same vma, it contains no duplicate for this
-			 * round. Continue scan other vma.
-			 */
-			hlist_for_each_entry_continue(node_vma_iter,
-						      hlist, hlist) {
-				if (node_vma_iter->last_update ==
-				    uksm_eval_round) {
-					inc_dup_vma(rmap_item->slot,
-						    node_vma_iter->slot);
-				}
-			}
-
-		}
-
+	if (node_vma && node_vma->key == key)
 		goto node_vma_ok;
-	}
 
 node_vma_new:
 	/* no same vma already in node, alloc a new node_vma */
@@ -2585,14 +2432,6 @@ node_vma_new:
 		if (node_vma->key < key)
 			hlist_add_after(&node_vma->hlist, &new_node_vma->hlist);
 		else {
-			hlist_for_each_entry_continue(node_vma_iter, cont_p,
-						      hlist) {
-				if (node_vma_iter->last_update ==
-				    uksm_eval_round) {
-					inc_dup_vma(rmap_item->slot,
-						    node_vma_iter->slot);
-				}
-			}
 			hlist_add_before(&new_node_vma->hlist,
 					 &node_vma->hlist);
 		}
@@ -2606,6 +2445,10 @@ node_vma_ok: /* ok, ready to add to the list */
 	node_vma->last_update = uksm_eval_round;
 	hold_anon_vma(rmap_item, rmap_item->slot->vma->anon_vma);
 	rmap_item->slot->pages_merged++;
+	if (rmap_item->slot->pages_merged == 1) {
+		BUG_ON(!list_empty(&rmap_item->slot->dedup_list));
+		list_add(&rmap_item->slot->dedup_list, &vma_slot_dedup);
+	}
 }
 
 /*
@@ -2802,8 +2645,12 @@ static void cmp_and_merge_page(struct rmap_item *rmap_item)
 	/*if the page content all zero, re-map to zero-page*/
 	if (find_zero_page_hash(hash_strength, hash)) {
 		if (!cmp_and_merge_zero_page(rmap_item->slot->vma, page)) {
-			inc_dup_vma(rmap_item->slot, rmap_item->slot);
 			rmap_item->slot->pages_merged++;
+			if (rmap_item->slot->pages_merged == 1) {
+				BUG_ON(!list_empty(&rmap_item->slot->dedup_list));
+				list_add(&rmap_item->slot->dedup_list, &vma_slot_dedup);
+			}
+
 			__inc_zone_page_state(page, NR_UKSM_ZERO_PAGES);
 			dec_mm_counter(rmap_item->slot->mm, MM_ANONPAGES);
 			return ;
@@ -3513,68 +3360,15 @@ static inline void vma_rung_down(struct vma_slot *slot)
 /**
  * cal_dedup_ratio() - Calculate the deduplication ratio for this slot.
  */
-static unsigned long cal_dedup_ratio(struct vma_slot *slot)
+static noinline unsigned long cal_dedup_ratio(struct vma_slot *slot)
 {
-	struct vma_slot *slot2;
-	void **dup_slot;
-	unsigned long dup_pages;
-	unsigned long dedup_num, pages1, scanned1;
-	unsigned long ret;
-	int i;
-
-	if (!slot->pages_scanned)
-		return 0;
-
-	pages1 = slot->pages;
-	scanned1 = slot->pages_scanned - slot->last_scanned;
-	BUG_ON(scanned1 > slot->pages_scanned);
-
-
-	for (i = slot->uksm_index; i < uksm_vma_tree_index_end; i++) {
-		unsigned long pages2, scanned2;
-
-		dup_slot = radix_tree_lookup_slot(&slot->dup_tree, i);
-		if (!dup_slot)
-			continue;
-
-		dup_pages = (unsigned long)(*dup_slot) >> INDIRECT_OFFSET;
-
-		if (i == slot->uksm_index) {
-			/* inner deduplication */
-			BUG_ON(!scanned1);
-			dedup_num = dup_pages * pages1 / scanned1;
-		} else {
-			slot2 = radix_tree_lookup(&uksm_vma_tree, i);
-			BUG_ON(!slot2 || !slot2->pages_scanned);
-
-			pages2 = slot2->pages;
-			scanned2 = slot2->pages_scanned - slot2->last_scanned;
-			BUG_ON(scanned2 > slot2->pages_scanned);
-
-			BUG_ON(!scanned1 || !scanned2);
-
-			dedup_num = dup_pages * pages1 / scanned1 * pages2 / scanned2;
-			slot2->dedup_num += dedup_num;
-		}
-		slot->dedup_num += dedup_num;
+	if (slot->pages_scanned == slot->last_scanned) {
+		printk(KERN_ERR "SCANNED=%lu last=%lu", slot->pages_scanned , slot->last_scanned);
+		BUG();
 	}
 
-	ret = (slot->dedup_num * 100 / pages1);
-
-	/* Thrashing area filtering */
-	if (uksm_thrash_threshold) {
-		if (slot->pages_cowed > slot->pages_merged) {
-			ret = 0;
-		} else if (slot->pages_cowed * 100 / slot->pages_merged
-			   > uksm_thrash_threshold) {
-			ret = 0;
-		} else {
-			ret = ret * (slot->pages_merged - slot->pages_cowed)
-			      / slot->pages_merged;
-		}
-	}
-
-	return ret;
+	return slot->pages_merged * 10 * slot->pages /
+		(slot->pages_scanned - slot->last_scanned);
 }
 
 
@@ -4019,78 +3813,49 @@ static void rshash_adjust(void)
 		stable_tree_delta_hash(prev_hash_strength);
 }
 
-static void free_vma_dup_tree(struct vma_slot *slot)
-{
-	struct vma_slot *tmp_slot;
-	int i;
-
-	/* step 1: free entries in smaller vmas' dup tree */
-	for (i = 0; i < slot->uksm_index; i++) {
-		tmp_slot = radix_tree_lookup(&uksm_vma_tree, i);
-		if (tmp_slot)
-			radix_tree_delete(&tmp_slot->dup_tree, slot->uksm_index);
-	}
-
-	/* step 2: free my own dup tree */
-	for (i = slot->uksm_index; i < uksm_vma_tree_index_end; i++)
-		radix_tree_delete(&slot->dup_tree, i);
-
-	BUG_ON(slot->dup_tree.rnode);
-}
-
 /**
  * round_update_ladder() - The main function to do update of all the
  * adjustments whenever a scan round is finished.
  */
 static noinline void round_update_ladder(void)
 {
-	int i;
+	int i, n = 0;
 	struct vma_slot *slot, *tmp_slot;
-	unsigned long dedup_ratio_max = 0, dedup_ratio_mean = 0;
+	unsigned long dedup_ratio_mean = 0;
 	unsigned long threshold;
 
-	for (i = 0; i < uksm_vma_tree_index_end; i++) {
-		slot = radix_tree_lookup(&uksm_vma_tree, i);
-
-		if (slot) {
-			slot->dedup_ratio = cal_dedup_ratio(slot);
-			if (dedup_ratio_max < slot->dedup_ratio)
-				dedup_ratio_max = slot->dedup_ratio;
-			dedup_ratio_mean += slot->dedup_ratio;
-		}
+	list_for_each_entry(slot, &vma_slot_dedup, dedup_list) {
+		slot->dedup_ratio = cal_dedup_ratio(slot);
+		dedup_ratio_mean += slot->dedup_ratio;
+		n++;
 	}
 
-	dedup_ratio_mean /= uksm_vma_slot_num;
+	if (n)
+		dedup_ratio_mean /= n;
+
 	threshold = dedup_ratio_mean;
 
-	for (i = 0; i < uksm_vma_tree_index_end; i++) {
-		slot = radix_tree_lookup(&uksm_vma_tree, i);
+	list_for_each_entry_safe(slot, tmp_slot, &vma_slot_dedup, dedup_list) {
+		/*
+		 * If a slot is fully scanned, it's quite possible that
+		 * all the pages in it has been merged. We return it
+		 * back to the lowest. Only one exception - we are
+		 * doing very aggressive scan.
+		 */
+		if (slot->flags & UKSM_SLOT_FUL_SCANNED &&
+		    slot->rung != &uksm_scan_ladder[0] &&
+		    uksm_thrash_threshold)
+			vma_rung_enter(slot, &uksm_scan_ladder[0]);
+		else if (slot->dedup_ratio &&
+			 slot->dedup_ratio >= threshold)
+			vma_rung_up(slot);
+		else
+			vma_rung_down(slot);
 
-		if (slot) {
-			/*
-			 * If a slot is fully scanned, it's quite possible that
-			 * all the pages in it has been merged. We return it
-			 * back to the lowest. Only one exception - we are
-			 * doing very aggressive scan.
-			 */
-			if (slot->flags & UKSM_SLOT_FUL_SCANNED &&
-			    slot->rung != &uksm_scan_ladder[0] &&
-			    uksm_thrash_threshold)
-				vma_rung_enter(slot, &uksm_scan_ladder[0]);
-			else if (slot->dedup_ratio &&
-				 slot->dedup_ratio >= threshold)
-				vma_rung_up(slot);
-			else
-				vma_rung_down(slot);
-
-			free_vma_dup_tree(slot);
-			radix_tree_delete(&uksm_vma_tree, i);
-			uksm_vma_tree_num--;
-			slot->uksm_index = -1;
-			slot->flags &= ~UKSM_SLOT_SCANNED;
-			slot->dedup_ratio = 0;
-			slot->dedup_num = 0;
-		}
+		slot->flags &= ~UKSM_SLOT_SCANNED;
+		slot->dedup_ratio = 0;
+		slot->pages_merged = 0;
+		list_del_init(&slot->dedup_list);
 	}
 
 	for (i = 0; i < SCAN_LADDER_SIZE; i++) {
@@ -4109,12 +3874,9 @@ static noinline void round_update_ladder(void)
 			 */
 			if (slot->flags & UKSM_SLOT_SCANNED)
 				vma_rung_down(slot);
-			//slot->dedup_ratio = 0;
 		}
 	}
-
-	BUG_ON(uksm_vma_tree_num != 0);
-	uksm_vma_tree_index_end = 0;
+	/* Ok, finished rung up and down operations. */
 
 	for (i = 0; i < SCAN_LADDER_SIZE; i++) {
 		uksm_scan_ladder[i].flags &= ~UKSM_RUNG_ROUND_FINISHED;
@@ -4123,14 +3885,15 @@ static noinline void round_update_ladder(void)
 				    uksm_list) {
 			slot->flags &= ~UKSM_SLOT_SCANNED;
 			slot->pages_cowed = 0;
-			slot->pages_merged = 0;
+			BUG_ON(slot->pages_merged != 0);
+			BUG_ON(slot->dedup_ratio != 0);
+			BUG_ON(!list_empty(&slot->dedup_list));
 			if (slot->flags & UKSM_SLOT_FUL_SCANNED) {
 				slot->flags &= ~UKSM_SLOT_FUL_SCANNED;
 				uksm_scan_ladder[i].fully_scanned_slots--;
 				slot->pages_scanned = slot->pages;
 			}
 			slot->last_scanned = slot->pages_scanned;
-			BUG_ON(slot->uksm_index != -1);
 		}
 
 		BUG_ON(uksm_scan_ladder[i].fully_scanned_slots);
@@ -4148,21 +3911,12 @@ static void uksm_del_vma_slot(struct vma_slot *slot)
 {
 	int i, j;
 	struct rmap_list_entry *entry;
-	struct vma_slot *tmp;
 
 	rung_rm_slot(slot);
 
-	if (slot->uksm_index == -1)
-		goto skip;
+	if (!list_empty(&slot->dedup_list))
+		list_del(&slot->dedup_list);
 
-	tmp = radix_tree_delete(&uksm_vma_tree, slot->uksm_index);
-	BUG_ON(!tmp || tmp != slot);
-	free_vma_dup_tree(slot);
-	uksm_vma_tree_num--;
-	if (slot->uksm_index == uksm_vma_tree_index_end - 1)
-		uksm_vma_tree_index_end--;
-
-skip:
 	if (!slot->rmap_list_pool)
 		goto out;
 
@@ -4592,7 +4346,6 @@ busy:
 			all_rungs_emtpy = 0;
 			if (!(rung->flags & UKSM_RUNG_ROUND_FINISHED))
 				round_finished = 0;
-			break;
 		}
 	}
 
@@ -4633,9 +4386,7 @@ busy:
 			uksm_ema_page_time = pcost;
 	}
 
-out:
 	uksm_calc_scan_pages();
-
 	uksm_sleep_real = uksm_sleep_jiffies;
 	/* in case of radical cpu bursts, apply the upper bound */
 	if (max_cpu_ratio) {
@@ -5594,8 +5345,6 @@ static int __init uksm_init(void)
 	uksm_sleep_saved = uksm_sleep_jiffies;
 
 	init_scan_ladder();
-
-	INIT_RADIX_TREE(&uksm_vma_tree, GFP_KERNEL);
 
 	err = init_random_sampling();
 	if (err)
