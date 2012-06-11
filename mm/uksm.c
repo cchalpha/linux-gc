@@ -3329,10 +3329,6 @@ static inline void rung_rm_slot(struct vma_slot *slot)
 
 static inline void rung_add_slot(struct scan_rung *rung, struct vma_slot *slot)
 {
-//	printk(KERN_ERR "slot=%s pages=%lu pages_scanned=%lu enter rung=%lu",
-//	       slot->vma->vm_mm->owner->comm, slot->pages, slot->pages_scanned,
-//	       rung - uksm_scan_ladder);
-
 	list_add_tail(&slot->uksm_list, &rung->vma_list);
 	slot->rung = rung;
 	rung->vma_num++;
