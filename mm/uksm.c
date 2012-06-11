@@ -455,6 +455,9 @@ static unsigned long uksm_ema_page_time = UKSM_PAGE_TIME_DEFAULT;
  */
 static unsigned int uksm_thrash_threshold = 50;
 
+/* How much dedup ratio is considered to be abundant*/
+static unsigned int uksm_abundant_threshold = 10;
+
 /* All slots having merged pages in this eval round. */
 struct list_head vma_slot_dedup = LIST_HEAD_INIT(vma_slot_dedup);
 
@@ -3326,9 +3329,9 @@ static inline void rung_rm_slot(struct vma_slot *slot)
 
 static inline void rung_add_slot(struct scan_rung *rung, struct vma_slot *slot)
 {
-	printk(KERN_ERR "slot=%s pages=%lu pages_scanned=%lu enter rung=%lu",
-	       slot->vma->vm_mm->owner->comm, slot->pages, slot->pages_scanned,
-	       rung - uksm_scan_ladder);
+//	printk(KERN_ERR "slot=%s pages=%lu pages_scanned=%lu enter rung=%lu",
+//	       slot->vma->vm_mm->owner->comm, slot->pages, slot->pages_scanned,
+//	       rung - uksm_scan_ladder);
 
 	list_add_tail(&slot->uksm_list, &rung->vma_list);
 	slot->rung = rung;
@@ -3373,16 +3376,23 @@ static inline void vma_rung_down(struct vma_slot *slot)
  */
 static noinline unsigned long cal_dedup_ratio(struct vma_slot *slot)
 {
-	if (slot->pages_scanned == slot->last_scanned) {
-		while (1) {
-			printk(KERN_ERR "slot=%p SCANNED=%lu last=%lu",
-			       slot, slot->pages_scanned , slot->last_scanned);
+	unsigned long ret;
+
+	ret = slot->pages_merged * 100 /
+		(slot->pages_scanned - slot->last_scanned);
+
+	/* Thrashing area filtering */
+	if (uksm_thrash_threshold) {
+		if (slot->pages_cowed * 100 / slot->pages_merged
+		    > uksm_thrash_threshold) {
+			ret = 0;
+		} else {
+			ret = ret * (slot->pages_merged - slot->pages_cowed)
+			      / slot->pages_merged;
 		}
-		BUG();
 	}
 
-	return slot->pages_merged * 10 * slot->pages /
-		(slot->pages_scanned - slot->last_scanned);
+	return ret;
 }
 
 
@@ -3847,7 +3857,7 @@ static noinline void round_update_ladder(void)
 	if (n)
 		dedup_ratio_mean /= n;
 
-	threshold = dedup_ratio_mean;
+	threshold = uksm_abundant_threshold;
 
 	list_for_each_entry_safe(slot, tmp_slot, &vma_slot_dedup, dedup_list) {
 		/*
@@ -4228,7 +4238,6 @@ static noinline void uksm_do_scan(void)
 	rest_pages = 0;
 	vpages = 0;
 
-	uksm_enter_all_slots();
 	start_time = task_sched_runtime(current);
 	max_cpu_ratio = 0;
 	mmsem_batch = 0;
@@ -4336,8 +4345,6 @@ busy:
 			mmsem_batch = 0;
 		}
 
-
-
 		/*
 		 * if a higher rung is covered but not fully scanned, it is
 		 * waiting to be judged, its rest pages should be propagated
@@ -4365,6 +4372,7 @@ busy:
 		return;
 
 	cleanup_vma_slots();
+	uksm_enter_all_slots();
 
 	round_finished = 1;
 	all_rungs_emtpy = 1;
