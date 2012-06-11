@@ -426,10 +426,10 @@ struct uksm_cpu_preset_s {
 };
 
 struct uksm_cpu_preset_s uksm_cpu_preset[4] = {
-	{ {10, 50, -2500, -10000}, {600, 600, 400, 0}, 95},
-	{ {10, 50, -2500, -10000}, {1000, 600, 400, 0}, 50},
-	{ {25, 50, -5000, -10000}, {1000, 1000, 1000, 0}, 20},
-	{ {25, 50, 70, 80}, {1000, 1000, 1000, 0}, 1},
+	{ {10, 50, -2500, -10000}, {1000, 500, 200, 0}, 95},
+	{ {10, 50, -2500, -10000}, {1000, 500, 400, 0}, 50},
+	{ {5, 25, -5000, -10000}, {1000, 1000, 1000, 0}, 20},
+	{ {5, 25, 50, 75}, {2000, 2000, 1000, 0}, 1},
 };
 
 #define PAGE_AVG_PERIOD		10
@@ -439,7 +439,7 @@ static u64 scanned_virtual_pages;
 
 
 /* The default value for uksm_ema_page_time if it's not initialized */
-#define UKSM_PAGE_TIME_DEFAULT	2000
+#define UKSM_PAGE_TIME_DEFAULT	500
 
 /*cost to scan one page by expotional moving average in nsecs */
 static unsigned long uksm_ema_page_time = UKSM_PAGE_TIME_DEFAULT;
@@ -2394,7 +2394,7 @@ static void hold_anon_vma(struct rmap_item *rmap_item,
  *
  */
 static void stable_tree_append(struct rmap_item *rmap_item,
-			       struct stable_node *stable_node)
+			       struct stable_node *stable_node, int logdedup)
 {
 	struct node_vma *node_vma = NULL, *new_node_vma;
 	struct hlist_node *hlist;
@@ -2444,10 +2444,12 @@ node_vma_ok: /* ok, ready to add to the list */
 	hlist_add_head(&rmap_item->hlist, &node_vma->rmap_hlist);
 	node_vma->last_update = uksm_eval_round;
 	hold_anon_vma(rmap_item, rmap_item->slot->vma->anon_vma);
-	rmap_item->slot->pages_merged++;
-	if (rmap_item->slot->pages_merged == 1) {
-		BUG_ON(!list_empty(&rmap_item->slot->dedup_list));
-		list_add(&rmap_item->slot->dedup_list, &vma_slot_dedup);
+	if (logdedup) {
+		rmap_item->slot->pages_merged++;
+		if (rmap_item->slot->pages_merged == 1) {
+			BUG_ON(!list_empty(&rmap_item->slot->dedup_list));
+			list_add(&rmap_item->slot->dedup_list, &vma_slot_dedup);
+		}
 	}
 }
 
@@ -2672,7 +2674,8 @@ static void cmp_and_merge_page(struct rmap_item *rmap_item)
 			 * racing with try_to_unmap_ksm(), etc.
 			 */
 			lock_page(kpage);
-			stable_tree_append(rmap_item, page_stable_node(kpage));
+			snode = page_stable_node(kpage);
+			stable_tree_append(rmap_item, snode, 1);
 			unlock_page(kpage);
 			put_page(kpage);
 			return; /* success */
@@ -2707,9 +2710,13 @@ static void cmp_and_merge_page(struct rmap_item *rmap_item)
 						   &success1, &success2);
 
 			if (success1)
-				stable_tree_append(rmap_item, snode);
+				stable_tree_append(rmap_item, snode, 1);
+			/*
+			 * Do not log dedup for tree item, it's not counted as
+			 * scanned in this round.
+			 */
 			if (success2)
-				stable_tree_append(tree_rmap_item, snode);
+				stable_tree_append(tree_rmap_item, snode, 0);
 
 			/*
 			 * The original kpage may be unlocked inside
@@ -3319,6 +3326,10 @@ static inline void rung_rm_slot(struct vma_slot *slot)
 
 static inline void rung_add_slot(struct scan_rung *rung, struct vma_slot *slot)
 {
+	printk(KERN_ERR "slot=%s pages=%lu pages_scanned=%lu enter rung=%lu",
+	       slot->vma->vm_mm->owner->comm, slot->pages, slot->pages_scanned,
+	       rung - uksm_scan_ladder);
+
 	list_add_tail(&slot->uksm_list, &rung->vma_list);
 	slot->rung = rung;
 	rung->vma_num++;
@@ -3363,7 +3374,10 @@ static inline void vma_rung_down(struct vma_slot *slot)
 static noinline unsigned long cal_dedup_ratio(struct vma_slot *slot)
 {
 	if (slot->pages_scanned == slot->last_scanned) {
-		printk(KERN_ERR "SCANNED=%lu last=%lu", slot->pages_scanned , slot->last_scanned);
+		while (1) {
+			printk(KERN_ERR "slot=%p SCANNED=%lu last=%lu",
+			       slot, slot->pages_scanned , slot->last_scanned);
+		}
 		BUG();
 	}
 
@@ -3899,6 +3913,7 @@ static noinline void round_update_ladder(void)
 		BUG_ON(uksm_scan_ladder[i].fully_scanned_slots);
 	}
 
+	BUG_ON(!list_empty(&vma_slot_dedup));
 	rshash_adjust();
 }
 
@@ -4038,11 +4053,14 @@ static void uksm_calc_scan_pages(void)
 	per_page = uksm_ema_page_time;
 	BUG_ON(!per_page);
 
+	if (((unsigned long) uksm_eval_round & (4UL - 1)) == 0UL)
+		uksm_sleep_jiffies = uksm_sleep_saved;
+
 	/*
 	 * For every 64 eval round, we try to probe a uksm_sleep_jiffies value
 	 * based on saved user input.
 	 */
-	if (((unsigned long) uksm_eval_round & (64UL - 1)) == 0UL)
+	if (((unsigned long) uksm_eval_round & (8UL - 1)) == 0UL)
 		uksm_sleep_jiffies = uksm_sleep_saved;
 
 	/* We require a rung scan at least 1 page in a period. */
@@ -4181,7 +4199,7 @@ static void uksm_enter_all_slots(void)
  */
 static inline int stable_round_finished(void)
 {
-	return scanned_virtual_pages > uksm_pages_total;
+	return (scanned_virtual_pages >> 2) > uksm_pages_total;
 }
 
 
@@ -4221,7 +4239,7 @@ static noinline void uksm_do_scan(void)
 		if (!rung->pages_to_scan && !rest_pages)
 			continue;
 
-		if (list_empty(&rung->vma_list)) {
+		if (list_empty(&rung->vma_list) || rung_fully_scanned(rung)) {
 			rung->pages_to_scan = 0;
 			continue;
 		}
@@ -4321,13 +4339,16 @@ busy:
 
 
 		/*
-		 * if a higher rung is fully scanned, its rest pages should be
-		 * propagated to the lower rungs. This can prevent the higher
-		 * rung from waiting a long time while it still has its
-		 * pages_to_scan quota.
+		 * if a higher rung is covered but not fully scanned, it is
+		 * waiting to be judged, its rest pages should be propagated
+		 * to the lower rungs. This can prevent the higher rung from
+		 * waiting a long time while it still has its pages_to_scan
+		 * quota. For a fully scanned rung, we don't have to worry
+		 * since it will not be scanned until the next round.
 		 *
 		 */
-		if (rung_covered(rung)) {
+		if (!rung_fully_scanned(rung) &&
+		    rung->flags & UKSM_RUNG_ROUND_FINISHED) {
 			rest_pages += rung->pages_to_scan;
 			rung->pages_to_scan = 0;
 		}
@@ -4402,7 +4423,7 @@ busy:
 		expected_jiffies = msecs_to_jiffies(
 			scan_time_to_sleep(scan_time, max_cpu_ratio));
 
-		if (expected_jiffies)
+		if (expected_jiffies > uksm_sleep_real)
 			uksm_sleep_real = expected_jiffies;
 	}
 
@@ -5349,7 +5370,7 @@ static int __init uksm_init(void)
 	struct task_struct *uksm_thread;
 	int err;
 
-	uksm_sleep_jiffies = msecs_to_jiffies(200);
+	uksm_sleep_jiffies = msecs_to_jiffies(100);
 	uksm_sleep_saved = uksm_sleep_jiffies;
 
 	init_scan_ladder();
