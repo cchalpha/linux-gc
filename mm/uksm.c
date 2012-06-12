@@ -219,7 +219,7 @@ struct scan_rung {
 	 * scanned? If it's zero, we don't care about the cover time:
 	 * it's fully scanned.
 	 */
-	unsigned long cover_msecs;
+	unsigned int cover_msecs;
 	unsigned long vma_num;
 	unsigned long pages; /* Sum of all slot's pages in rung */
 };
@@ -237,7 +237,7 @@ struct tree_node {
 	struct rb_node node; /* link in the main (un)stable rbtree */
 	struct rb_root sub_root; /* rb_root for sublevel collision rbtree */
 	u32 hash;
-	unsigned long count; /* how many sublevel tree nodes */
+	unsigned long count; /* TODO: merged with sub_root */
 	struct list_head all_list; /* all tree nodes in stable/unstable tree */
 };
 
@@ -375,7 +375,7 @@ static unsigned long long uksm_eval_round = 1;
  * we add 1 to this var when we consider we should rebuild the whole
  * unstable tree.
  */
-static unsigned long long uksm_stable_round = 1;
+static unsigned long uksm_stable_round = 1;
 
 /* The total number of virtual pages of all vma slots */
 static u64 uksm_pages_total;
@@ -388,6 +388,7 @@ static u64 uksm_pages_scanned_last;
 
 /* If the scanned number is tooo large, we encode it here */
 static u64 pages_scanned_stored;
+
 static unsigned long pages_scanned_base;
 
 /* The number of nodes in the stable tree */
@@ -413,7 +414,7 @@ static unsigned int uksm_sleep_real;
 static unsigned int uksm_sleep_saved;
 
 /* Max percentage of cpu utilization ksmd can take to scan in one batch */
-static unsigned long uksm_max_cpu_percentage;
+static unsigned int uksm_max_cpu_percentage;
 
 static int uksm_cpu_governor;
 
@@ -421,8 +422,8 @@ static char *uksm_cpu_governor_str[4] = { "full", "medium", "low", "quiet" };
 
 struct uksm_cpu_preset_s {
 	int cpu_ratio[SCAN_LADDER_SIZE];
-	unsigned long cover_msecs[SCAN_LADDER_SIZE];
-	unsigned long max_cpu; /* percentage */
+	unsigned int cover_msecs[SCAN_LADDER_SIZE];
+	unsigned int max_cpu; /* percentage */
 };
 
 struct uksm_cpu_preset_s uksm_cpu_preset[4] = {
@@ -432,11 +433,7 @@ struct uksm_cpu_preset_s uksm_cpu_preset[4] = {
 	{ {5, 25, 50, 75}, {2000, 2000, 1000, 0}, 1},
 };
 
-#define PAGE_AVG_PERIOD		10
-#define RUNG_SAMPLED_MIN	(PAGE_AVG_PERIOD * 2)
-
 static u64 scanned_virtual_pages;
-
 
 /* The default value for uksm_ema_page_time if it's not initialized */
 #define UKSM_PAGE_TIME_DEFAULT	500
@@ -465,7 +462,7 @@ struct list_head vma_slot_dedup = LIST_HEAD_INIT(vma_slot_dedup);
 static unsigned long uksm_vma_slot_num;
 
 /* How many times the ksmd has slept since startup */
-static u64 uksm_sleep_times;
+static unsigned long long uksm_sleep_times;
 
 #define UKSM_RUN_STOP	0
 #define UKSM_RUN_MERGE	1
@@ -3269,6 +3266,9 @@ struct list_head *advance_current_scan(struct scan_rung *rung)
 	}
 }
 
+
+#define RUNG_SAMPLED_MIN	10
+
 static inline
 void uksm_calc_rung_step(struct scan_rung *rung,
 			 unsigned long page_time, unsigned long ratio)
@@ -4052,18 +4052,15 @@ static void uksm_calc_scan_pages(void)
 	int i;
 	unsigned long per_page;
 
-	if (uksm_ema_page_time > 100000) {
+	if (uksm_ema_page_time > 1000000 ||
+	    (((unsigned long) uksm_eval_round & (4UL - 1)) == 0UL))
 		uksm_ema_page_time = UKSM_PAGE_TIME_DEFAULT;
-	}
 
 	per_page = uksm_ema_page_time;
 	BUG_ON(!per_page);
 
-	if (((unsigned long) uksm_eval_round & (4UL - 1)) == 0UL)
-		uksm_sleep_jiffies = uksm_sleep_saved;
-
 	/*
-	 * For every 64 eval round, we try to probe a uksm_sleep_jiffies value
+	 * For every 8 eval round, we try to probe a uksm_sleep_jiffies value
 	 * based on saved user input.
 	 */
 	if (((unsigned long) uksm_eval_round & (8UL - 1)) == 0UL)
@@ -4430,6 +4427,8 @@ busy:
 		if (expected_jiffies > uksm_sleep_real)
 			uksm_sleep_real = expected_jiffies;
 	}
+
+	BUG_ON(jiffies_to_msecs(uksm_sleep_real) > MSEC_PER_SEC * 10);
 
 	return;
 }
@@ -4810,7 +4809,7 @@ static int uksm_memory_callback(struct notifier_block *self,
 static ssize_t max_cpu_percentage_show(struct kobject *kobj,
 				    struct kobj_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%lu\n", uksm_max_cpu_percentage);
+	return sprintf(buf, "%u\n", uksm_max_cpu_percentage);
 }
 
 static ssize_t max_cpu_percentage_store(struct kobject *kobj,
@@ -4849,7 +4848,7 @@ static ssize_t sleep_millisecs_store(struct kobject *kobj,
 	int err;
 
 	err = strict_strtoul(buf, 10, &msecs);
-	if (err || msecs > UINT_MAX)
+	if (err || msecs > MSEC_PER_SEC)
 		return -EINVAL;
 
 	uksm_sleep_jiffies = msecs_to_jiffies(msecs);
@@ -5016,6 +5015,28 @@ static ssize_t usr_spt_flags_store(struct kobject *kobj, struct kobj_attribute *
 }
 UKSM_ATTR(usr_spt_flags);
 
+static ssize_t abundant_threshold_show(struct kobject *kobj,
+				     struct kobj_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%u\n", uksm_abundant_threshold);
+}
+
+static ssize_t abundant_threshold_store(struct kobject *kobj,
+				      struct kobj_attribute *attr,
+				      const char *buf, size_t count)
+{
+	int err;
+	unsigned long flags;
+
+	err = strict_strtoul(buf, 10, &flags);
+	if (err || flags > 99)
+		return -EINVAL;
+
+	uksm_abundant_threshold = flags;
+
+	return count;
+}
+UKSM_ATTR(abundant_threshold);
 
 static ssize_t thrash_threshold_show(struct kobject *kobj,
 				     struct kobj_attribute *attr, char *buf)
@@ -5039,6 +5060,144 @@ static ssize_t thrash_threshold_store(struct kobject *kobj,
 	return count;
 }
 UKSM_ATTR(thrash_threshold);
+
+static ssize_t cpu_ratios_show(struct kobject *kobj,
+			       struct kobj_attribute *attr, char *buf)
+{
+	int i, size;
+	struct scan_rung *rung;
+	char *p = buf;
+
+	for (i = 0; i < SCAN_LADDER_SIZE; i++) {
+		rung = &uksm_scan_ladder[i];
+
+		if (rung->cpu_ratio > 0)
+			size = sprintf(p, "%d ", rung->cpu_ratio);
+		else
+			size = sprintf(p, "MAX/%d ",
+					TIME_RATIO_SCALE / -rung->cpu_ratio);
+
+		p += size;
+	}
+
+	*p++ = '\n';
+	*p = '\0';
+
+	return p - buf;
+}
+
+static ssize_t cpu_ratios_store(struct kobject *kobj,
+				      struct kobj_attribute *attr,
+				      const char *buf, size_t count)
+{
+	int i, cpuratios[SCAN_LADDER_SIZE], err;
+	unsigned long value;
+	struct scan_rung *rung;
+	char *p, *end = NULL;
+
+	p = kzalloc(count, GFP_KERNEL);
+	if (!p)
+		return -ENOMEM;
+
+	memcpy(p, buf, count);
+
+	for (i = 0; i < SCAN_LADDER_SIZE; i++) {
+		if (i != SCAN_LADDER_SIZE -1) {
+			end = strchr(p, ' ');
+			if (!end)
+				return -EINVAL;
+
+			*end = '\0';
+		}
+
+		if (strstr(p, "MAX/")) {
+			p = strchr(p, '/') + 1;
+			BUG_ON(!p);
+			err = strict_strtoul(p, 10, &value);
+			if (err || value > TIME_RATIO_SCALE || !value)
+				return -EINVAL;
+
+			cpuratios[i] = - (int) (TIME_RATIO_SCALE / value);
+		} else {
+			err = strict_strtoul(p, 10, &value);
+			if (err || value > TIME_RATIO_SCALE || !value)
+				return -EINVAL;
+
+			cpuratios[i] = value;
+		}
+
+		p = end + 1;
+	}
+
+	for (i = 0; i < SCAN_LADDER_SIZE; i++) {
+		rung = &uksm_scan_ladder[i];
+
+		rung->cpu_ratio = cpuratios[i];
+	}
+
+	return count;
+}
+UKSM_ATTR(cpu_ratios);
+
+static ssize_t eval_intervals_show(struct kobject *kobj,
+			       struct kobj_attribute *attr, char *buf)
+{
+	int i, size;
+	struct scan_rung *rung;
+	char *p = buf;
+
+	for (i = 0; i < SCAN_LADDER_SIZE; i++) {
+		rung = &uksm_scan_ladder[i];
+		size = sprintf(p, "%u ", rung->cover_msecs);
+		p += size;
+	}
+
+	*p++ = '\n';
+	*p = '\0';
+
+	return p - buf;
+}
+
+static ssize_t eval_intervals_store(struct kobject *kobj,
+				      struct kobj_attribute *attr,
+				      const char *buf, size_t count)
+{
+	int i, err;
+	unsigned long values[SCAN_LADDER_SIZE];
+	struct scan_rung *rung;
+	char *p, *end = NULL;
+
+	p = kzalloc(count, GFP_KERNEL);
+	if (!p)
+		return -ENOMEM;
+
+	memcpy(p, buf, count);
+
+	for (i = 0; i < SCAN_LADDER_SIZE; i++) {
+		if (i != SCAN_LADDER_SIZE -1) {
+			end = strchr(p, ' ');
+			if (!end)
+				return -EINVAL;
+
+			*end = '\0';
+		}
+
+		err = strict_strtoul(p, 10, &values[i]);
+		if (err)
+			return -EINVAL;
+
+		p = end + 1;
+	}
+
+	for (i = 0; i < SCAN_LADDER_SIZE; i++) {
+		rung = &uksm_scan_ladder[i];
+
+		rung->cover_msecs = values[i];
+	}
+
+	return count;
+}
+UKSM_ATTR(eval_intervals);
 
 static ssize_t ema_per_page_time_show(struct kobject *kobj,
 				 struct kobj_attribute *attr, char *buf)
@@ -5139,6 +5298,9 @@ static struct attribute *uksm_attrs[] = {
 	&hash_strength_attr.attr,
 	&sleep_times_attr.attr,
 	&thrash_threshold_attr.attr,
+	&abundant_threshold_attr.attr,
+	&cpu_ratios_attr.attr,
+	&eval_intervals_attr.attr,
 	NULL,
 };
 
