@@ -406,10 +406,10 @@ struct uksm_cpu_preset_s {
 };
 
 struct uksm_cpu_preset_s uksm_cpu_preset[4] = {
-	{ {10, 50, -2500, -10000}, {1000, 500, 200, 0}, 95},
-	{ {10, 50, -2500, -10000}, {1000, 500, 400, 0}, 50},
-	{ {5, 25, -5000, -10000}, {1000, 1000, 1000, 0}, 20},
-	{ {5, 25, 50, 75}, {2000, 2000, 1000, 0}, 1},
+	{ {10, 30, -2500, -10000}, {1000, 500, 200, 0}, 95},
+	{ {10, 20, -2500, -10000}, {1000, 500, 400, 0}, 50},
+	{ {5, 10, -5000, -10000}, {1500, 1000, 1000, 0}, 20},
+	{ {5, 10, 25, 50}, {2000, 2000, 1000, 0}, 1},
 };
 
 static u64 scanned_virtual_pages;
@@ -4081,7 +4081,7 @@ unsigned int scan_time_to_sleep(unsigned long long scan_time, unsigned long rati
 	scan_time >>= 10; /* to usec level now */
 	BUG_ON(scan_time > ULONG_MAX);
 
-	return (unsigned int) ((unsigned long) scan_time / NSEC_PER_MSEC *
+	return (unsigned int) ((unsigned long) scan_time / USEC_PER_MSEC *
 			       (TIME_RATIO_SCALE - ratio) / ratio);
 }
 
