@@ -406,7 +406,7 @@ struct uksm_cpu_preset_s {
 };
 
 struct uksm_cpu_preset_s uksm_cpu_preset[4] = {
-	{ {10, 30, -2500, -10000}, {1000, 500, 200, 0}, 95},
+	{ {20, 30, -2500, -10000}, {1000, 500, 200, 0}, 95},
 	{ {10, 20, -2500, -10000}, {1000, 500, 400, 0}, 50},
 	{ {5, 10, -5000, -10000}, {1500, 1000, 1000, 0}, 20},
 	{ {5, 10, 25, 50}, {2000, 2000, 1000, 0}, 1},
@@ -3349,7 +3349,7 @@ static inline void vma_rung_down(struct vma_slot *slot)
 /**
  * cal_dedup_ratio() - Calculate the deduplication ratio for this slot.
  */
-static noinline unsigned long cal_dedup_ratio(struct vma_slot *slot)
+static unsigned long cal_dedup_ratio(struct vma_slot *slot)
 {
 	unsigned long ret;
 
@@ -3816,7 +3816,7 @@ static void rshash_adjust(void)
  * round_update_ladder() - The main function to do update of all the
  * adjustments whenever a scan round is finished.
  */
-static noinline void round_update_ladder(void)
+static void round_update_ladder(void)
 {
 	int i, n = 0;
 	struct vma_slot *slot, *tmp_slot;
@@ -3981,7 +3981,7 @@ static inline int rung_fully_scanned(struct scan_rung *rung)
 /*
 *expotional moving average formula
 */
-static noinline unsigned long ema(unsigned long curr, unsigned long last_ema)
+static inline unsigned long ema(unsigned long curr, unsigned long last_ema)
 {
 	/*
 	 * For a very high burst, even the ema cannot work well, a false very
@@ -4031,8 +4031,8 @@ static void uksm_calc_scan_pages(void)
 	int i;
 	unsigned long per_page;
 
-	if (uksm_ema_page_time > 1000000 ||
-	    (((unsigned long) uksm_eval_round & (4UL - 1)) == 0UL))
+	if (uksm_ema_page_time > 10000000 ||
+	    (((unsigned long) uksm_eval_round & (16UL - 1)) == 0UL))
 		uksm_ema_page_time = UKSM_PAGE_TIME_DEFAULT;
 
 	per_page = uksm_ema_page_time;
@@ -4405,9 +4405,12 @@ busy:
 
 		if (expected_jiffies > uksm_sleep_real)
 			uksm_sleep_real = expected_jiffies;
+
+		/* We have a 1 second up bound for responsiveness. */
+		if (jiffies_to_msecs(uksm_sleep_real) > MSEC_PER_SEC)
+			uksm_sleep_real = msecs_to_jiffies(1000);
 	}
 
-	BUG_ON(jiffies_to_msecs(uksm_sleep_real) > MSEC_PER_SEC * 10);
 
 	return;
 }
