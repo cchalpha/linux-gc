@@ -3145,7 +3145,7 @@ static inline int in_stable_tree(struct rmap_item *rmap_item)
  * scan_vma_one_page() - scan the next page in a vma_slot. Called with
  * mmap_sem locked.
  */
-static void scan_vma_one_page(struct vma_slot *slot)
+static noinline void scan_vma_one_page(struct vma_slot *slot)
 {
 	struct mm_struct *mm;
 	struct rmap_item *rmap_item = NULL;
@@ -3816,7 +3816,7 @@ static void rshash_adjust(void)
  * round_update_ladder() - The main function to do update of all the
  * adjustments whenever a scan round is finished.
  */
-static void round_update_ladder(void)
+static noinline void round_update_ladder(void)
 {
 	int i, n = 0;
 	struct vma_slot *slot, *tmp_slot;
@@ -4023,7 +4023,7 @@ static inline unsigned long rung_real_ratio(int cpu_time_ratio)
 	return ret ? ret : 1;
 }
 
-static void uksm_calc_scan_pages(void)
+static noinline void uksm_calc_scan_pages(void)
 {
 	struct scan_rung *ladder = uksm_scan_ladder;
 	unsigned long sleep_usecs, nsecs;
