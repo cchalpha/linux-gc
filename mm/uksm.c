@@ -68,11 +68,7 @@
 #include <linux/math64.h>
 #include <linux/gcd.h>
 #include <linux/freezer.h>
-#include <linux/inet.h>
-#include <linux/in.h>
-#include <linux/ip.h>
-#include <linux/udp.h>
-
+#include <linux/sradix-tree.h>
 
 #include <asm/tlbflush.h>
 #include "internal.h"
@@ -190,9 +186,101 @@ static int is_full_zero(const void *s1, size_t len)
 #define UKSM_RUNG_ROUND_FINISHED  (1<<0)
 
 #define TIME_RATIO_SCALE	10000
+
+#define SLOT_TREE_NODE_SHIFT	1
+#define SLOT_TREE_NODE_STORE_SIZE	(1UL << SLOT_TREE_NODE_SHIFT)
+struct slot_tree_node {
+	unsigned long size;
+	struct sradix_tree_node snode;
+	void *stores[SLOT_TREE_NODE_STORE_SIZE];
+}
+
+static struct kmem_cache *slot_tree_node_cachep;
+
+static struct sradix_tree_node *slot_tree_node_alloc(void) 
+{
+	return kmem_cache_zalloc(slot_tree_node_cachep, GFP_KERNEL);
+}
+
+static void slot_tree_node_free(struct slot_tree_node *node)
+{
+	kmem_cache_free(sradix_tree_node_cachep, node);
+}
+
+static void slot_tree_node_extend(struct sradix_tree_node *parent,
+				  struct sradix_tree_node *child)
+{
+	struct slot_tree_node *p, *c;
+
+	p = container_of(parent, struct slot_tree_node, snode);
+	c = container_of(child, struct slot_tree_node, snode);
+
+	p->size = c->size;
+}
+
+void slot_tree_node_assign(struct sradix_tree_node *node, 
+			   unsigned index, void *item)
+{
+	struct vma_slot *slot = item;
+	struct sradix_tree_node *p = node->parent;
+	struct slot_tree_node *cur, *parent;
+
+	slot->snode = node;
+	slot->sindex = index;
+
+	while (node) {
+		cur = container_of(node, struct slot_tree_node, snode);
+		cur->size += slot->pages;
+		node = node->parent;
+	}
+}
+
+void slot_tree_node_rm(struct sradix_tree_node *node, unsigned offset)
+{
+	struct vma_slot *slot = item;
+	struct sradix_tree_node *p = node->parent;
+	struct slot_tree_node *cur;
+	unsigned long pages;
+
+	if (node->height == 1) {
+		slot = node->stores[offset];
+		pages = slot->pages;
+	} else {
+		cur = container_of(node->stores[offset],
+				   struct slot_tree_node, snode);
+		pages = cur->size;
+	}
+
+	while (node) {
+		cur = container_of(node, struct slot_tree_node, snode);
+		cur->size -= pages;
+		node = node->parent;
+	}
+}
+
+static inline slot_tree_init_root(struct sradix_tree_root *root)
+{
+	init_sradix_tree_root(root);
+	root->alloc = slot_tree_node_alloc;
+	root->free = slot_tree_node_free;
+	root->extend = slot_tree_node_extend;
+	root->assign = slot_tree_node_assign;
+	root->rm = slot_tree_node_rm;
+}
+
+void slot_tree_init(void)
+{
+	slot_tree_node_cachep = kmem_cache_create("sradix_tree_node",
+				sizeof(struct slot_tree_node), 0, 
+				SLAB_PANIC | SLAB_RECLAIM_ACCOUNT,
+				NULL);
+}
+
+
 /* Each rung of this ladder is a list of VMAs having a same scan ratio */
 struct scan_rung {
-	struct list_head vma_list;
+	//struct list_head vma_list;
+	struct sradix_tree_root vma_root;
 	struct list_head *current_scan;
 	unsigned long current_offset;
 
@@ -594,7 +682,6 @@ static inline struct vma_slot *alloc_vma_slot(void)
 
 	slot = kmem_cache_zalloc(vma_slot_cache, GFP_KERNEL);
 	if (slot) {
-		INIT_LIST_HEAD(&slot->uksm_list);
 		INIT_LIST_HEAD(&slot->slot_list);
 		INIT_LIST_HEAD(&slot->dedup_list);
 		slot->flags |= UKSM_SLOT_NEED_RERAND;
@@ -5160,7 +5247,7 @@ static inline void init_scan_ladder(void)
 	for (i = 0; i < SCAN_LADDER_SIZE; i++) {
 		rung = uksm_scan_ladder + i;
 
-		INIT_LIST_HEAD(&rung->vma_list);
+		slot_tree_init_root(&rung->vma_root);
 		rung->vma_num = 0;
 		rung->pages = 0;
 		rung->fully_scanned_slots = 0;
@@ -5381,7 +5468,9 @@ static int __init uksm_init(void)
 	uksm_sleep_jiffies = msecs_to_jiffies(100);
 	uksm_sleep_saved = uksm_sleep_jiffies;
 
+	slot_tree_init();
 	init_scan_ladder();
+
 
 	err = init_random_sampling();
 	if (err)

@@ -25,7 +25,10 @@ extern void uksm_vma_add_new(struct vm_area_struct *vma);
 extern void uksm_remove_vma(struct vm_area_struct *vma);
 
 struct vma_slot {
-	struct list_head uksm_list;
+	//struct list_head uksm_list;
+	struct sradix_tree_node *snode;
+	unsigned long sindex;
+
 	struct list_head slot_list;
 	unsigned long dedup_ratio;
 	unsigned long dedup_num;
