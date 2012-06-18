@@ -35,12 +35,12 @@ struct sradix_tree_root {
 
 	/* How the node is allocated and freed. */
 	struct sradix_tree_node *(*alloc)(void); 
-	struct void (*free)(struct sradix_tree_node *node);
+	void (*free)(struct sradix_tree_node *node);
 
 	/* When a new node is added and removed */
 	void (*extend)(struct sradix_tree_node *parent, struct sradix_tree_node *child);
 	void (*assign)(struct sradix_tree_node *node, unsigned index, void *item);
-	void (*rm)(struct sradix_tree_node *node, unsigned offset, void *item);
+	void (*rm)(struct sradix_tree_node *node, unsigned offset);
 };
 
 struct sradix_tree_path {
@@ -49,7 +49,7 @@ struct sradix_tree_path {
 };
 
 static inline 
-int init_sradix_tree_root(struct sradix_tree_root *root, unsigned long shift)
+void init_sradix_tree_root(struct sradix_tree_root *root, unsigned long shift)
 {
 	root->height = 0;
 	root->rnode = NULL;
@@ -57,5 +57,17 @@ int init_sradix_tree_root(struct sradix_tree_root *root, unsigned long shift)
 	root->stores_size = 1UL << shift;
 	root->mask = root->stores_size - 1;
 }
+
+
+extern void *sradix_tree_next(struct sradix_tree_root *root,
+		       struct sradix_tree_node *node, unsigned long index,
+		       int (*iter)(void *, unsigned long));
+
+extern int sradix_tree_enter(struct sradix_tree_root *root, void **item, int num);
+
+extern void sradix_tree_delete_from_leaf(struct sradix_tree_root *root, 
+			struct sradix_tree_node *node, unsigned long index);
+
+extern void *sradix_tree_lookup(struct sradix_tree_root *root, unsigned long index);
 
 #endif /* _LINUX_SRADIX_TREE_H */

@@ -15,7 +15,7 @@ static int sradix_tree_extend(struct sradix_tree_root *root, unsigned long index
 	unsigned int height;
 
 	if (unlikely(root->rnode == NULL)) {
-		if (!(node = sradix_tree_node_alloc(root)))
+		if (!(node = root->alloc()))
 			return -ENOMEM;
 
 		node->height = 1;
@@ -62,14 +62,12 @@ void *sradix_tree_next(struct sradix_tree_root *root,
 		       struct sradix_tree_node *node, unsigned long index,
 		       int (*iter)(void *, unsigned long))
 {
-	unsigned long height, shift, offset;
-	int error;
-	void **ret;
+	unsigned long offset;
 	void *item;
 
 	if (unlikely(node == NULL)) {
 		node = root->rnode;
-		for (;offset < root->stores_size; offset++) {
+		for (offset = 0; offset < root->stores_size; offset++) {
 			item = node->stores[offset];
 			if (item && (!iter || iter(item, offset)))
 				break;
@@ -129,7 +127,8 @@ int sradix_tree_enter(struct sradix_tree_root *root, void **item, int num)
 	unsigned long index;
 	unsigned int shift, height;
 	struct sradix_tree_node *node, *node_saved;
-	void **store;
+	int offset, offset_saved;
+	void **store = NULL;
 	int error, i, j;
 
 
@@ -140,7 +139,7 @@ redo:
 	if (node == NULL || (index >> (root->shift * root->height))) {
 		error = sradix_tree_extend(root, index);
 		if (error)
-			return NULL;
+			return error;
 
 		node = root->rnode;
 	}
@@ -148,9 +147,7 @@ redo:
 	height = node->height;
 	shift = (height - 1) * root->shift;
 
-	while (height > 0) {
-		int offset, offset_saved;
-
+	do {
 		offset = (index >> shift) & root->mask;
 		node_saved = node;
 		offset_saved = offset;
@@ -178,7 +175,7 @@ redo:
 
 		shift -= root->shift;
 		height--;
-	}
+	} while (height > 0);
 
 	BUG_ON(*store);
 
@@ -197,6 +194,7 @@ redo:
 	node->count += j;
 	node->fulls += j;
 	num -= j;
+	root->min += j;
 
 	while (node->fulls == root->stores_size) {
 		node = node->parent;
@@ -246,9 +244,10 @@ static inline void sradix_tree_shrink(struct sradix_tree_root *root)
 /*
  * Del the item on the known leaf node and index
  */
-void sradix_tree_delete_node(struct sradix_tree_root *root, struct sradix_tree_node *node, unsigned long index)
+void sradix_tree_delete_from_leaf(struct sradix_tree_root *root, 
+				  struct sradix_tree_node *node, unsigned long index)
 {
-	unsigned int offset, shift = 0;
+	unsigned int offset;
 	struct sradix_tree_node *start, *end;
 
 	BUG_ON(node->height != 1);
@@ -283,6 +282,9 @@ void sradix_tree_delete_node(struct sradix_tree_root *root, struct sradix_tree_n
 			start = start->parent;
 		} while (start != end);
 	}
+
+	if (root->min > index)
+		root->min = index;
 }
 
 void *sradix_tree_lookup(struct sradix_tree_root *root, unsigned long index)

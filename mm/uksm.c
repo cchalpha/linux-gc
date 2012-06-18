@@ -193,7 +193,7 @@ struct slot_tree_node {
 	unsigned long size;
 	struct sradix_tree_node snode;
 	void *stores[SLOT_TREE_NODE_STORE_SIZE];
-}
+};
 
 static struct kmem_cache *slot_tree_node_cachep;
 
@@ -204,7 +204,7 @@ static struct sradix_tree_node *slot_tree_node_alloc(void)
 
 static void slot_tree_node_free(struct slot_tree_node *node)
 {
-	kmem_cache_free(sradix_tree_node_cachep, node);
+	kmem_cache_free(slot_tree_node_cachep, node);
 }
 
 static void slot_tree_node_extend(struct sradix_tree_node *parent,
@@ -222,8 +222,7 @@ void slot_tree_node_assign(struct sradix_tree_node *node,
 			   unsigned index, void *item)
 {
 	struct vma_slot *slot = item;
-	struct sradix_tree_node *p = node->parent;
-	struct slot_tree_node *cur, *parent;
+	struct slot_tree_node *cur;
 
 	slot->snode = node;
 	slot->sindex = index;
@@ -237,7 +236,7 @@ void slot_tree_node_assign(struct sradix_tree_node *node,
 
 void slot_tree_node_rm(struct sradix_tree_node *node, unsigned offset)
 {
-	struct vma_slot *slot = item;
+	struct vma_slot *slot;
 	struct sradix_tree_node *p = node->parent;
 	struct slot_tree_node *cur;
 	unsigned long pages;
@@ -258,9 +257,9 @@ void slot_tree_node_rm(struct sradix_tree_node *node, unsigned offset)
 	}
 }
 
-static inline slot_tree_init_root(struct sradix_tree_root *root)
+static inline void slot_tree_init_root(struct sradix_tree_root *root)
 {
-	init_sradix_tree_root(root);
+	init_sradix_tree_root(root, SLOT_TREE_NODE_SHIFT);
 	root->alloc = slot_tree_node_alloc;
 	root->free = slot_tree_node_free;
 	root->extend = slot_tree_node_extend;
@@ -279,7 +278,7 @@ void slot_tree_init(void)
 
 /* Each rung of this ladder is a list of VMAs having a same scan ratio */
 struct scan_rung {
-	//struct list_head vma_list;
+	struct list_head vma_list;
 	struct sradix_tree_root vma_root;
 	struct list_head *current_scan;
 	unsigned long current_offset;
