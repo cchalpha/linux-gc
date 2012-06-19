@@ -69,7 +69,7 @@ static int sradix_tree_extend(struct sradix_tree_root *root, unsigned long index
  */
 void *sradix_tree_next(struct sradix_tree_root *root,
 		       struct sradix_tree_node *node, unsigned long index,
-		       int (*iter)(void *, unsigned long))
+		       int (*iter)(void *item, unsigned long height))
 {
 	unsigned long offset;
 	void *item;
@@ -78,7 +78,7 @@ void *sradix_tree_next(struct sradix_tree_root *root,
 		node = root->rnode;
 		for (offset = 0; offset < root->stores_size; offset++) {
 			item = node->stores[offset];
-			if (item && (!iter || iter(item, offset)))
+			if (item && (!iter || iter(item, node->height)))
 				break;
 		}
 
@@ -95,7 +95,7 @@ void *sradix_tree_next(struct sradix_tree_root *root,
 		offset = (index & root->mask) + 1;					
 		for (;offset < root->stores_size; offset++) {
 			item = node->stores[offset];
-			if (item && (!iter || iter(item, offset)))
+			if (item && (!iter || iter(item, node->height)))
 				break;
 		}
 
@@ -114,12 +114,12 @@ go_down:
 		node = item;
 		for (offset = 0; offset < root->stores_size; offset++) {
 			item = node->stores[offset];
-			if (item && (!iter || iter(item, offset)))
+			if (item && (!iter || iter(item, node->height)))
 				break;
 		}
 
-		if (offset < root->stores_size)
-			break;
+		if (unlikely(offset >= root->stores_size))
+			return NULL;
 	}
 
 	BUG_ON(offset > root->stores_size);
@@ -131,8 +131,7 @@ go_down:
  * Blindly insert the item to the tree. Typically, we reuse the
  * first empty store item.
  */
-__attribute__((optimize(0))) int 
-sradix_tree_enter(struct sradix_tree_root *root, void **item, int num)
+int sradix_tree_enter(struct sradix_tree_root *root, void **item, int num)
 {
 	unsigned long index;
 	unsigned int height;

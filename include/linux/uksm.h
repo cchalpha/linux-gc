@@ -24,8 +24,14 @@ extern struct page *empty_uksm_zero_page;
 extern void uksm_vma_add_new(struct vm_area_struct *vma);
 extern void uksm_remove_vma(struct vm_area_struct *vma);
 
+#define UKSM_SLOT_NEED_SORT	(1 << 0)
+#define UKSM_SLOT_NEED_RERAND 	(1 << 1)
+#define UKSM_SLOT_SCANNED     	(1 << 2) /* It's scanned in this round */
+#define UKSM_SLOT_FUL_SCANNED 	(1 << 3)
+
+
 struct vma_slot {
-	struct list_head uksm_list;
+	//struct list_head uksm_list;
 	struct sradix_tree_node *snode;
 	unsigned long sindex;
 
@@ -48,7 +54,7 @@ struct vma_slot {
 	unsigned long pages_merged; /* pages merged this round */
 
 	/* when it has page merged in this eval round */
-	struct list_head dedup_list;
+	struct list_head scan_list;
 };
 
 static inline void uksm_unmap_zero_page(pte_t pte)
