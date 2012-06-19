@@ -187,7 +187,7 @@ static int is_full_zero(const void *s1, size_t len)
 
 #define TIME_RATIO_SCALE	10000
 
-#define SLOT_TREE_NODE_SHIFT	1
+#define SLOT_TREE_NODE_SHIFT	7
 #define SLOT_TREE_NODE_STORE_SIZE	(1UL << SLOT_TREE_NODE_SHIFT)
 struct slot_tree_node {
 	unsigned long size;
@@ -199,12 +199,21 @@ static struct kmem_cache *slot_tree_node_cachep;
 
 static struct sradix_tree_node *slot_tree_node_alloc(void) 
 {
-	return kmem_cache_zalloc(slot_tree_node_cachep, GFP_KERNEL);
+	struct slot_tree_node *p;
+
+	p = kmem_cache_zalloc(slot_tree_node_cachep, GFP_KERNEL);
+	if (!p)
+		return NULL;
+
+	return &p->snode; 
 }
 
-static void slot_tree_node_free(struct slot_tree_node *node)
+static void slot_tree_node_free(struct sradix_tree_node *node)
 {
-	kmem_cache_free(slot_tree_node_cachep, node);
+	struct slot_tree_node *p;
+
+	p = container_of(node, struct slot_tree_node, snode);
+	kmem_cache_free(slot_tree_node_cachep, p);
 }
 
 static void slot_tree_node_extend(struct sradix_tree_node *parent,
@@ -215,7 +224,7 @@ static void slot_tree_node_extend(struct sradix_tree_node *parent,
 	p = container_of(parent, struct slot_tree_node, snode);
 	c = container_of(child, struct slot_tree_node, snode);
 
-	p->size = c->size;
+	p->size += c->size;
 }
 
 void slot_tree_node_assign(struct sradix_tree_node *node, 
@@ -237,7 +246,6 @@ void slot_tree_node_assign(struct sradix_tree_node *node,
 void slot_tree_node_rm(struct sradix_tree_node *node, unsigned offset)
 {
 	struct vma_slot *slot;
-	struct sradix_tree_node *p = node->parent;
 	struct slot_tree_node *cur;
 	unsigned long pages;
 
@@ -532,7 +540,7 @@ static unsigned long long uksm_sleep_times;
 
 #define UKSM_RUN_STOP	0
 #define UKSM_RUN_MERGE	1
-static unsigned int uksm_run = UKSM_RUN_MERGE;
+static unsigned int uksm_run = 0;
 
 static DECLARE_WAIT_QUEUE_HEAD(uksm_thread_wait);
 static DEFINE_MUTEX(uksm_thread_mutex);
@@ -4921,11 +4929,78 @@ static ssize_t run_show(struct kobject *kobj, struct kobj_attribute *attr,
 	return sprintf(buf, "%u\n", uksm_run);
 }
 
+void *slots[100];
+void *random_slots[50];
+int randoms[50];
+
+static noinline void sradix_tree_test(void)
+{
+	int i, j, k;
+	struct vma_slot *slot;
+	struct scan_rung *rung = &uksm_scan_ladder[0];
+
+	int found;
+
+	for (i = 0; i < 100; i++) {
+		slot = alloc_vma_slot();
+		BUG_ON(!slot);
+		slots[i] = slot;
+	}
+
+	sradix_tree_enter(&rung->vma_root, slots, 100);
+	for (i = 0; i < 100; i++) {
+		slot = (struct vma_slot *)slots[i];
+		printk(KERN_ERR "sradix del index=%lu", slot->sindex);
+		sradix_tree_delete_from_leaf(&rung->vma_root, slot->snode, slot->sindex);
+	}
+	sradix_tree_enter(&rung->vma_root, slots, 100);
+
+	for (i = 0; i < 50; i++) {
+		do {
+			j = random32() % 100;
+			found = 0;
+			for (k = 0; k < 50; k++) {
+				if (randoms[k] == j) {
+					found = 1;
+					break;
+				}
+			}
+		} while (found);
+		
+		random_slots[i] = slots[j];
+		randoms[i] = j;
+		slot = (struct vma_slot *)slots[j];
+		printk(KERN_ERR "sradix single del index=%lu", slot->sindex);
+		sradix_tree_delete_from_leaf(&rung->vma_root, slot->snode, slot->sindex);
+	}
+
+	sradix_tree_enter(&rung->vma_root, random_slots, 50);
+
+	for (i = 0; i < 100; i++) {
+		slot = (struct vma_slot *)sradix_tree_lookup(&rung->vma_root, i);
+		found = 0;
+		for (k = 0; k < 50; k++) {
+			if (randoms[k] == i) {
+				found = 1;
+				break;
+			}
+		}
+
+
+		if (slot->sindex != i || (!found && slots[i] != (void *)slot)) {
+			printk(KERN_ERR "UKSM sradix test failed");
+		}
+	}
+}
+
 static ssize_t run_store(struct kobject *kobj, struct kobj_attribute *attr,
 			 const char *buf, size_t count)
 {
 	int err;
 	unsigned long flags;
+
+	sradix_tree_test();
+	return count;
 
 	err = strict_strtoul(buf, 10, &flags);
 	if (err || flags > UINT_MAX)

@@ -6,6 +6,13 @@
 #include <linux/gcd.h>
 #include <linux/sradix-tree.h>
 
+
+static inline int sradix_node_full(struct sradix_tree_root *root, struct sradix_tree_node *node)
+{
+	return node->fulls == root->stores_size || 
+		(node->height == 1 && node->count == root->stores_size);
+}
+
 /*
  *	Extend a sradix tree so it can store key @index.
  */
@@ -19,7 +26,6 @@ static int sradix_tree_extend(struct sradix_tree_root *root, unsigned long index
 			return -ENOMEM;
 
 		node->height = 1;
-		node->count = 1;
 		root->rnode = node;
 		root->height = 1;
 	}
@@ -47,6 +53,9 @@ static int sradix_tree_extend(struct sradix_tree_root *root, unsigned long index
 		newheight = root->height + 1;
 		node->height = newheight;
 		node->count = 1;
+		if (sradix_node_full(root, root->rnode))
+			node->fulls = 1;
+
 		root->rnode = node;
 		root->height = newheight;
 	}
@@ -122,21 +131,23 @@ go_down:
  * Blindly insert the item to the tree. Typically, we reuse the
  * first empty store item.
  */
-int sradix_tree_enter(struct sradix_tree_root *root, void **item, int num)
+__attribute__((optimize(0))) int 
+sradix_tree_enter(struct sradix_tree_root *root, void **item, int num)
 {
 	unsigned long index;
-	unsigned int shift, height;
-	struct sradix_tree_node *node, *node_saved;
+	unsigned int height;
+	struct sradix_tree_node *node, *tmp;
 	int offset, offset_saved;
 	void **store = NULL;
-	int error, i, j;
+	int error, i, j, shift;
 
 
 	node = root->rnode;
 
 redo:
 	index = root->min;
-	if (node == NULL || (index >> (root->shift * root->height))) {
+	if (node == NULL || (index >> (root->shift * root->height))
+	    || sradix_node_full(root, root->rnode)) {
 		error = sradix_tree_extend(root, index);
 		if (error)
 			return error;
@@ -147,44 +158,53 @@ redo:
 	height = node->height;
 	shift = (height - 1) * root->shift;
 
-	do {
-		offset = (index >> shift) & root->mask;
-		node_saved = node;
+	printk(KERN_ERR "index=%lu height=%u shift=%u root->height=%u", index, height, shift, root->height);
+
+	offset = (index >> shift) & root->mask;
+	while (shift > 0) {
+		printk(KERN_ERR "!!!! offset=%d", offset);
 		offset_saved = offset;
 		for (; offset < root->stores_size; offset++) {
 			store = &node->stores[offset];
-			node = *store;
+			tmp = *store;
 
-			if (!node || node->fulls != root->stores_size)
+			printk(KERN_ERR "increase offset=%d", offset);
+			if (!tmp || !sradix_node_full(root, tmp))
 				break;
 		}
-		if (offset != offset_saved)
-			index = 0;
-
-		if (!node && height > 1) {
-			if (!(node = root->alloc()))
-				return -ENOMEM;
-
-			node->height = height;
-			*store = node;
-			node->parent = node_saved;
-			node_saved->count++;
-			if (root->extend)
-				root->extend(node_saved, node);
+		if (offset != offset_saved) {
+			index += (offset - offset_saved) << shift;
+			index &= ~((1UL << shift) - 1);
 		}
 
+		printk(KERN_ERR "****index=%lu shift=%u", index, shift);
+		if (!tmp) {
+			if (!(tmp = root->alloc()))
+				return -ENOMEM;
+
+			tmp->height = shift / root->shift;
+			*store = tmp;
+			tmp->parent = node;
+			node->count++;
+			if (root->extend)
+				root->extend(node, tmp);
+		}
+
+		node = tmp;
 		shift -= root->shift;
-		height--;
-	} while (height > 0);
+		offset = (index >> shift) & root->mask;
+	}
 
-	BUG_ON(*store);
+	BUG_ON(node->height != 1);
 
-	node = node_saved;
+
+	store = &node->stores[offset];
 	for (i = 0, j = 0;
 	      j < root->stores_size - node->count && 
 	      i < root->stores_size - offset && j < num; i++) {
 		if (!store[i]) {
 			store[i] = item[j];
+			printk(KERN_ERR "Assign item %d at index=%d", j, index + i);
 			if (root->assign)
 				root->assign(node, index + i, item[j]);
 			j++;
@@ -192,21 +212,22 @@ redo:
 	}
 
 	node->count += j;
-	node->fulls += j;
 	num -= j;
-	root->min += j;
+	root->min = index + i;
 
-	while (node->fulls == root->stores_size) {
+	while (sradix_node_full(root, node)) {
 		node = node->parent;
 		if (!node)
 			break;
 
+		printk(KERN_ERR "node at height=%u full", node->height);
 		node->fulls++;
 	}
 
 	if (unlikely(!node)) {
 		/* All nodes are full */
 		root->min = 1 << (root->height * root->shift);
+		printk(KERN_ERR "all nodes full root->min=%lu", root->min);
 	}
 
 	if (num) {
@@ -257,30 +278,35 @@ void sradix_tree_delete_from_leaf(struct sradix_tree_root *root,
 		node = node->parent;
 
 	end = node;
-	if (!node)
+	if (!node) {
 		root->rnode = NULL;
-	else {
+		goto free_nodes;
+	} else {
 		offset = (index >> (root->shift * (node->height - 1))) & root->mask;
 		if (root->rm)
 			root->rm(node, offset);
 		node->stores[offset] = NULL;
-
-		while (node->fulls == root->stores_size - 1) {
-			node = node->parent;
-			if (!node)
-				break;
-			node->fulls--;
-		}
 	}
 
 	if (start != end) {
 		sradix_tree_shrink(root);
 
+free_nodes:
 		do {
 			node = start;
 			root->free(node);
 			start = start->parent;
 		} while (start != end);
+	} else if (node->count == root->stores_size - 1) {
+		/* It WAS a full leaf node. Update the ancestors */
+		node = node->parent;
+		while (node) {
+			node->fulls--;
+			if (node->fulls != root->stores_size - 1)
+				break;
+
+			node = node->parent;
+		}
 	}
 
 	if (root->min > index)
@@ -289,8 +315,9 @@ void sradix_tree_delete_from_leaf(struct sradix_tree_root *root,
 
 void *sradix_tree_lookup(struct sradix_tree_root *root, unsigned long index)
 {
-	unsigned int shift, height, offset;
+	unsigned int height, offset;
 	struct sradix_tree_node *node;
+	int shift;
 
 	node = root->rnode;
 	if (node == NULL || (index >> (root->shift * root->height)))
@@ -299,15 +326,14 @@ void *sradix_tree_lookup(struct sradix_tree_root *root, unsigned long index)
 	height = root->height;
 	shift = (height - 1) * root->shift;
 
-	do {	
+	do {
 		offset = (index >> shift) & root->mask;
 		node = node->stores[offset];
 		if (!node)
 			return NULL;
 
 		shift -= root->shift;
-		height--;
-	} while (height > 0);
+	} while (shift >= 0);
 
 	return node;
 }

@@ -17,7 +17,7 @@ do {									\
 
 struct sradix_tree_node {
 	unsigned int	height;		/* Height from the bottom */
-	unsigned int	count;			/* if count < 0, then all sub levels are full*/
+	unsigned int	count;		
 	unsigned int	fulls;		/* Number of full sublevel trees */ 
 	struct sradix_tree_node *parent;
 	void *stores[0];
