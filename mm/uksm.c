@@ -2860,7 +2860,6 @@ static void cmp_and_merge_page(struct rmap_item *rmap_item)
 			 * at the max hash, we consider them as ill items.
 			 */
 			remove_rmap_item_from_tree(tree_rmap_item);
-			remove_rmap_item_from_tree(rmap_item);
 		}
 put_up_out:
 		put_page(tree_rmap_item->page);
