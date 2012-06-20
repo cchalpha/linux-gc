@@ -404,8 +404,6 @@ struct rmap_item {
 	struct vma_slot *slot;
 	struct page *page;
 	unsigned long address;	/* + low bits used for flags below */
-	/* Appendded to (un)stable tree on which scan round */
-	unsigned long stable_round;
 	unsigned long entry_index;
 	union {
 		struct {/* when in unstable tree */
@@ -468,12 +466,6 @@ static struct scan_rung uksm_scan_ladder[SCAN_LADDER_SIZE];
 
 /* The evaluation rounds uksmd has finished */
 static unsigned long long uksm_eval_round = 1;
-
-/*
- * we add 1 to this var when we consider we should rebuild the whole
- * unstable tree.
- */
-static unsigned long uksm_stable_round = 1;
 
 /* The total number of virtual pages of all vma slots */
 static u64 uksm_pages_total;
@@ -948,24 +940,15 @@ static inline void remove_rmap_item_from_tree(struct rmap_item *rmap_item)
 
 		uksm_drop_anon_vma(rmap_item);
 	} else if (rmap_item->address & UNSTABLE_FLAG) {
-		/*
-		 * Usually ksmd can and must skip the rb_erase, because
-		 * root_unstable_tree was already reset to RB_ROOT.
-		 * But be careful when an mm is exiting: do the rb_erase
-		 * if this rmap_item was inserted by this scan, rather
-		 * than left over from before.
-		 */
-		if (rmap_item->stable_round == uksm_stable_round) {
-			rb_erase(&rmap_item->node,
-				 &rmap_item->tree_node->sub_root);
-			if (RB_EMPTY_ROOT(&rmap_item->tree_node->sub_root)) {
-				rb_erase(&rmap_item->tree_node->node,
-					 &root_unstable_tree);
+		rb_erase(&rmap_item->node,
+			 &rmap_item->tree_node->sub_root);
+		if (RB_EMPTY_ROOT(&rmap_item->tree_node->sub_root)) {
+			rb_erase(&rmap_item->tree_node->node,
+				 &root_unstable_tree);
 
-				free_tree_node(rmap_item->tree_node);
-			} else
-				rmap_item->tree_node->count--;
-		}
+			free_tree_node(rmap_item->tree_node);
+		} else
+			rmap_item->tree_node->count--;
 		uksm_pages_unshared--;
 	}
 
@@ -2460,7 +2443,6 @@ struct rmap_item *unstable_tree_search_insert(struct rmap_item *rmap_item,
 	/* did not found even in sub-tree */
 	rmap_item->tree_node = tree_node;
 	rmap_item->address |= UNSTABLE_FLAG;
-	rmap_item->stable_round = uksm_stable_round;
 	rb_link_node(&rmap_item->node, parent, new);
 	rb_insert_color(&rmap_item->node, &tree_node->sub_root);
 
@@ -2499,7 +2481,6 @@ static void stable_tree_append(struct rmap_item *rmap_item,
 
 	BUG_ON(!stable_node);
 	rmap_item->address |= STABLE_FLAG;
-	rmap_item->stable_round = uksm_stable_round;
 
 	if (hlist_empty(&stable_node->hlist)) {
 		uksm_pages_shared++;
@@ -2849,7 +2830,6 @@ static void cmp_and_merge_page(struct rmap_item *rmap_item)
 
 			rmap_item->tree_node = tree_rmap_item->tree_node;
 			rmap_item->address |= UNSTABLE_FLAG;
-			rmap_item->stable_round = uksm_stable_round;
 			rb_link_node(&rmap_item->node, parent, new);
 			rb_insert_color(&rmap_item->node,
 					&tree_rmap_item->tree_node->sub_root);
@@ -4254,13 +4234,19 @@ failed:
 }
 
 static struct vma_slot *batch_slots[SLOT_TREE_NODE_STORE_SIZE];
+#define ENTER_ALL_LOCK_PERIOD	32
 
 static void uksm_enter_all_slots(void)
 {
 	struct vma_slot *slot;
 	unsigned long index;
+	struct list_head empty_vma_list;
+	int i;
 
+	i = 0;
 	index = 0;
+	INIT_LIST_HEAD(&empty_vma_list);
+
 	spin_lock(&vma_slot_list_lock);
 	while (!list_empty(&vma_slot_new)) {
 		slot = list_entry(vma_slot_new.next,
@@ -4278,41 +4264,41 @@ static void uksm_enter_all_slots(void)
 			}
 		*/
 
-		list_del_init(&slot->slot_list);
-		if (vma_can_enter(slot->vma))
+		if (!slot->vma->anon_vma) {
+			list_move(&slot->slot_list, &empty_vma_list);
+		} else if (vma_can_enter(slot->vma)) {
 			batch_slots[index++] = slot;
+			list_del_init(&slot->slot_list);
+		} else {
+			list_move(&slot->slot_list, &vma_slot_noadd);
+		}
 /*
 		if (!added) {
 			slot->ctime_j = jiffies;
 			list_del(&slot->slot_list);
-			list_add_tail(&slot->slot_list, &vma_slot_noadd);
+			
 		}
 */
-		spin_unlock(&vma_slot_list_lock);
+		if (++i == ENTER_ALL_LOCK_PERIOD || 
+		    (index && !(index % SLOT_TREE_NODE_STORE_SIZE))) {
+			spin_unlock(&vma_slot_list_lock);
 
-		if (index && !(index % SLOT_TREE_NODE_STORE_SIZE)) {
-			uksm_vma_enter(batch_slots, index);
-			index = 0;
+			if (index && !(index % SLOT_TREE_NODE_STORE_SIZE)) {
+				uksm_vma_enter(batch_slots, index);
+				index = 0;
+			}
+			i = 0;
+			cond_resched();
+			spin_lock(&vma_slot_list_lock);
 		}
-
-		cond_resched();
-		spin_lock(&vma_slot_list_lock);
 	}
 	spin_unlock(&vma_slot_list_lock);
 
 	if (index)
 		uksm_vma_enter(batch_slots, index);
+
+	list_splice(&empty_vma_list, &vma_slot_new);
 }
-
-/*
- * What is the best way to decide this?
- */
-static inline int stable_round_finished(void)
-{
-	return (scanned_virtual_pages >> 2) > uksm_pages_total;
-}
-
-
 
 #define UKSM_MMSEM_BATCH	5
 
@@ -4465,8 +4451,6 @@ busy:
 	}
 	end_time = task_sched_runtime(current);
 	delta_exec = end_time - start_time;
-	BUG_ON(CAN_OVERFLOW_U64(scanned_virtual_pages, vpages));
-	scanned_virtual_pages += vpages;
 
 	if (freezing(current))
 		return;
@@ -4504,14 +4488,6 @@ busy:
 		 * so we don't IPI too often when pages_to_scan is set low).
 		 */
 		lru_add_drain_all();
-
-		/* When will update the whole unstable tree? */
-		if (stable_round_finished()) {
-			scanned_virtual_pages = 0;
-			uksm_stable_round++;
-			root_unstable_tree = RB_ROOT;
-			free_all_tree_nodes(&unstable_tree_node_list);
-		}
 	}
 
 
