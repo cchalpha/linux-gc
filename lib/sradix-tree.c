@@ -6,7 +6,6 @@
 #include <linux/gcd.h>
 #include <linux/sradix-tree.h>
 
-
 static inline int sradix_node_full(struct sradix_tree_root *root, struct sradix_tree_node *node)
 {
 	return node->fulls == root->stores_size || 
@@ -156,18 +155,13 @@ redo:
 
 	height = node->height;
 	shift = (height - 1) * root->shift;
-
-	printk(KERN_ERR "index=%lu height=%u shift=%u root->height=%u", index, height, shift, root->height);
-
 	offset = (index >> shift) & root->mask;
 	while (shift > 0) {
-		printk(KERN_ERR "!!!! offset=%d", offset);
 		offset_saved = offset;
 		for (; offset < root->stores_size; offset++) {
 			store = &node->stores[offset];
 			tmp = *store;
 
-			printk(KERN_ERR "increase offset=%d", offset);
 			if (!tmp || !sradix_node_full(root, tmp))
 				break;
 		}
@@ -176,7 +170,6 @@ redo:
 			index &= ~((1UL << shift) - 1);
 		}
 
-		printk(KERN_ERR "****index=%lu shift=%u", index, shift);
 		if (!tmp) {
 			if (!(tmp = root->alloc()))
 				return -ENOMEM;
@@ -203,7 +196,6 @@ redo:
 	      i < root->stores_size - offset && j < num; i++) {
 		if (!store[i]) {
 			store[i] = item[j];
-			printk(KERN_ERR "Assign item %d at index=%d", j, index + i);
 			if (root->assign)
 				root->assign(node, index + i, item[j]);
 			j++;
@@ -219,14 +211,12 @@ redo:
 		if (!node)
 			break;
 
-		printk(KERN_ERR "node at height=%u full", node->height);
 		node->fulls++;
 	}
 
 	if (unlikely(!node)) {
 		/* All nodes are full */
 		root->min = 1 << (root->height * root->shift);
-		printk(KERN_ERR "all nodes full root->min=%lu", root->min);
 	}
 
 	if (num) {
@@ -256,6 +246,7 @@ static inline void sradix_tree_shrink(struct sradix_tree_root *root)
 			break;
 
 		root->rnode = to_free->stores[0];
+		root->rnode->parent = NULL;
 		root->height--;
 		root->free(to_free);
 	}
@@ -279,6 +270,8 @@ void sradix_tree_delete_from_leaf(struct sradix_tree_root *root,
 	end = node;
 	if (!node) {
 		root->rnode = NULL;
+		root->height = 0;
+		root->min = 0;
 		goto free_nodes;
 	} else {
 		offset = (index >> (root->shift * (node->height - 1))) & root->mask;
@@ -308,6 +301,7 @@ free_nodes:
 		}
 	}
 
+	/* If cannot search the min ? */
 	if (root->min > index)
 		root->min = index;
 }
