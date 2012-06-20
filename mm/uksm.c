@@ -4292,12 +4292,14 @@ static void uksm_enter_all_slots(void)
 			spin_lock(&vma_slot_list_lock);
 		}
 	}
+
+	list_splice(&empty_vma_list, &vma_slot_new);
+
 	spin_unlock(&vma_slot_list_lock);
 
 	if (index)
 		uksm_vma_enter(batch_slots, index);
 
-	list_splice(&empty_vma_list, &vma_slot_new);
 }
 
 #define UKSM_MMSEM_BATCH	5
