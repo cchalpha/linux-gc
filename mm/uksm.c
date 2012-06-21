@@ -4251,18 +4251,6 @@ static void uksm_enter_all_slots(void)
 	while (!list_empty(&vma_slot_new)) {
 		slot = list_entry(vma_slot_new.next,
 				  struct vma_slot, slot_list);
-		/**
-		 * slots are sorted by ctime_j, if one found to be too
-		 * young, just stop scanning the rest ones.
-		 */
-		/*
-
-			if (time_before(jiffies, slot->ctime_j +
-					msecs_to_jiffies(1000))) {
-				spin_unlock(&vma_slot_list_lock);
-				return;
-			}
-		*/
 
 		if (!slot->vma->anon_vma) {
 			list_move(&slot->slot_list, &empty_vma_list);
@@ -4272,13 +4260,7 @@ static void uksm_enter_all_slots(void)
 		} else {
 			list_move(&slot->slot_list, &vma_slot_noadd);
 		}
-/*
-		if (!added) {
-			slot->ctime_j = jiffies;
-			list_del(&slot->slot_list);
-			
-		}
-*/
+
 		if (++i == ENTER_ALL_LOCK_PERIOD || 
 		    (index && !(index % SLOT_TREE_NODE_STORE_SIZE))) {
 			spin_unlock(&vma_slot_list_lock);
