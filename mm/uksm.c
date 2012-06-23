@@ -200,7 +200,6 @@ static struct kmem_cache *slot_tree_node_cachep;
 static struct sradix_tree_node *slot_tree_node_alloc(void) 
 {
 	struct slot_tree_node *p;
-	BUG_ON(!slot_tree_node_cachep);
 	p = kmem_cache_zalloc(slot_tree_node_cachep, GFP_KERNEL);
 	if (!p)
 		return NULL;
@@ -517,7 +516,7 @@ struct uksm_cpu_preset_s uksm_cpu_preset[4] = {
 	{ {20, 30, -2500, -10000}, {1000, 500, 200, 0}, 95},
 	{ {10, 20, -2500, -10000}, {1000, 500, 400, 0}, 50},
 	{ {5, 10, -5000, -10000}, {1500, 1000, 1000, 0}, 20},
-	{ {5, 10, 25, 50}, {2000, 2000, 1000, 0}, 1},
+	{ {10, 20, 40, 75}, {2000, 1000, 1000, 0}, 1},
 };
 
 /* The default value for uksm_ema_page_time if it's not initialized */
@@ -1027,7 +1026,6 @@ static inline int get_mergeable_page_lock_mmap(struct rmap_item *item)
 
 	struct page *page;
 
-	BUG_ON(!item->slot);
 	/*
 	 * try_down_read_slot_mmap_sem() returns non-zero if the slot
 	 * has been removed by uksm_remove_vma().
@@ -4033,7 +4031,6 @@ static void uksm_del_vma_slot(struct vma_slot *slot)
 			continue;
 
 		addr = kmap(slot->rmap_list_pool[i]);
-		BUG_ON(!addr);
 		for (j = 0; j < PAGE_SIZE / sizeof(*entry); j++) {
 			entry = (struct rmap_list_entry *)addr + j;
 			if (is_addr(entry->addr))
@@ -5053,7 +5050,6 @@ static ssize_t cpu_ratios_store(struct kobject *kobj,
 
 		if (strstr(p, "MAX/")) {
 			p = strchr(p, '/') + 1;
-			BUG_ON(!p);
 			err = strict_strtoul(p, 10, &value);
 			if (err || value > TIME_RATIO_SCALE || !value)
 				return -EINVAL;
