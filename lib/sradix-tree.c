@@ -178,8 +178,8 @@ redo:
 			*store = tmp;
 			tmp->parent = node;
 			node->count++;
-			if (root->extend)
-				root->extend(node, tmp);
+//			if (root->extend)
+//				root->extend(node, tmp);
 		}
 
 		node = tmp;
@@ -329,4 +329,117 @@ void *sradix_tree_lookup(struct sradix_tree_root *root, unsigned long index)
 	} while (shift >= 0);
 
 	return node;
+}
+
+/*
+ * Return the item if it exists, otherwise create it in place
+ * and return the created item.
+ */
+void *sradix_tree_lookup_create(struct sradix_tree_root *root, 
+			unsigned long index, void *(*item_alloc)(void)))
+{
+	unsigned int height, offset;
+	struct sradix_tree_node *node, *tmp;
+	void *item;
+	int shift, error;
+
+	if (root->rnode == NULL || (index >> (root->shift * root->height))) {
+		if (item_alloc) {
+			error = sradix_tree_extend(root, index);
+			if (error)
+				return NULL;
+		} else {
+			return NULL;
+		}
+	}
+
+	node = root->rnode;
+	height = root->height;
+	shift = (height - 1) * root->shift;
+
+	do {
+		offset = (index >> shift) & root->mask;
+		if (!node->stores[offset]) {
+			if (!(tmp = root->alloc()))
+				return NULL;
+
+			tmp->height = shift / root->shift;
+			node->stores[offset] = tmp;
+			tmp->parent = node;
+			node->count++;
+			node = tmp;
+		} else {
+			node = node->stores[offset];
+		}
+
+		shift -= root->shift;
+	} while (shift > 0);
+
+	BUG_ON(node->height != 1);
+	offset = index & root->mask;
+	if (node->stores[offset]) {
+		return node->stores[offset];
+	} else if (item_alloc) {
+		if (!(item = item_alloc()))
+			return NULL;
+
+		node->stores[offset] = item;
+
+		/*
+		 * NOTE: we do NOT call root->assign here, since this item is
+		 * newly created by us having no meaning. Caller can call this
+		 * if it's necessary to do so.
+		 */
+
+		node->count++;
+		if (root->min == index)
+			root->min++;
+
+		while (sradix_node_full(root, node)) {
+			node = node->parent;
+			if (!node)
+				break;
+
+			node->fulls++;
+		}
+
+		if (unlikely(!node)) {
+			/* All nodes are full */
+			root->min = 1 << (root->height * root->shift);
+		}
+	} else {
+		return NULL;
+	}
+
+}
+
+int sradix_tree_delete(struct sradix_tree_root *root, unsigned long index)
+{
+	unsigned int height, offset;
+	struct sradix_tree_node *node;
+	int shift;
+
+	node = root->rnode;
+	if (node == NULL || (index >> (root->shift * root->height)))
+		return NULL;
+
+	height = root->height;
+	shift = (height - 1) * root->shift;
+
+	do {
+		offset = (index >> shift) & root->mask;
+		node = node->stores[offset];
+		if (!node)
+			return -ENOENT;
+
+		shift -= root->shift;
+	} while (shift > 0);
+
+	offset = index & root->mask;
+	if (!node->stores[offset])
+		return -ENOENT;
+
+	sradix_tree_delete_from_leaf(root, node, index);
+
+	return 0;
 }
