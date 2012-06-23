@@ -4142,8 +4142,8 @@ static noinline void uksm_calc_scan_pages(void)
 	int i;
 	unsigned long per_page;
 
-	if (uksm_ema_page_time > 10000000 ||
-	    (((unsigned long) uksm_eval_round & (16UL - 1)) == 0UL))
+	if (uksm_ema_page_time > 100000 ||
+	    (((unsigned long) uksm_eval_round & (256UL - 1)) == 0UL))
 		uksm_ema_page_time = UKSM_PAGE_TIME_DEFAULT;
 
 	per_page = uksm_ema_page_time;
