@@ -513,7 +513,7 @@ struct uksm_cpu_preset_s {
 };
 
 struct uksm_cpu_preset_s uksm_cpu_preset[4] = {
-	{ {20, 30, -2500, -10000}, {500, 500, 200, 0}, 95},
+	{ {20, 30, -2500, -10000}, {1000, 500, 200, 0}, 95},
 	{ {10, 20, -2500, -10000}, {1000, 500, 400, 0}, 50},
 	{ {5, 10, -5000, -10000}, {1500, 1000, 1000, 0}, 20},
 	{ {10, 20, 40, 75}, {2000, 1000, 1000, 0}, 1},
@@ -4138,8 +4138,9 @@ unsigned int scan_time_to_sleep(unsigned long long scan_time, unsigned long rati
 	scan_time >>= 10; /* to usec level now */
 	BUG_ON(scan_time > ULONG_MAX);
 
-	return (unsigned int) ((unsigned long) scan_time / USEC_PER_MSEC *
-			       (TIME_RATIO_SCALE - ratio) / ratio);
+	return (unsigned int) ((unsigned long) scan_time * 
+			       (TIME_RATIO_SCALE - ratio) / USEC_PER_MSEC 
+			       / ratio);
 }
 
 #define __round_mask(x, y) ((__typeof__(x))((y)-1))
@@ -4462,6 +4463,7 @@ rm_slot:
 		expected_jiffies = msecs_to_jiffies(
 			scan_time_to_sleep(scan_time, max_cpu_ratio));
 
+		//printk(KERN_ERR "max_cpu_ratio=%lu scan_time=%llu expected_jiffies=%u", max_cpu_ratio, scan_time, expected_jiffies);
 		if (expected_jiffies > uksm_sleep_real)
 			uksm_sleep_real = expected_jiffies;
 
