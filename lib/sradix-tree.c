@@ -134,24 +134,30 @@ int sradix_tree_enter(struct sradix_tree_root *root, void **item, int num)
 {
 	unsigned long index;
 	unsigned int height;
-	struct sradix_tree_node *node, *tmp;
+	struct sradix_tree_node *node, *tmp = NULL;
 	int offset, offset_saved;
 	void **store = NULL;
 	int error, i, j, shift;
 
-
-	node = root->rnode;
-
-redo:
+go_on:
 	index = root->min;
-	if (node == NULL || (index >> (root->shift * root->height))
-	    || sradix_node_full(root, root->rnode)) {
-		error = sradix_tree_extend(root, index);
-		if (error)
-			return error;
 
+	if (root->enter_node) {
+		node = root->enter_node;
+		BUG_ON((index >> (root->shift * root->height) || 
+			sradix_node_full(root, node)));
+	} else {
 		node = root->rnode;
+		if (node == NULL || (index >> (root->shift * root->height))
+		    || sradix_node_full(root, node)) {
+			error = sradix_tree_extend(root, index);
+			if (error)
+				return error;
+
+			node = root->rnode;
+		}
 	}
+
 
 	height = node->height;
 	shift = (height - 1) * root->shift;
@@ -203,8 +209,8 @@ redo:
 	}
 
 	node->count += j;
+	root->num += j;
 	num -= j;
-	root->min = index + i;
 
 	while (sradix_node_full(root, node)) {
 		node = node->parent;
@@ -217,11 +223,17 @@ redo:
 	if (unlikely(!node)) {
 		/* All nodes are full */
 		root->min = 1 << (root->height * root->shift);
+		root->enter_node = NULL;
+	} else {
+		root->min = index + i - 1;
+		root->min |= (1UL << (node->height - 1)) - 1;
+		root->min++;
+		root->enter_node = node;
 	}
 
 	if (num) {
 		item += j;
-		goto redo;
+		goto go_on;
 	}
 
 	return 0;
@@ -272,12 +284,15 @@ void sradix_tree_delete_from_leaf(struct sradix_tree_root *root,
 		root->rnode = NULL;
 		root->height = 0;
 		root->min = 0;
+		root->num = 0;
+		root->enter_node = NULL;
 		goto free_nodes;
 	} else {
 		offset = (index >> (root->shift * (node->height - 1))) & root->mask;
 		if (root->rm)
 			root->rm(node, offset);
 		node->stores[offset] = NULL;
+		root->num--;
 	}
 
 	if (start != end) {
@@ -286,8 +301,8 @@ void sradix_tree_delete_from_leaf(struct sradix_tree_root *root,
 free_nodes:
 		do {
 			node = start;
-			root->free(node);
 			start = start->parent;
+			root->free(node);
 		} while (start != end);
 	} else if (node->count == root->stores_size - 1) {
 		/* It WAS a full leaf node. Update the ancestors */
@@ -302,8 +317,10 @@ free_nodes:
 	}
 
 	/* If cannot search the min ? */
-	if (root->min > index)
+	if (root->min > index) {
 		root->min = index;
+		root->enter_node = end;
+	}
 }
 
 void *sradix_tree_lookup(struct sradix_tree_root *root, unsigned long index)
@@ -336,7 +353,7 @@ void *sradix_tree_lookup(struct sradix_tree_root *root, unsigned long index)
  * and return the created item.
  */
 void *sradix_tree_lookup_create(struct sradix_tree_root *root, 
-			unsigned long index, void *(*item_alloc)(void)))
+			unsigned long index, void *(*item_alloc)(void))
 {
 	unsigned int height, offset;
 	struct sradix_tree_node *node, *tmp;
@@ -392,8 +409,7 @@ void *sradix_tree_lookup_create(struct sradix_tree_root *root,
 		 */
 
 		node->count++;
-		if (root->min == index)
-			root->min++;
+		root->num++;
 
 		while (sradix_node_full(root, node)) {
 			node = node->parent;
@@ -406,7 +422,15 @@ void *sradix_tree_lookup_create(struct sradix_tree_root *root,
 		if (unlikely(!node)) {
 			/* All nodes are full */
 			root->min = 1 << (root->height * root->shift);
+		} else {
+			if (root->min == index) {
+				root->min |= (1UL << (node->height - 1)) - 1;
+				root->min++;
+				root->enter_node = node;
+			}
 		}
+
+		return item;
 	} else {
 		return NULL;
 	}
@@ -421,7 +445,7 @@ int sradix_tree_delete(struct sradix_tree_root *root, unsigned long index)
 
 	node = root->rnode;
 	if (node == NULL || (index >> (root->shift * root->height)))
-		return NULL;
+		return -ENOENT;
 
 	height = root->height;
 	shift = (height - 1) * root->shift;

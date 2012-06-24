@@ -28,13 +28,14 @@ extern void uksm_remove_vma(struct vm_area_struct *vma);
 #define UKSM_SLOT_NEED_RERAND 	(1 << 1)
 #define UKSM_SLOT_SCANNED     	(1 << 2) /* It's scanned in this round */
 #define UKSM_SLOT_FUL_SCANNED 	(1 << 3)
+#define UKSM_SLOT_VMA_ROOT1 	(1 << 4)
 
 struct vma_slot {
 	struct sradix_tree_node *snode;
 	unsigned long sindex;
 
 	struct list_head slot_list;
-	unsigned long dedup_ratio;
+	//unsigned long dedup_ratio;
 	unsigned long dedup_num;
 	unsigned long pages_scanned;
 	unsigned long last_scanned;

@@ -27,10 +27,14 @@ struct sradix_tree_node {
 struct sradix_tree_root {
         unsigned int            height;
         struct sradix_tree_node *rnode;
+
+	/* Where found to have available empty stores in its sublevels */
+        struct sradix_tree_node *enter_node;
 	unsigned int shift;
 	unsigned int stores_size;
 	unsigned int mask;
 	unsigned long min;	/* The first hole index */
+	unsigned long num;
 	//unsigned long *height_to_maxindex;
 
 	/* How the node is allocated and freed. */
