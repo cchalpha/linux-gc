@@ -73,9 +73,6 @@
 #include <asm/tlbflush.h>
 #include "internal.h"
 
-
-#define inline noinline
-
 #ifdef CONFIG_X86
 #undef memcmp
 
@@ -550,7 +547,7 @@ static unsigned long long uksm_sleep_times;
 
 #define UKSM_RUN_STOP	0
 #define UKSM_RUN_MERGE	1
-static unsigned int uksm_run = 0;
+static unsigned int uksm_run = 1;
 
 static DECLARE_WAIT_QUEUE_HEAD(uksm_thread_wait);
 static DEFINE_MUTEX(uksm_thread_mutex);
@@ -957,6 +954,14 @@ static inline int slot_in_uksm(struct vma_slot *slot)
 	return list_empty(&slot->slot_list);
 }
 
+/*
+ * Test if the mm is exiting
+ */
+static inline bool uksm_test_exit(struct mm_struct *mm)
+{
+	return atomic_read(&mm->mm_users) == 0;
+}
+
 /**
  * Need to do two things:
  * 1. check if slot was moved to del list
@@ -993,6 +998,12 @@ static int try_down_read_slot_mmap_sem(struct vma_slot *slot)
 	vma = slot->vma;
 	mm = vma->vm_mm;
 	sem = &mm->mmap_sem;
+
+	if (uksm_test_exit(mm)) {
+		spin_unlock(&vma_slot_list_lock);
+		return -ENOENT;
+	}
+
 	if (down_read_trylock(sem)) {
 		spin_unlock(&vma_slot_list_lock);
 		return 0;
@@ -1016,13 +1027,6 @@ vma_page_address(struct page *page, struct vm_area_struct *vma)
 	return address;
 }
 
-/*
- * Test if the mm is exiting
- */
-static inline bool uksm_test_exit(struct mm_struct *mm)
-{
-	return atomic_read(&mm->mm_users) == 0;
-}
 
 /* return 0 on success with the item's mmap_sem locked */
 static inline int get_mergeable_page_lock_mmap(struct rmap_item *item)
@@ -3958,11 +3962,6 @@ static noinline void round_update_ladder(void)
 	rshash_adjust();
 }
 
-static inline unsigned int uksm_pages_to_scan(unsigned int batch_pages)
-{
-	return totalram_pages * batch_pages / 1000000;
-}
-
 static void uksm_del_vma_slot(struct vma_slot *slot)
 {
 	int i, j;
@@ -4340,6 +4339,7 @@ static noinline void uksm_do_scan(void)
 			}
 
 			if (err == -ENOENT) {
+rm_slot:
 				rung_rm_slot(slot);
 				continue;
 			}
@@ -4347,7 +4347,6 @@ static noinline void uksm_do_scan(void)
 			busy_mm = slot->mm;
 
 			if (err == -EBUSY) {
-busy:
 				/* skip other vmas on the same mm */
 				do {
 					reset = advance_current_scan(rung);
@@ -4366,10 +4365,9 @@ busy:
 
 			BUG_ON(!vma_can_enter(slot->vma));
 			if (uksm_test_exit(slot->vma->vm_mm)) {
-				busy_mm = slot->vma->vm_mm;
 				mmsem_batch = 0;
 				up_read(&slot->vma->vm_mm->mmap_sem);
-				goto busy;
+				goto rm_slot;
 			}
 
 			if (mmsem_batch)
@@ -4403,6 +4401,8 @@ busy:
 
 		if (freezing(current))
 			break;
+
+		cond_resched();
 	}
 	end_time = task_sched_runtime(current);
 	delta_exec = end_time - start_time;
