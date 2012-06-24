@@ -952,6 +952,11 @@ out:
 	cond_resched();		/* we're called from many long loops */
 }
 
+static inline int slot_in_uksm(struct vma_slot *slot)
+{
+	return list_empty(&slot->slot_list);
+}
+
 /**
  * Need to do two things:
  * 1. check if slot was moved to del list
@@ -978,7 +983,7 @@ static int try_down_read_slot_mmap_sem(struct vma_slot *slot)
 	/* the slot_list was removed and inited from new list, when it enters
 	 * uksm_list. If now it's not empty, then it must be moved to del list
 	 */
-	if (!list_empty(&slot->slot_list)) {
+	if (!slot_in_uksm(slot)) {
 		spin_unlock(&vma_slot_list_lock);
 		return -ENOENT;
 	}
@@ -1118,7 +1123,7 @@ void uksm_remove_vma(struct vm_area_struct *vma)
 
 	slot = vma->uksm_vma_slot;
 	spin_lock(&vma_slot_list_lock);
-	if (list_empty(&slot->slot_list)) {
+	if (slot_in_uksm(slot)) {
 		/**
 		 * This slot has been added by ksmd, so move to the del list
 		 * waiting ksmd to free it.
