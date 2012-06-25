@@ -184,7 +184,7 @@ static int is_full_zero(const void *s1, size_t len)
 #define UKSM_RUNG_ROUND_FINISHED  (1 << 0)
 #define TIME_RATIO_SCALE	10000
 
-#define SLOT_TREE_NODE_SHIFT	8
+#define SLOT_TREE_NODE_SHIFT	4
 #define SLOT_TREE_NODE_STORE_SIZE	(1UL << SLOT_TREE_NODE_SHIFT)
 struct slot_tree_node {
 	unsigned long size;
@@ -4308,6 +4308,8 @@ static noinline void uksm_do_scan(void)
 				tmp = rung->scan_root;
 				rung->scan_root = rung->ful_scan_root;
 				rung->ful_scan_root = tmp;
+				uksm_calc_rung_step(rung, uksm_ema_page_time, 
+						    rung->cpu_ratio);
 				reset_rung_scan(rung);
 				reset_current_scan(rung, 0);
 			} else {
