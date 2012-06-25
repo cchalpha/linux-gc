@@ -3967,7 +3967,7 @@ static void uksm_del_vma_slot(struct vma_slot *slot)
 	int i, j;
 	struct rmap_list_entry *entry;
 
-	if (unlikely(slot->snode)) {
+	if (slot->snode) {
 		/*
 		 * In case it just failed when entering the rung, it's not
 		 * necessary.
@@ -3978,7 +3978,7 @@ static void uksm_del_vma_slot(struct vma_slot *slot)
 	if (!list_empty(&slot->scan_list))
 		list_del(&slot->scan_list);
 
-	if (!slot->rmap_list_pool) {
+	if (!slot->rmap_list_pool || !slot->pool_counts) {
 		/* In case it OOMed in uksm_vma_enter() */
 		goto out;
 	}

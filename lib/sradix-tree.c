@@ -171,6 +171,7 @@ go_on:
 			if (!tmp || !sradix_node_full(root, tmp))
 				break;
 		}
+		BUG_ON(offset >= root->stores_size);
 		if (offset != offset_saved) {
 			index += (offset - offset_saved) << shift;
 			index &= ~((1UL << shift) - 1);
@@ -260,6 +261,10 @@ static inline void sradix_tree_shrink(struct sradix_tree_root *root)
 		root->rnode = to_free->stores[0];
 		root->rnode->parent = NULL;
 		root->height--;
+		if (unlikely(root->enter_node == to_free)) {
+			root->enter_node = NULL;
+			printk(KERN_ERR "UKSM: OH baby it really happens");
+		}
 		root->free(to_free);
 	}
 }
