@@ -142,10 +142,9 @@ int sradix_tree_enter(struct sradix_tree_root *root, void **item, int num)
 go_on:
 	index = root->min;
 
-	if (root->enter_node) {
+	if (root->enter_node && !sradix_node_full(root, root->enter_node)) {
 		node = root->enter_node;
-		BUG_ON((index >> (root->shift * root->height) || 
-			sradix_node_full(root, node)));
+		BUG_ON((index >> (root->shift * root->height)));
 	} else {
 		node = root->rnode;
 		if (node == NULL || (index >> (root->shift * root->height))
@@ -172,6 +171,7 @@ go_on:
 				break;
 		}
 		BUG_ON(offset >= root->stores_size);
+
 		if (offset != offset_saved) {
 			index += (offset - offset_saved) << shift;
 			index &= ~((1UL << shift) - 1);
@@ -243,7 +243,8 @@ go_on:
 
 /**
  *	sradix_tree_shrink    -    shrink height of a sradix tree to minimal
- *	@root		sradix tree root
+ *      @root		sradix tree root
+ *  
  */
 static inline void sradix_tree_shrink(struct sradix_tree_root *root)
 {
@@ -263,7 +264,6 @@ static inline void sradix_tree_shrink(struct sradix_tree_root *root)
 		root->height--;
 		if (unlikely(root->enter_node == to_free)) {
 			root->enter_node = NULL;
-			printk(KERN_ERR "UKSM: OH baby it really happens");
 		}
 		root->free(to_free);
 	}
@@ -291,24 +291,32 @@ void sradix_tree_delete_from_leaf(struct sradix_tree_root *root,
 		root->min = 0;
 		root->num = 0;
 		root->enter_node = NULL;
-		goto free_nodes;
 	} else {
 		offset = (index >> (root->shift * (node->height - 1))) & root->mask;
 		if (root->rm)
 			root->rm(node, offset);
 		node->stores[offset] = NULL;
 		root->num--;
+		if (root->min > index) {
+			root->min = index;
+			root->enter_node = node;
+		}
 	}
 
 	if (start != end) {
-		sradix_tree_shrink(root);
-
-free_nodes:
 		do {
 			node = start;
 			start = start->parent;
+			if (unlikely(root->enter_node == node))
+				root->enter_node = end;
 			root->free(node);
 		} while (start != end);
+
+		/*
+		 * Note that shrink may free "end", so enter_node still need to
+		 * be checked inside.
+		 */
+		sradix_tree_shrink(root);
 	} else if (node->count == root->stores_size - 1) {
 		/* It WAS a full leaf node. Update the ancestors */
 		node = node->parent;
@@ -319,12 +327,6 @@ free_nodes:
 
 			node = node->parent;
 		}
-	}
-
-	/* If cannot search the min ? */
-	if (root->min > index) {
-		root->min = index;
-		root->enter_node = end;
 	}
 }
 

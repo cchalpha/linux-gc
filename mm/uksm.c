@@ -184,7 +184,7 @@ static int is_full_zero(const void *s1, size_t len)
 #define UKSM_RUNG_ROUND_FINISHED  (1 << 0)
 #define TIME_RATIO_SCALE	10000
 
-#define SLOT_TREE_NODE_SHIFT	4
+#define SLOT_TREE_NODE_SHIFT	8
 #define SLOT_TREE_NODE_STORE_SIZE	(1UL << SLOT_TREE_NODE_SHIFT)
 struct slot_tree_node {
 	unsigned long size;
@@ -513,7 +513,7 @@ struct uksm_cpu_preset_s {
 };
 
 struct uksm_cpu_preset_s uksm_cpu_preset[4] = {
-	{ {20, 30, -2500, -10000}, {1000, 500, 200, 0}, 95},
+	{ {20, 30, -2500, -10000}, {500, 500, 200, 0}, 95},
 	{ {10, 20, -2500, -10000}, {1000, 500, 400, 0}, 50},
 	{ {5, 10, -5000, -10000}, {1500, 1000, 1000, 0}, 20},
 	{ {10, 20, 40, 75}, {2000, 1000, 1000, 0}, 1},
