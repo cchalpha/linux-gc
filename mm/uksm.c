@@ -403,6 +403,7 @@ struct rmap_item {
 	struct vma_slot *slot;
 	struct page *page;
 	unsigned long address;	/* + low bits used for flags below */
+	unsigned long hash_round;
 	unsigned long entry_index;
 	union {
 		struct {/* when in unstable tree */
@@ -466,6 +467,15 @@ static struct scan_rung uksm_scan_ladder[SCAN_LADDER_SIZE];
 /* The evaluation rounds uksmd has finished */
 static unsigned long long uksm_eval_round = 1;
 
+/*
+ * we add 1 to this var when we consider we should rebuild the whole
+ * unstable tree.
+ */
+static unsigned long uksm_hash_round = 1;
+
+/* The total number of virtual pages of all vma slots */
+static u64 uksm_pages_total;
+
 /* The number of pages has been scanned since the start up */
 static u64 uksm_pages_scanned;
 
@@ -513,9 +523,9 @@ struct uksm_cpu_preset_s {
 };
 
 struct uksm_cpu_preset_s uksm_cpu_preset[4] = {
-	{ {20, 30, -2500, -10000}, {500, 500, 200, 0}, 95},
-	{ {10, 20, -2500, -10000}, {1000, 500, 400, 0}, 50},
-	{ {5, 10, -5000, -10000}, {1500, 1000, 1000, 0}, 20},
+	{ {50, 75, -2500, -10000}, {500, 500, 200, 0}, 95},
+	{ {20, 30, -2500, -10000}, {1000, 500, 400, 0}, 50},
+	{ {10, 20, -5000, -10000}, {1500, 1000, 1000, 0}, 20},
 	{ {10, 20, 40, 75}, {2000, 1000, 1000, 0}, 1},
 };
 
@@ -930,15 +940,18 @@ static inline void remove_rmap_item_from_tree(struct rmap_item *rmap_item)
 
 		uksm_drop_anon_vma(rmap_item);
 	} else if (rmap_item->address & UNSTABLE_FLAG) {
-		rb_erase(&rmap_item->node,
-			 &rmap_item->tree_node->sub_root);
-		if (RB_EMPTY_ROOT(&rmap_item->tree_node->sub_root)) {
-			rb_erase(&rmap_item->tree_node->node,
-				 &root_unstable_tree);
+		if (rmap_item->hash_round == uksm_hash_round) {
 
-			free_tree_node(rmap_item->tree_node);
-		} else
-			rmap_item->tree_node->count--;
+			rb_erase(&rmap_item->node,
+				 &rmap_item->tree_node->sub_root);
+			if (RB_EMPTY_ROOT(&rmap_item->tree_node->sub_root)) {
+				rb_erase(&rmap_item->tree_node->node,
+					 &root_unstable_tree);
+
+				free_tree_node(rmap_item->tree_node);
+			} else
+				rmap_item->tree_node->count--;
+		}
 		uksm_pages_unshared--;
 	}
 
@@ -2444,6 +2457,7 @@ struct rmap_item *unstable_tree_search_insert(struct rmap_item *rmap_item,
 	/* did not found even in sub-tree */
 	rmap_item->tree_node = tree_node;
 	rmap_item->address |= UNSTABLE_FLAG;
+	rmap_item->hash_round = uksm_hash_round;
 	rb_link_node(&rmap_item->node, parent, new);
 	rb_insert_color(&rmap_item->node, &tree_node->sub_root);
 
@@ -2804,6 +2818,7 @@ static void cmp_and_merge_page(struct rmap_item *rmap_item, u32 hash)
 
 			rmap_item->tree_node = tree_rmap_item->tree_node;
 			rmap_item->address |= UNSTABLE_FLAG;
+			rmap_item->hash_round = uksm_hash_round;
 			rb_link_node(&rmap_item->node, parent, new);
 			rb_insert_color(&rmap_item->node,
 					&tree_rmap_item->tree_node->sub_root);
@@ -3825,14 +3840,16 @@ out:
 
 /**
  * rshash_adjust() - The main function to control the random sampling state
- * machine for hash strength adapting.
+ * machine for hash strength adapting. 
+ *  
+ * return true if hash_strength has changed. 
  */
-static void rshash_adjust(void)
+static int rshash_adjust(void)
 {
 	unsigned long prev_hash_strength = hash_strength;
 
 	if (!encode_benefit())
-		return;
+		return 0;
 
 	switch (rshash_state.state) {
 	case RSHASH_STILL:
@@ -3946,6 +3963,8 @@ static void rshash_adjust(void)
 
 	if (prev_hash_strength != hash_strength)
 		stable_tree_delta_hash(prev_hash_strength);
+
+	return prev_hash_strength != hash_strength;
 }
 
 /**
@@ -3959,7 +3978,6 @@ static noinline void round_update_ladder(void)
 	for (i = 0; i < SCAN_LADDER_SIZE; i++) {
 		uksm_scan_ladder[i].flags &= ~UKSM_RUNG_ROUND_FINISHED;
 	}
-	rshash_adjust();
 }
 
 static void uksm_del_vma_slot(struct vma_slot *slot)
@@ -4010,6 +4028,8 @@ static void uksm_del_vma_slot(struct vma_slot *slot)
 
 out:
 	slot->rung = NULL;
+	BUG_ON(uksm_pages_total < slot->pages);
+	uksm_pages_total -= slot->pages;
 	free_vma_slot(slot);
 }
 
@@ -4179,6 +4199,8 @@ static void uksm_vma_enter(struct vma_slot **slots, unsigned long num)
 		}
 
 		slot->pool_size = pool_size;
+		BUG_ON(CAN_OVERFLOW_U64(uksm_pages_total, slot->pages));
+		uksm_pages_total += slot->pages;
 	}
 
 	if (i)
@@ -4267,6 +4289,13 @@ static inline void judge_slot(struct vma_slot *slot)
 	/* If its deleted in above, then rung was already advanced. */
 	if (!deleted)
 		advance_current_scan(rung);
+}
+
+static u64 scanned_virtual_pages;
+
+static inline int hash_round_finished(void)
+{
+       return scanned_virtual_pages > (uksm_pages_total >> 7) ;
 }
 
 #define UKSM_MMSEM_BATCH	5
@@ -4409,6 +4438,9 @@ rm_slot:
 	}
 	end_time = task_sched_runtime(current);
 	delta_exec = end_time - start_time;
+	BUG_ON(CAN_OVERFLOW_U64(scanned_virtual_pages, vpages));
+	scanned_virtual_pages += vpages;
+
 
 	if (freezing(current))
 		return;
@@ -4434,6 +4466,14 @@ rm_slot:
 	if (round_finished) {
 		round_update_ladder();
 		uksm_eval_round++;
+
+		if (hash_round_finished() && rshash_adjust()) {
+			/* Reset the unstable root iff hash strength changed */
+			scanned_virtual_pages = 0;
+			uksm_hash_round++;
+			root_unstable_tree = RB_ROOT;
+			free_all_tree_nodes(&unstable_tree_node_list);
+		}
 
 		/*
 		 * A number of pages can hang around indefinitely on per-cpu
