@@ -473,6 +473,11 @@ static unsigned long long uksm_eval_round = 1;
  */
 static unsigned long uksm_hash_round = 1;
 
+/*
+ * How many times the whole memory is scanned.
+ */
+static unsigned long long fully_scanned_round = 1;
+
 /* The total number of virtual pages of all vma slots */
 static u64 uksm_pages_total;
 
@@ -3788,8 +3793,9 @@ static inline int judge_rshash_direction(void)
 	u64 current_benefit, delta = 0;
 	int ret = STILL;
 
-	/* In case the system are still for a long time. */
-	if (uksm_eval_round % 1024 == 3) {
+	/* Try to probe a value after the boot, and in case the system
+	   are still for a long time. */
+	if ((fully_scanned_round & 0xFFULL) == 10) {
 		ret = OBSCURE;
 		goto out;
 	}
@@ -4301,6 +4307,9 @@ static inline int hash_round_finished(void)
 	     scanned_virtual_pages > uksm_pages_total)) {
 		all_fully_scanned = 0;
 		scanned_virtual_pages = 0;
+		if (uksm_pages_scanned)
+			fully_scanned_round++;
+
 		return 1;
 	} else {
 		return 0;
@@ -5186,7 +5195,7 @@ UKSM_ATTR_RO(pages_unshared);
 static ssize_t full_scans_show(struct kobject *kobj,
 			       struct kobj_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%llu\n", uksm_eval_round);
+	return sprintf(buf, "%llu\n", fully_scanned_round);
 }
 UKSM_ATTR_RO(full_scans);
 
