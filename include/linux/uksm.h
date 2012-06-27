@@ -53,7 +53,7 @@ struct vma_slot {
 	unsigned long pages_merged; /* pages merged this round */
 
 	/* when it has page merged in this eval round */
-	struct list_head scan_list;
+	struct list_head dedup_list;
 };
 
 static inline void uksm_unmap_zero_page(pte_t pte)

@@ -711,7 +711,7 @@ static inline struct vma_slot *alloc_vma_slot(void)
 	slot = kmem_cache_zalloc(vma_slot_cache, GFP_KERNEL);
 	if (slot) {
 		INIT_LIST_HEAD(&slot->slot_list);
-		INIT_LIST_HEAD(&slot->scan_list);
+		INIT_LIST_HEAD(&slot->dedup_list);
 		slot->flags |= UKSM_SLOT_NEED_RERAND;
 	}
 	return slot;
@@ -2496,7 +2496,7 @@ static void stable_tree_append(struct rmap_item *rmap_item,
 			       struct stable_node *stable_node, int logdedup)
 {
 	struct node_vma *node_vma = NULL, *new_node_vma;
-	struct hlist_node *hlist;
+	struct hlist_node *hlist = NULL, *cont_p = NULL;
 	unsigned long key = (unsigned long)rmap_item->slot;
 
 	BUG_ON(!stable_node);
@@ -2512,10 +2512,23 @@ static void stable_tree_append(struct rmap_item *rmap_item,
 	hlist_for_each_entry(node_vma, hlist, &stable_node->hlist, hlist) {
 		if (node_vma->key >= key)
 			break;
+
+		if (logdedup) {
+			node_vma->slot->pages_merged++;
+			if (list_empty(&node_vma->slot->dedup_list))
+				list_add(&node_vma->slot->dedup_list, 
+					 &vma_slot_dedup);
+		}
 	}
 
-	if (node_vma && node_vma->key == key)
-		goto node_vma_ok;
+	if (node_vma) {
+		if (node_vma->key == key) {
+			cont_p = hlist->next;
+			goto node_vma_ok;
+		} else if (node_vma->key > key) {
+			cont_p = hlist;
+		}
+	}
 
 node_vma_new:
 	/* no same vma already in node, alloc a new node_vma */
@@ -2543,6 +2556,15 @@ node_vma_ok: /* ok, ready to add to the list */
 	hold_anon_vma(rmap_item, rmap_item->slot->vma->anon_vma);
 	if (logdedup) {
 		rmap_item->slot->pages_merged++;
+		if (cont_p) {
+			hlist_for_each_entry_continue(node_vma,
+						      cont_p, hlist) {
+				node_vma->slot->pages_merged++;
+				if (list_empty(&node_vma->slot->dedup_list))
+					list_add(&node_vma->slot->dedup_list, 
+						 &vma_slot_dedup);
+			}
+		}
 	}
 }
 
@@ -2781,14 +2803,19 @@ static void cmp_and_merge_page(struct rmap_item *rmap_item, u32 hash)
 						   rmap_item, tree_rmap_item,
 						   &success1, &success2);
 
-			if (success1)
-				stable_tree_append(rmap_item, snode, 1);
 			/*
 			 * Do not log dedup for tree item, it's not counted as
 			 * scanned in this round.
 			 */
 			if (success2)
 				stable_tree_append(tree_rmap_item, snode, 0);
+
+			/*
+			 * The order of these two stable append is important:
+			 * we are scanning rmap_item.
+			 */
+			if (success1)
+				stable_tree_append(rmap_item, snode, 1);
 
 			/*
 			 * The original kpage may be unlocked inside
@@ -3525,6 +3552,37 @@ static unsigned long cal_dedup_ratio(struct vma_slot *slot)
 	return ret;
 }
 
+/**
+ * cal_dedup_ratio() - Calculate the deduplication ratio for this slot.
+ */
+static unsigned long cal_dedup_ratio_old(struct vma_slot *slot)
+{
+	unsigned long ret;
+	unsigned long pages_scanned;
+
+	pages_scanned = slot->pages_scanned;
+	if (!pages_scanned) {
+		if (uksm_thrash_threshold)
+			return 0;
+		else
+			pages_scanned = slot->pages;
+	}
+
+	ret = slot->pages_merged * 100 / pages_scanned;
+
+	/* Thrashing area filtering */
+	if (ret && uksm_thrash_threshold) {
+		if (slot->pages_cowed * 100 / slot->pages_merged
+		    > uksm_thrash_threshold) {
+			ret = 0;
+		} else {
+			ret = ret * (slot->pages_merged - slot->pages_cowed)
+			      / slot->pages_merged;
+		}
+	}
+
+	return ret;
+}
 
 /**
  * stable_node_reinsert() - When the hash_strength has been adjusted, the
@@ -3979,9 +4037,23 @@ static inline int rshash_adjust(void)
 static noinline void round_update_ladder(void)
 {
 	int i;
+	unsigned long dedup;
+	struct vma_slot *slot, *tmp_slot;
 
 	for (i = 0; i < SCAN_LADDER_SIZE; i++) {
 		uksm_scan_ladder[i].flags &= ~UKSM_RUNG_ROUND_FINISHED;
+	}
+
+	list_for_each_entry_safe(slot, tmp_slot, &vma_slot_dedup, dedup_list) {
+
+		dedup = cal_dedup_ratio_old(slot);
+		if (dedup && dedup >= uksm_abundant_threshold)
+			vma_rung_up(slot);
+
+		slot->pages_merged = 0;
+		slot->pages_cowed = 0;
+
+		list_del_init(&slot->dedup_list);
 	}
 }
 
@@ -3998,8 +4070,8 @@ static void uksm_del_vma_slot(struct vma_slot *slot)
 		rung_rm_slot(slot);
 	}
 
-	if (!list_empty(&slot->scan_list))
-		list_del(&slot->scan_list);
+	if (!list_empty(&slot->dedup_list))
+		list_del(&slot->dedup_list);
 
 	if (!slot->rmap_list_pool || !slot->pool_counts) {
 		/* In case it OOMed in uksm_vma_enter() */
