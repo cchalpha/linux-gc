@@ -3535,8 +3535,7 @@ static unsigned long cal_dedup_ratio(struct vma_slot *slot)
 
 	BUG_ON(slot->pages_scanned == slot->last_scanned);
 
-	ret = slot->pages_merged * 100 /
-		(slot->pages_scanned - slot->last_scanned);
+	ret = slot->pages_merged;
 
 	/* Thrashing area filtering */
 	if (ret && uksm_thrash_threshold) {
@@ -3544,8 +3543,7 @@ static unsigned long cal_dedup_ratio(struct vma_slot *slot)
 		    > uksm_thrash_threshold) {
 			ret = 0;
 		} else {
-			ret = ret * (slot->pages_merged - slot->pages_cowed)
-			      / slot->pages_merged;
+			ret = slot->pages_merged - slot->pages_cowed;
 		}
 	}
 
@@ -3564,11 +3562,9 @@ static unsigned long cal_dedup_ratio_old(struct vma_slot *slot)
 	if (!pages_scanned) {
 		if (uksm_thrash_threshold)
 			return 0;
-		else
-			pages_scanned = slot->pages;
 	}
 
-	ret = slot->pages_merged * 100 / pages_scanned;
+	ret = slot->pages_merged;
 
 	/* Thrashing area filtering */
 	if (ret && uksm_thrash_threshold) {
@@ -3576,8 +3572,7 @@ static unsigned long cal_dedup_ratio_old(struct vma_slot *slot)
 		    > uksm_thrash_threshold) {
 			ret = 0;
 		} else {
-			ret = ret * (slot->pages_merged - slot->pages_cowed)
-			      / slot->pages_merged;
+			ret = slot->pages_merged - slot->pages_cowed;
 		}
 	}
 
