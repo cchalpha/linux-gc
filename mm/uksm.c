@@ -2731,7 +2731,6 @@ static void cmp_and_merge_page(struct rmap_item *rmap_item, u32 hash)
 	struct rb_node *parent = NULL, **new;
 
 	remove_rmap_item_from_tree(rmap_item);
-	inc_uksm_pages_scanned();
 	page = rmap_item->page;
 
 	/* We first start with searching the page inside the stable tree */
@@ -3198,7 +3197,7 @@ static struct rmap_item *get_next_rmap_item(struct vma_slot *slot, u32 *hash)
 
 	
 	*hash = page_hash(page, hash_strength, 1);
-
+	inc_uksm_pages_scanned();
 	/*if the page content all zero, re-map to zero-page*/
 	if (find_zero_page_hash(hash_strength, *hash)) {
 		if (!cmp_and_merge_zero_page(slot->vma, page)) {
@@ -3795,7 +3794,7 @@ static inline int judge_rshash_direction(void)
 
 	/* Try to probe a value after the boot, and in case the system
 	   are still for a long time. */
-	if ((fully_scanned_round & 0xFFULL) == 10) {
+	if ((fully_scanned_round & 0xFFULL) == 20) {
 		ret = OBSCURE;
 		goto out;
 	}
