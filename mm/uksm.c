@@ -3474,10 +3474,8 @@ static inline void rung_add_one_slot(struct scan_rung *rung,
 	int err;
 	struct sradix_tree_root *root;
 
-	if (vma_fully_scanned(slot))
-		root = rung->ful_scan_root;
-	else
-		root = rung->scan_root;
+
+	root = rung->scan_root;
 
 	err = sradix_tree_enter(root, (void **)&slot, 1);
 	BUG_ON(err);
@@ -3495,7 +3493,7 @@ static inline void rung_add_one_slot(struct scan_rung *rung,
  */
 static inline int vma_rung_enter(struct vma_slot *slot, struct scan_rung *rung)
 {
-	if (slot->rung == rung && !vma_fully_scanned(slot))
+	if (slot->rung == rung)
 		return 0;
 
 	rung_rm_slot(slot);
