@@ -3844,7 +3844,7 @@ out:
  *  
  * return true if hash_strength has changed. 
  */
-static int rshash_adjust(void)
+static inline int rshash_adjust(void)
 {
 	unsigned long prev_hash_strength = hash_strength;
 
@@ -4292,10 +4292,19 @@ static inline void judge_slot(struct vma_slot *slot)
 }
 
 static u64 scanned_virtual_pages;
+int all_fully_scanned;
 
 static inline int hash_round_finished(void)
 {
-       return scanned_virtual_pages > (uksm_pages_total >> 7) ;
+	if ((uksm_thrash_threshold && all_fully_scanned) ||
+	    (!uksm_thrash_threshold && 
+	     scanned_virtual_pages > uksm_pages_total)) {
+		all_fully_scanned = 0;
+		scanned_virtual_pages = 0;
+		return 1;
+	} else {
+		return 0;
+	}
 }
 
 #define UKSM_MMSEM_BATCH	5
@@ -4341,6 +4350,7 @@ static noinline void uksm_do_scan(void)
 						    rung->cpu_ratio);
 				reset_rung_scan(rung);
 				reset_current_scan(rung, 0);
+				all_fully_scanned = 1;
 			} else {
 				rung->pages_to_scan = 0;
 				i++;
@@ -4469,7 +4479,7 @@ rm_slot:
 
 		if (hash_round_finished() && rshash_adjust()) {
 			/* Reset the unstable root iff hash strength changed */
-			scanned_virtual_pages = 0;
+			printk(KERN_ERR "UKSM: rehashed");
 			uksm_hash_round++;
 			root_unstable_tree = RB_ROOT;
 			free_all_tree_nodes(&unstable_tree_node_list);
