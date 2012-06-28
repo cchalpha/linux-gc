@@ -35,7 +35,7 @@ struct vma_slot {
 	unsigned long sindex;
 
 	struct list_head slot_list;
-	//unsigned long dedup_ratio;
+	unsigned long fully_scanned_round;
 	unsigned long dedup_num;
 	unsigned long pages_scanned;
 	unsigned long last_scanned;
