@@ -528,7 +528,7 @@ struct uksm_cpu_preset_s {
 };
 
 struct uksm_cpu_preset_s uksm_cpu_preset[4] = {
-	{ {50, 75, -2500, -10000}, {500, 500, 200, 50}, 95},
+	{ {30, 60, -2500, -10000}, {1000, 500, 200, 50}, 95},
 	{ {20, 30, -2500, -10000}, {1000, 500, 400, 100}, 50},
 	{ {10, 20, -5000, -10000}, {1500, 1000, 1000, 250}, 20},
 	{ {10, 20, 40, 75}, {2000, 1000, 1000, 1000}, 1},
@@ -2515,7 +2515,7 @@ static void stable_tree_append(struct rmap_item *rmap_item,
 			break;
 
 		if (logdedup) {
-			node_vma->slot->pages_merged += factor;
+			node_vma->slot->pages_bemerged += factor;
 			if (list_empty(&node_vma->slot->dedup_list))
 				list_add(&node_vma->slot->dedup_list, 
 					 &vma_slot_dedup);
@@ -2560,7 +2560,7 @@ node_vma_ok: /* ok, ready to add to the list */
 		if (cont_p) {
 			hlist_for_each_entry_continue(node_vma,
 						      cont_p, hlist) {
-				node_vma->slot->pages_merged += factor;
+				node_vma->slot->pages_bemerged += factor;
 				if (list_empty(&node_vma->slot->dedup_list))
 					list_add(&node_vma->slot->dedup_list, 
 						 &vma_slot_dedup);
@@ -3312,59 +3312,6 @@ out1:
 		slot->fully_scanned_round = fully_scanned_round;
 }
 
-static inline void reset_rung_scan(struct scan_rung *rung)
-{
-	rung->offset_init = 0;
-}
-
-static inline void reset_current_scan(struct scan_rung *rung, int finished)
-{
-	struct vma_slot *slot;
-
-	if (finished)
-		rung->flags |= UKSM_RUNG_ROUND_FINISHED;
-
-	slot_iter_index = rung->offset_init % rung->step;
-	BUG_ON(!rung->vma_root.rnode);
-	slot = sradix_tree_next(&rung->vma_root, NULL, 0, slot_iter);
-	BUG_ON(!slot);
-
-	rung->current_scan = slot;
-	rung->current_offset = slot_iter_index;
-	rung->offset_init = (rung->offset_init + 1) % rung->step;
-}
-
-static inline struct sradix_tree_root *slot_get_root(struct vma_slot *slot)
-{
-	return &slot->rung->vma_root;
-}
-
-/*
- * return if resetted.
- */
-static int advance_current_scan(struct scan_rung *rung)
-{
-	unsigned short n;
-	struct vma_slot *slot, *next = NULL;
-
-	BUG_ON(!rung->vma_root.num);
-
-	slot = rung->current_scan;
-	n = (slot->pages - rung->current_offset) % rung->step;
-	slot_iter_index = rung->step - n;
-	next = sradix_tree_next(&rung->vma_root, slot->snode,
-				slot->sindex, slot_iter);
-
-	if (next) {
-		rung->current_offset = slot_iter_index;
-		rung->current_scan = next;
-		return 0;
-	} else {
-		reset_current_scan(rung, 1);
-		return 1;
-	}
-}
-
 static inline unsigned long rung_get_pages(struct scan_rung *rung)
 {
 	struct slot_tree_node *node;
@@ -3377,7 +3324,7 @@ static inline unsigned long rung_get_pages(struct scan_rung *rung)
 	return node->size;
 }
 
-#define RUNG_SAMPLED_MIN	10
+#define RUNG_SAMPLED_MIN	3
 
 static inline
 void uksm_calc_rung_step(struct scan_rung *rung,
@@ -3407,15 +3354,76 @@ void uksm_calc_rung_step(struct scan_rung *rung,
 		rung->step = pages / sampled;
 	else
 		rung->step = 1;
+}
 
-	rung->offset_init %= rung->step;
+static inline int step_need_recalc(struct scan_rung *rung)
+{
+	unsigned long pages, stepmax;
+
+	pages = rung_get_pages(rung);
+	stepmax = pages / RUNG_SAMPLED_MIN;
+
+	return pages && (rung->step > pages || 
+			 (stepmax && rung->step > stepmax));
+}
+
+static inline 
+void reset_current_scan(struct scan_rung *rung, int finished, int step_recalc)
+{
+	struct vma_slot *slot;
+
+	if (finished)
+		rung->flags |= UKSM_RUNG_ROUND_FINISHED;
+
+	if (step_recalc || step_need_recalc(rung)) {
+		uksm_calc_rung_step(rung, uksm_ema_page_time, rung->cpu_ratio);
+		BUG_ON(step_need_recalc(rung));
+	}
+
+	slot_iter_index = random32() % rung->step;
+	BUG_ON(!rung->vma_root.rnode);
+	slot = sradix_tree_next(&rung->vma_root, NULL, 0, slot_iter);
+	BUG_ON(!slot);
+
+	rung->current_scan = slot;
+	rung->current_offset = slot_iter_index;
+}
+
+static inline struct sradix_tree_root *slot_get_root(struct vma_slot *slot)
+{
+	return &slot->rung->vma_root;
+}
+
+/*
+ * return if resetted.
+ */
+static int advance_current_scan(struct scan_rung *rung)
+{
+	unsigned short n;
+	struct vma_slot *slot, *next = NULL;
+
+	BUG_ON(!rung->vma_root.num);
+
+	slot = rung->current_scan;
+	n = (slot->pages - rung->current_offset) % rung->step;
+	slot_iter_index = rung->step - n;
+	next = sradix_tree_next(&rung->vma_root, slot->snode,
+				slot->sindex, slot_iter);
+
+	if (next) {
+		rung->current_offset = slot_iter_index;
+		rung->current_scan = next;
+		return 0;
+	} else {
+		reset_current_scan(rung, 1, 0);
+		return 1;
+	}
 }
 
 static inline void rung_rm_slot(struct vma_slot *slot)
 {
 	struct scan_rung *rung = slot->rung;
 	struct sradix_tree_root *root;
-	unsigned long pages;
 
 	if (rung->current_scan == slot)
 		advance_current_scan(rung);
@@ -3423,15 +3431,14 @@ static inline void rung_rm_slot(struct vma_slot *slot)
 	root = slot_get_root(slot);
 	sradix_tree_delete_from_leaf(root, slot->snode, slot->sindex);
 	slot->snode = NULL;
-
-	pages = rung_get_pages(rung);
-	if (pages && rung->step > pages / RUNG_SAMPLED_MIN)
-		uksm_calc_rung_step(rung, uksm_ema_page_time, 
-				    rung->cpu_ratio);
+	if (step_need_recalc(rung)) {
+		uksm_calc_rung_step(rung, uksm_ema_page_time, rung->cpu_ratio);
+		BUG_ON(step_need_recalc(rung));
+	}
 
 	/* In case advance_current_scan loop back to this slot again */
 	if (rung->vma_root.num && rung->current_scan == slot)
-		reset_current_scan(slot->rung, 1);
+		reset_current_scan(slot->rung, 1, 0);
 }
 
 static inline void rung_add_new_slots(struct scan_rung *rung, 
@@ -3451,10 +3458,8 @@ static inline void rung_add_new_slots(struct scan_rung *rung,
 		BUG_ON(vma_fully_scanned(slot));
 	}
 
-	if (rung->vma_root.num == num) {
-		reset_rung_scan(rung);
-		reset_current_scan(rung, 0);
-	}
+	if (rung->vma_root.num == num)
+		reset_current_scan(rung, 0, 1);
 }
 
 static inline void rung_add_one_slot(struct scan_rung *rung, 
@@ -3466,11 +3471,8 @@ static inline void rung_add_one_slot(struct scan_rung *rung,
 	BUG_ON(err);
 	slot->rung = rung;
 
-	if (rung->vma_root.num == 1) {
-		reset_rung_scan(rung);
-		reset_current_scan(rung, 0);
-	}
-
+	if (rung->vma_root.num == 1) 
+		reset_current_scan(rung, 0, 1);
 }
 
 /*
@@ -3549,15 +3551,15 @@ static unsigned long cal_dedup_ratio_old(struct vma_slot *slot)
 			pages_scanned = slot->pages_scanned;
 	}
 
-	ret = slot->pages_merged * 100 / pages_scanned;
+	ret = slot->pages_bemerged * 100 / pages_scanned;
 
 	/* Thrashing area filtering */
 	if (ret && uksm_thrash_threshold) {
-		if (slot->pages_cowed * 100 / slot->pages_merged
+		if (slot->pages_cowed * 100 / slot->pages_bemerged
 		    > uksm_thrash_threshold) {
 			ret = 0;
 		} else {
-			ret = slot->pages_merged - slot->pages_cowed;
+			ret = slot->pages_bemerged - slot->pages_cowed;
 		}
 	}
 
@@ -4030,7 +4032,7 @@ static noinline void round_update_ladder(void)
 		if (dedup && dedup >= uksm_abundant_threshold)
 			vma_rung_up(slot);
 
-		slot->pages_merged = 0;
+		slot->pages_bemerged = 0;
 		slot->pages_cowed = 0;
 
 		list_del_init(&slot->dedup_list);
@@ -4374,7 +4376,6 @@ static noinline void uksm_do_scan(void)
 {
 	struct vma_slot *slot, *iter;
 	struct mm_struct *busy_mm;
-	struct sradix_tree_root *tmp;
 	unsigned char round_finished, all_rungs_emtpy;
 	int i, err, mmsem_batch;
 	unsigned long pcost;

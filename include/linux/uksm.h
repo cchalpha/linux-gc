@@ -51,6 +51,7 @@ struct vma_slot {
 	unsigned long flags;
 	unsigned long pages_cowed; /* pages cowed this round */
 	unsigned long pages_merged; /* pages merged this round */
+	unsigned long pages_bemerged;
 
 	/* when it has page merged in this eval round */
 	struct list_head dedup_list;
