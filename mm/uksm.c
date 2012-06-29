@@ -4525,7 +4525,6 @@ rm_slot:
 
 		if (hash_round_finished() && rshash_adjust()) {
 			/* Reset the unstable root iff hash strength changed */
-			printk(KERN_ERR "UKSM: rehashed");
 			uksm_hash_round++;
 			root_unstable_tree = RB_ROOT;
 			free_all_tree_nodes(&unstable_tree_node_list);
