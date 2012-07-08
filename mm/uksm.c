@@ -4088,7 +4088,9 @@ static void uksm_del_vma_slot(struct vma_slot *slot)
 out:
 	slot->rung = NULL;
 	BUG_ON(uksm_pages_total < slot->pages);
-	uksm_pages_total -= slot->pages;
+	if (slot->flags & UKSM_SLOT_IN_UKSM)
+		uksm_pages_total -= slot->pages;
+
 	if (slot->fully_scanned_round == fully_scanned_round)
 		scanned_virtual_pages -= slot->pages;
 	else
@@ -4229,9 +4231,9 @@ unsigned int scan_time_to_sleep(unsigned long long scan_time, unsigned long rati
 #define __round_mask(x, y) ((__typeof__(x))((y)-1))
 #define round_up(x, y) ((((x)-1) | __round_mask(x, y))+1)
 
-static inline unsigned long vma_pool_size(struct vm_area_struct *vma)
+static inline unsigned long vma_pool_size(struct vma_slot *slot)
 {
-	return round_up(sizeof(struct rmap_list_entry) * vma_pages(vma),
+	return round_up(sizeof(struct rmap_list_entry) * slot->pages,
 			PAGE_SIZE) >> PAGE_SHIFT;
 }
 
@@ -4248,13 +4250,13 @@ static void uksm_vma_enter(struct vma_slot **slots, unsigned long num)
 	for (i = 0; i < num; i++) {
 		slot = slots[i];
 
-		pool_size = vma_pool_size(slot->vma);
+		pool_size = vma_pool_size(slot);
 		slot->rmap_list_pool = kzalloc(sizeof(struct page *) *
 					       pool_size, GFP_KERNEL);
 		if (!slot->rmap_list_pool)			
 			break;
 
-		slot->pool_counts = kzalloc(sizeof(unsigned long) * pool_size,
+		slot->pool_counts = kzalloc(sizeof(unsigned int) * pool_size,
 					    GFP_KERNEL);
 		if (!slot->pool_counts) {
 			kfree(slot->rmap_list_pool);
@@ -4263,6 +4265,7 @@ static void uksm_vma_enter(struct vma_slot **slots, unsigned long num)
 
 		slot->pool_size = pool_size;
 		BUG_ON(CAN_OVERFLOW_U64(uksm_pages_total, slot->pages));
+		slot->flags |= UKSM_SLOT_IN_UKSM;
 		uksm_pages_total += slot->pages;
 	}
 

@@ -28,7 +28,7 @@ extern void uksm_remove_vma(struct vm_area_struct *vma);
 #define UKSM_SLOT_NEED_RERAND 	(1 << 1)
 #define UKSM_SLOT_SCANNED     	(1 << 2) /* It's scanned in this round */
 #define UKSM_SLOT_FUL_SCANNED 	(1 << 3)
-#define UKSM_SLOT_VMA_ROOT1 	(1 << 4)
+#define UKSM_SLOT_IN_UKSM 	(1 << 4)
 
 struct vma_slot {
 	struct sradix_tree_node *snode;
@@ -42,7 +42,7 @@ struct vma_slot {
 	unsigned long pages_to_scan;
 	struct scan_rung *rung;
 	struct page **rmap_list_pool;
-	unsigned long *pool_counts;
+	unsigned int *pool_counts;
 	unsigned long pool_size;
 	struct vm_area_struct *vma;
 	struct mm_struct *mm;
