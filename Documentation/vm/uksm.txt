@@ -50,3 +50,5 @@ ChangeLog:
 2012-05-08 UKSM 0.1.1.1 libc crash bug fix, api clean up, doc clean up.
 2012-05-28 UKSM 0.1.1.2 bug fix release
 2012-06-26 UKSM 0.1.2-beta1 first beta release for 0.1.2
+2012-07-2 UKSM 0.1.2-beta2
+2012-07-10 UKSM 0.1.2-beta3
