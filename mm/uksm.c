@@ -4028,9 +4028,12 @@ static noinline void round_update_ladder(void)
 
 	list_for_each_entry_safe(slot, tmp_slot, &vma_slot_dedup, dedup_list) {
 
-		dedup = cal_dedup_ratio_old(slot);
-		if (dedup && dedup >= uksm_abundant_threshold)
-			vma_rung_up(slot);
+		/* slot may be rung_rm_slot() when mm exits */
+		if (slot->snode) {
+			dedup = cal_dedup_ratio_old(slot);
+			if (dedup && dedup >= uksm_abundant_threshold)
+				vma_rung_up(slot);
+		}
 
 		slot->pages_bemerged = 0;
 		slot->pages_cowed = 0;
