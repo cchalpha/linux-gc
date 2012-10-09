@@ -1331,10 +1331,10 @@ static inline u32 page_hash(struct page *page, unsigned long hash_strength,
 	u32 val;
 	unsigned long delta;
 
-	void *addr = kmap_atomic(page, KM_USER0);
+	void *addr = kmap_atomic(page);
 
 	val = random_sample_hash(addr, hash_strength);
-	kunmap_atomic(addr, KM_USER0);
+	kunmap_atomic(addr);
 
 	if (cost_accounting) {
 		if (HASH_STRENGTH_FULL > hash_strength)
@@ -1354,11 +1354,11 @@ static int memcmp_pages(struct page *page1, struct page *page2,
 	char *addr1, *addr2;
 	int ret;
 
-	addr1 = kmap_atomic(page1, KM_USER0);
-	addr2 = kmap_atomic(page2, KM_USER1);
+	addr1 = kmap_atomic(page1);
+	addr2 = kmap_atomic(page2);
 	ret = memcmp(addr1, addr2, PAGE_SIZE);
-	kunmap_atomic(addr2, KM_USER1);
-	kunmap_atomic(addr1, KM_USER0);
+	kunmap_atomic(addr2);
+	kunmap_atomic(addr1);
 
 	if (cost_accounting)
 		inc_rshash_neg(memcmp_cost);
@@ -1376,9 +1376,9 @@ static inline int is_page_full_zero(struct page *page)
 	char *addr;
 	int ret;
 
-	addr = kmap_atomic(page, KM_USER0);
+	addr = kmap_atomic(page);
 	ret = is_full_zero(addr, PAGE_SIZE);
-	kunmap_atomic(addr, KM_USER0);
+	kunmap_atomic(addr);
 
 	return ret;
 }
@@ -1536,11 +1536,11 @@ static inline u32 page_hash_max(struct page *page, u32 hash_old)
 	u32 hash_max = 0;
 	void *addr;
 
-	addr = kmap_atomic(page, KM_USER0);
+	addr = kmap_atomic(page);
 	hash_max = delta_hash(addr, hash_strength,
 			      HASH_STRENGTH_MAX, hash_old);
 
-	kunmap_atomic(addr, KM_USER0);
+	kunmap_atomic(addr);
 
 	if (!hash_max)
 		hash_max = 1;
@@ -3737,11 +3737,11 @@ static inline void stable_tree_delta_hash(u32 prev_hash_strength)
 		if (node->tree_node) {
 			hash = node->tree_node->hash;
 
-			addr = kmap_atomic(node_page, KM_USER0);
+			addr = kmap_atomic(node_page);
 
 			hash = delta_hash(addr, prev_hash_strength,
 					  hash_strength, hash);
-			kunmap_atomic(addr, KM_USER0);
+			kunmap_atomic(addr);
 		} else {
 			/*
 			 *it was not inserted to rbtree due to collision in last
@@ -5347,15 +5347,15 @@ static inline int cal_positive_negative_costs(void)
 	if (!p2)
 		return -ENOMEM;
 
-	addr1 = kmap_atomic(p1, KM_USER0);
-	addr2 = kmap_atomic(p2, KM_USER1);
+	addr1 = kmap_atomic(p1);
+	addr2 = kmap_atomic(p2);
 	memset(addr1, random32(), PAGE_SIZE);
 	memcpy(addr2, addr1, PAGE_SIZE);
 
 	/* make sure that the two pages differ in last byte */
 	addr2[PAGE_SIZE-1] = ~addr2[PAGE_SIZE-1];
-	kunmap_atomic(addr2, KM_USER1);
-	kunmap_atomic(addr1, KM_USER0);
+	kunmap_atomic(addr2);
+	kunmap_atomic(addr1);
 
 	time_start = jiffies;
 	while (jiffies - time_start < 100) {
@@ -5389,9 +5389,9 @@ static int init_zeropage_hash_table(void)
 	if (!page)
 		return -ENOMEM;
 
-	addr = kmap_atomic(page, KM_USER0);
+	addr = kmap_atomic(page);
 	memset(addr, 0, PAGE_SIZE);
-	kunmap_atomic(addr, KM_USER0);
+	kunmap_atomic(addr);
 
 	zero_hash_table = kmalloc(HASH_STRENGTH_MAX * sizeof(u32),
 		GFP_KERNEL);
