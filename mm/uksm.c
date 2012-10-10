@@ -2892,6 +2892,7 @@ struct rmap_list_entry *get_rmap_list_entry(struct vma_slot *slot,
 					    unsigned long index, int need_alloc)
 {
 	unsigned long pool_index;
+	struct page *page;
 	void *addr;
 
 
@@ -2900,9 +2901,11 @@ struct rmap_list_entry *get_rmap_list_entry(struct vma_slot *slot,
 		if (!need_alloc)
 			return NULL;
 
-		slot->rmap_list_pool[pool_index] =
-			alloc_page(GFP_KERNEL | __GFP_ZERO);
-		BUG_ON(!slot->rmap_list_pool[pool_index]);
+		page = alloc_page(GFP_KERNEL | __GFP_ZERO);
+		if (!page)
+			return NULL;
+			
+		slot->rmap_list_pool[pool_index] = page;			
 	}
 
 	addr = kmap(slot->rmap_list_pool[pool_index]);
@@ -3183,6 +3186,9 @@ static struct rmap_item *get_next_rmap_item(struct vma_slot *slot, u32 *hash)
 	}
 
 	scan_entry = get_rmap_list_entry(slot, scan_index, 1);
+	if (!scan_entry)
+		return NULL;
+	
 	if (entry_is_new(scan_entry)) {
 		scan_entry->addr = get_index_orig_addr(slot, scan_index);
 		set_is_addr(scan_entry->addr);
@@ -3462,17 +3468,20 @@ static inline void rung_add_new_slots(struct scan_rung *rung,
 		reset_current_scan(rung, 0, 1);
 }
 
-static inline void rung_add_one_slot(struct scan_rung *rung, 
+static inline int rung_add_one_slot(struct scan_rung *rung, 
 				     struct vma_slot *slot)
 {
 	int err;
 
 	err = sradix_tree_enter(&rung->vma_root, (void **)&slot, 1);
-	BUG_ON(err);
+	if (err)
+		return err;
+	
 	slot->rung = rung;
-
 	if (rung->vma_root.num == 1) 
 		reset_current_scan(rung, 0, 1);
+	
+	return 0;
 }
 
 /*
@@ -3480,11 +3489,18 @@ static inline void rung_add_one_slot(struct scan_rung *rung,
  */
 static inline int vma_rung_enter(struct vma_slot *slot, struct scan_rung *rung)
 {
-	if (slot->rung == rung)
+	struct scan_rung *old_rung = slot->rung;
+	int err;
+	
+	if (old_rung == rung)
 		return 0;
 
 	rung_rm_slot(slot);
-	rung_add_one_slot(rung, slot);
+	err = rung_add_one_slot(rung, slot);
+	if (err) {
+		err = rung_add_one_slot(old_rung, slot);
+		WARN_ON(err); /* OOPS, badly OOM, we lost this slot */
+	}
 
 	return 1;
 }
