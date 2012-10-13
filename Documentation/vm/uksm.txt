@@ -53,3 +53,4 @@ ChangeLog:
 2012-07-2  UKSM 0.1.2-beta2
 2012-07-10 UKSM 0.1.2-beta3
 2012-07-26 UKSM 0.1.2 Fine grained speed control, more scan optimization.
+2012-10-13 UKSM 0.1.2.1 Bug fixes.
