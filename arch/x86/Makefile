@@ -85,11 +85,25 @@ else
 	KBUILD_CFLAGS += $(call cc-option,-mpreferred-stack-boundary=3)
 
         # FIXME - should be integrated in Makefile.cpu (Makefile_32.cpu)
+        cflags-$(CONFIG_MNATIVE) += $(call cc-option,-march=native)
         cflags-$(CONFIG_MK8) += $(call cc-option,-march=k8)
+        cflags-$(CONFIG_MK10) += $(call cc-option,-march=amdfam10)
+        cflags-$(CONFIG_MBARCELONA) += $(call cc-option,-march=barcelona)
+        cflags-$(CONFIG_MBOBCAT) += $(call cc-option,-march=btver1)
+        cflags-$(CONFIG_MBULLDOZER) += $(call cc-option,-march=bdver1)
+        cflags-$(CONFIG_MPILEDRIVER) += $(call cc-option,-march=bdver2)
         cflags-$(CONFIG_MPSC) += $(call cc-option,-march=nocona)
 
         cflags-$(CONFIG_MCORE2) += \
-                $(call cc-option,-march=core2,$(call cc-option,-mtune=generic))
+                $(call cc-option,-march=core2,$(call cc-option,-mtune=core2))
+        cflags-$(CONFIG_MCOREI7) += \
+                $(call cc-option,-march=corei7,$(call cc-option,-mtune=corei7))
+        cflags-$(CONFIG_MCOREI7AVX) += \
+                $(call cc-option,-march=corei7-avx,$(call cc-option,-mtune=corei7-avx))
+        cflags-$(CONFIG_MCOREAVXI) += \
+                $(call cc-option,-march=core-avx-i,$(call cc-option,-mtune=core-avx-i))
+        cflags-$(CONFIG_MCOREAVX2) += \
+                $(call cc-option,-march=core-avx2,$(call cc-option,-mtune=core-avx2))
 	cflags-$(CONFIG_MATOM) += $(call cc-option,-march=atom) \
 		$(call cc-option,-mtune=atom,$(call cc-option,-mtune=generic))
         cflags-$(CONFIG_GENERIC_CPU) += $(call cc-option,-mtune=generic)
