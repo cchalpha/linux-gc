@@ -253,8 +253,8 @@ static unsigned extract_msr(u32 msr, struct acpi_cpufreq_data *data)
 		}
 	}
 	else {
-		msr &= INTEL_MSR_RANGE;
 		u32 fid;
+		msr &= INTEL_MSR_RANGE;
 		fid = msr & INTEL_MSR_FID_MASK;
 		perf = data->acpi_data;
 
