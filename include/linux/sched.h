@@ -1021,18 +1021,17 @@ struct task_struct {
 	unsigned int flags;	/* per process flags, defined below */
 	unsigned int ptrace;
 
-#ifdef CONFIG_SMP
+#if defined(CONFIG_SMP) || defined(CONFIG_SCHED_BFS)
 	struct llist_node wake_entry;
 	int on_cpu;
+#endif
+#ifdef CONFIG_SMP
 	struct task_struct *last_wakee;
 	unsigned long wakee_flips;
 	unsigned long wakee_flip_decay_ts;
 #endif
-#if !defined(CONFIG_SMP) && defined(CONFIG_SCHED_BFS)
-	bool on_cpu;
-#endif
 #ifndef CONFIG_SCHED_BFS
-	bool on_rq;
+	int on_rq;
 #endif
 
 	int prio, static_prio, normal_prio;
@@ -1051,10 +1050,9 @@ struct task_struct {
 	const struct sched_class *sched_class;
 	struct sched_entity se;
 	struct sched_rt_entity rt;
-
+#endif
 #ifdef CONFIG_CGROUP_SCHED
 	struct task_group *sched_task_group;
-#endif
 #endif
 
 #ifdef CONFIG_PREEMPT_NOTIFIERS

@@ -139,7 +139,7 @@
 
 void print_scheduler_version(void)
 {
-	printk(KERN_INFO "BFS CPU scheduler v0.441 by Con Kolivas.\n");
+	printk(KERN_INFO "BFS CPU scheduler v0.443 by Con Kolivas.\n");
 }
 
 /*
@@ -262,6 +262,8 @@ int __weak arch_sd_sibling_asym_packing(void)
 #endif /* CONFIG_SMP */
 
 static inline void update_rq_clock(struct rq *rq);
+static unsigned long long do_task_sched_runtime(struct task_struct *p);
+static u64 do_task_delta_exec(struct task_struct *p, struct rq *rq);
 
 /*
  * Sanity check should sched_clock return bogus values. We make sure it does
@@ -963,13 +965,6 @@ static inline void deactivate_task(struct task_struct *p)
 		grq.nr_uninterruptible++;
 	grq.nr_running--;
 	clear_sticky(p);
-}
-
-static ATOMIC_NOTIFIER_HEAD(task_migration_notifier);
-
-void register_task_migration_notifier(struct notifier_block *n)
-{
-	atomic_notifier_chain_register(&task_migration_notifier, n);
 }
 
 #ifdef CONFIG_SMP
@@ -2343,6 +2338,7 @@ void thread_group_cputime(struct task_struct *tsk, struct task_cputime *times)
 	struct signal_struct *sig = tsk->signal;
 	cputime_t utime, stime;
 	struct task_struct *t;
+	unsigned long flags;
 
 	times->utime = sig->utime;
 	times->stime = sig->stime;
@@ -2354,12 +2350,14 @@ void thread_group_cputime(struct task_struct *tsk, struct task_cputime *times)
 		goto out;
 
 	t = tsk;
+	grq_lock_irqsave(&flags);
 	do {
 		task_cputime(t, &utime, &stime);
 		times->utime += utime;
 		times->stime += stime;
-		times->sum_exec_runtime += task_sched_runtime(t);
+		times->sum_exec_runtime += do_task_sched_runtime(t);
 	} while_each_thread(tsk, t);
+	grq_unlock_irqrestore(&flags);
 out:
 	rcu_read_unlock();
 }
@@ -2407,16 +2405,7 @@ pc_system_time(struct rq *rq, struct task_struct *p, int hardirq_offset,
 		account_group_system_time(p, cputime_one_jiffy * jiffs);
 	}
 	p->sched_time += ns;
-	/*
-	 * Do not update the cputimer if the task is already released by
-	 * release_task().
-	 *
-	 * This could be executed if a tick happens when a task is inside
-	 * do_exit() between the call to release_task() and its final
-	 * schedule() call for autoreaping tasks.
-	 */
-	if (likely(p->sighand))
-		account_group_exec_runtime(p, ns);
+	account_group_exec_runtime(p, ns);
 
 	if (hardirq_count() - hardirq_offset) {
 		rq->irq_pc += pc;
@@ -2456,15 +2445,7 @@ static void pc_user_time(struct rq *rq, struct task_struct *p,
 		account_group_user_time(p, cputime_one_jiffy * jiffs);
 	}
 	p->sched_time += ns;
-	/*
-	 * Do not update the cputimer if the task is already released by
-	 * release_task().
-	 *
-	 * it would preferable to defer the autoreap release_task
-	 * after the last context switch but harder to do.
-	 */
-	if (likely(p->sighand))
-		account_group_exec_runtime(p, ns);
+	account_group_exec_runtime(p, ns);
 
 	if (this_cpu_ksoftirqd() == p) {
 		/*
@@ -2619,15 +2600,13 @@ unsigned long long task_delta_exec(struct task_struct *p)
  *
  * grq lock already acquired.
  */
-unsigned long long task_sched_runtime(struct task_struct *p)
+unsigned long long do_task_sched_runtime(struct task_struct *p)
 {
-	unsigned long flags;
 	struct rq *rq;
 	u64 ns;
 
-	rq = task_grq_lock(p, &flags);
-	ns = p->sched_time + do_task_delta_exec(p, rq);
-	task_grq_unlock(&flags);
+	rq = task_rq(p);
+	ns = p->sched_time + do_task_delta_exec(p,rq);
 
 	return ns;
 }
@@ -2636,16 +2615,16 @@ unsigned long long task_sched_runtime(struct task_struct *p)
  * Return accounted runtime for the task.
  * Return separately the current's pending runtime that have not been
  * accounted yet.
+ *
  */
-unsigned long long task_sched_runtime_nodelta(struct task_struct *p, unsigned long long *delta)
+unsigned long long task_sched_runtime(struct task_struct *p)
 {
 	unsigned long flags;
 	struct rq *rq;
 	u64 ns;
 
 	rq = task_grq_lock(p, &flags);
-	ns = p->sched_time;
-	*delta = do_task_delta_exec(p, rq);
+	ns = p->sched_time + do_task_delta_exec(p, rq);
 	task_grq_unlock(&flags);
 
 	return ns;
@@ -3481,13 +3460,11 @@ void __sched schedule_preempt_disabled(void)
  */
 asmlinkage void __sched notrace preempt_schedule(void)
 {
-	struct thread_info *ti = current_thread_info();
-
 	/*
 	 * If there is a non-zero preempt_count or interrupts are disabled,
 	 * we do not want to preempt the current task. Just return..
 	 */
-	if (likely(ti->preempt_count || irqs_disabled()))
+	if (likely(!preemptible()))
 		return;
 
 	do {
@@ -3632,7 +3609,7 @@ void __wake_up_sync_key(wait_queue_head_t *q, unsigned int mode,
 	if (unlikely(!q))
 		return;
 
-	if (unlikely(!nr_exclusive))
+	if (unlikely(nr_exclusive != 1))
 		wake_flags = 0;
 
 	spin_lock_irqsave(&q->lock, flags);
@@ -5692,12 +5669,7 @@ migration_call(struct notifier_block *nfb, unsigned long action, void *hcpu)
 
 #ifdef CONFIG_HOTPLUG_CPU
 	case CPU_DEAD:
-		/* Idle task back to normal (off runqueue, low prio) */
 		grq_lock_irq();
-		return_task(idle, true);
-		idle->static_prio = MAX_PRIO;
-		__setscheduler(idle, rq, SCHED_NORMAL, 0);
-		idle->prio = PRIO_LIMIT;
 		set_rq_task(rq, idle);
 		update_clocks(rq);
 		grq_unlock_irq();
@@ -6027,6 +5999,13 @@ cpu_attach_domain(struct sched_domain *sd, struct root_domain *rd, int cpu)
 			tmp->parent = parent->parent;
 			if (parent->parent)
 				parent->parent->child = tmp;
+			/*
+			 * Transfer SD_PREFER_SIBLING down in case of a
+			 * degenerate parent; the spans match for this
+			 * so the property transfers.
+			 */
+			if (parent->flags & SD_PREFER_SIBLING)
+				tmp->flags |= SD_PREFER_SIBLING;
 			destroy_sched_domain(parent, cpu);
 		} else
 			tmp = tmp->parent;
@@ -6809,8 +6788,9 @@ match1:
 		;
 	}
 
+	n = ndoms_cur;
 	if (doms_new == NULL) {
-		ndoms_cur = 0;
+		n = 0;
 		doms_new = &fallback_doms;
 		cpumask_andnot(doms_new[0], cpu_active_mask, cpu_isolated_map);
 		WARN_ON_ONCE(dattr_new);
@@ -6818,7 +6798,7 @@ match1:
 
 	/* Build new domains */
 	for (i = 0; i < ndoms_new; i++) {
-		for (j = 0; j < ndoms_cur && !new_topology; j++) {
+		for (j = 0; j < n && !new_topology; j++) {
 			if (cpumask_equal(doms_new[i], doms_cur[j])
 			    && dattrs_equal(dattr_new, i, dattr_cur, j))
 				goto match2;
