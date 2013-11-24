@@ -1794,7 +1794,7 @@ config HOTPLUG_CPU
 config BOOTPARAM_HOTPLUG_CPU0
 	bool "Set default setting of cpu0_hotpluggable"
 	default n
-	depends on HOTPLUG_CPU
+	depends on HOTPLUG_CPU && !SCHED_BFS
 	---help---
 	  Set whether default state of cpu0_hotpluggable is on or off.
 
