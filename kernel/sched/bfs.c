@@ -316,11 +316,6 @@ static inline void update_clocks(struct rq *rq)
 	rq->last_niffy = grq.niffies;
 }
 #else /* CONFIG_SMP */
-static struct rq *uprq;
-#define cpu_rq(cpu)	(uprq)
-#define this_rq()	(uprq)
-#define task_rq(p)	(uprq)
-#define cpu_curr(cpu)	((uprq)->curr)
 static inline int cpu_of(struct rq *rq)
 {
 	return 0;
