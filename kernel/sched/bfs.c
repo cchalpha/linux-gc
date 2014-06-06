@@ -697,6 +697,21 @@ static bool suitable_idle_cpus(struct task_struct *p)
 	return (cpus_intersects(p->cpus_allowed, grq.cpu_idle_map));
 }
 
+#ifdef CONFIG_SCHED_SMT
+/* All this CPU's SMT siblings are idle */
+inline bool siblings_rq_idle(struct rq *rq)
+{
+	return cpumask_subset(&(rq->smt_siblings), &grq.cpu_idle_map);
+}
+#endif
+#ifdef CONFIG_SCHED_MC
+/* All this CPU's shared cache siblings are idle */
+inline bool cache_rq_idle(struct rq *rq)
+{
+	return cpumask_subset(&(rq->cache_siblings), &grq.cpu_idle_map);
+}
+#endif
+
 #define CPUIDLE_DIFF_THREAD	(1)
 #define CPUIDLE_DIFF_CORE	(2)
 #define CPUIDLE_CACHE_BUSY	(4)
@@ -726,6 +741,31 @@ static inline bool scaling_rq(struct rq *rq);
 static void
 resched_best_mask(int best_cpu, struct rq *rq, cpumask_t *tmpmask)
 {
+	const static int locality2ranking[] = {
+		/*locality 0*/
+		0,
+		/*locality 1*/
+#ifdef CONFIG_SCHED_SMT
+		CPUIDLE_DIFF_THREAD,
+#else
+		0,
+#endif
+		/*locality 2*/
+#ifdef CONFIG_SCHED_MC
+		CPUIDLE_DIFF_CORE,
+#else
+		0,
+#endif
+		/*locality 3*/
+		CPUIDLE_DIFF_CPU,
+		/*locality 4*/
+#ifdef CONFIG_NUMA
+		CPUIDLE_DIFF_NODE,
+#else
+		0,
+#endif
+	};
+
 	int best_ranking = CPUIDLE_DIFF_NODE | CPUIDLE_THROTTLED |
 		CPUIDLE_THREAD_BUSY | CPUIDLE_DIFF_CPU | CPUIDLE_CACHE_BUSY |
 		CPUIDLE_DIFF_CORE | CPUIDLE_DIFF_THREAD;
@@ -742,23 +782,13 @@ resched_best_mask(int best_cpu, struct rq *rq, cpumask_t *tmpmask)
 		tmp_rq = cpu_rq(cpu_tmp);
 
 		locality = rq->cpu_locality[cpu_tmp];
-#ifdef CONFIG_NUMA
-		if (locality > 3)
-			ranking |= CPUIDLE_DIFF_NODE;
-		else
-#endif
-		if (locality > 2)
-			ranking |= CPUIDLE_DIFF_CPU;
+		ranking = locality2ranking[locality];
 #ifdef CONFIG_SCHED_MC
-		else if (locality == 2)
-			ranking |= CPUIDLE_DIFF_CORE;
-		if (!(tmp_rq->cache_idle(cpu_tmp)))
+		if (!cache_rq_idle(tmp_rq))
 			ranking |= CPUIDLE_CACHE_BUSY;
 #endif
 #ifdef CONFIG_SCHED_SMT
-		if (locality == 1)
-			ranking |= CPUIDLE_DIFF_THREAD;
-		if (!(tmp_rq->siblings_idle(cpu_tmp)))
+		if (!siblings_rq_idle(tmp_rq))
 			ranking |= CPUIDLE_THREAD_BUSY;
 #endif
 		if (scaling_rq(tmp_rq))
@@ -6705,33 +6735,6 @@ static int cpuset_cpu_inactive(struct notifier_block *nfb, unsigned long action,
 	return NOTIFY_OK;
 }
 
-#if defined(CONFIG_SCHED_SMT) || defined(CONFIG_SCHED_MC)
-/*
- * Cheaper version of the below functions in case support for SMT and MC is
- * compiled in but CPUs have no siblings.
- */
-static bool sole_cpu_idle(int cpu)
-{
-	return rq_idle(cpu_rq(cpu));
-}
-#endif
-#ifdef CONFIG_SCHED_SMT
-/* All this CPU's SMT siblings are idle */
-static bool siblings_cpu_idle(int cpu)
-{
-	return cpumask_subset(&(cpu_rq(cpu)->smt_siblings),
-			      &grq.cpu_idle_map);
-}
-#endif
-#ifdef CONFIG_SCHED_MC
-/* All this CPU's shared cache siblings are idle */
-static bool cache_cpu_idle(int cpu)
-{
-	return cpumask_subset(&(cpu_rq(cpu)->cache_siblings),
-			      &grq.cpu_idle_map);
-}
-#endif
-
 enum sched_domain_level {
 	SD_LV_NONE = 0,
 	SD_LV_SIBLING,
@@ -6817,19 +6820,6 @@ void __init sched_init_smp(void)
 					rq->cpu_locality[other_cpu] = locality;
 			}
 		}
-
-		/*
-		 * Each runqueue has its own function in case it doesn't have
-		 * siblings of its own allowing mixed topologies.
-		 */
-#ifdef CONFIG_SCHED_SMT
-		if (cpus_weight(rq->smt_siblings) > 1)
-			rq->siblings_idle = siblings_cpu_idle;
-#endif
-#ifdef CONFIG_SCHED_MC
-		if (cpus_weight(rq->cache_siblings) > 1)
-			rq->cache_idle = cache_cpu_idle;
-#endif
 	}
 	grq_unlock_irq();
 	mutex_unlock(&sched_domains_mutex);
@@ -6903,13 +6893,9 @@ void __init sched_init(void)
 #ifdef CONFIG_SCHED_SMT
 		cpumask_clear(&rq->smt_siblings);
 		cpumask_set_cpu(i, &rq->smt_siblings);
-		rq->siblings_idle = sole_cpu_idle;
-		cpumask_set_cpu(i, &rq->smt_siblings);
 #endif
 #ifdef CONFIG_SCHED_MC
 		cpumask_clear(&rq->cache_siblings);
-		cpumask_set_cpu(i, &rq->cache_siblings);
-		rq->cache_idle = sole_cpu_idle;
 		cpumask_set_cpu(i, &rq->cache_siblings);
 #endif
 		rq->cpu_locality = kmalloc(nr_cpu_ids * sizeof(int *), GFP_ATOMIC);

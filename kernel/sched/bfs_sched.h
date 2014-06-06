@@ -35,12 +35,10 @@ struct rq {
 	struct sched_domain *sd;
 	int *cpu_locality; /* CPU relative cache distance */
 #ifdef CONFIG_SCHED_SMT
-	bool (*siblings_idle)(int cpu);
 	/* See if all smt siblings are idle */
 	cpumask_t smt_siblings;
 #endif /* CONFIG_SCHED_SMT */
 #ifdef CONFIG_SCHED_MC
-	bool (*cache_idle)(int cpu);
 	/* See if all cache siblings are idle */
 	cpumask_t cache_siblings;
 #endif /* CONFIG_SCHED_MC */
