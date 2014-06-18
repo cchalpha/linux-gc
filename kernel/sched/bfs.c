@@ -1513,6 +1513,14 @@ static inline void ttwu_activate(struct task_struct *p, struct rq *rq,
 	activate_task(p, rq);
 
 	/*
+	 * if a worker is waking up, notify workqueue. Note that on BFS, we
+	 * don't really know what cpu it will be, so we fake it for
+	 * wq_worker_waking_up :/
+	 */
+	if (p->flags & PF_WQ_WORKER)
+		wq_worker_waking_up(p, cpu_of(rq));
+
+	/*
 	 * Sync wakeups (i.e. those types of wakeups where the waker
 	 * has indicated that it will leave the CPU in short order)
 	 * don't trigger a preemption if there are no idle cpus,
@@ -1522,19 +1530,14 @@ static inline void ttwu_activate(struct task_struct *p, struct rq *rq,
 		try_preempt(p, rq);
 }
 
-static inline void ttwu_post_activation(struct task_struct *p, struct rq *rq,
-					bool success)
+/*
+ * Mark the task runnable and perform wakeup-preemption.
+ */
+static inline void
+ttwu_do_wakeup(struct rq *rq, struct task_struct *p, int wake_flags)
 {
 	p->state = TASK_RUNNING;
 	trace_sched_wakeup(p);
-
-	/*
-	 * if a worker is waking up, notify workqueue. Note that on BFS, we
-	 * don't really know what cpu it will be, so we fake it for
-	 * wq_worker_waking_up :/
-	 */
-	if ((p->flags & PF_WQ_WORKER) && success)
-		wq_worker_waking_up(p, cpu_of(rq));
 }
 
 /*
@@ -1559,15 +1562,12 @@ static inline void ttwu_post_activation(struct task_struct *p, struct rq *rq,
  * Return: %true if @p was woken up, %false if it was already running.
  * or @state didn't match @p's state.
  */
-static bool try_to_wake_up(struct task_struct *p, unsigned int state,
+static int try_to_wake_up(struct task_struct *p, unsigned int state,
 			  int wake_flags)
 {
-	bool success = false;
 	unsigned long flags;
 	struct rq *rq;
-	int cpu;
-
-	get_cpu();
+	int cpu, success = 0;
 
 	/*
 	 * If we are going to wake up a thread waiting for CONDITION we
@@ -1585,26 +1585,24 @@ static bool try_to_wake_up(struct task_struct *p, unsigned int state,
 	cpu = task_cpu(p);
 
 	/* state is a volatile long, どうして、分からない */
-	if (!((unsigned int)p->state & state))
+	if (!(p->state & state))
 		goto out_unlock;
 
 	trace_sched_waking(p);
 
+	success = 1;
 	if (task_queued(p) || task_running(p))
-		goto out_running;
+		goto out_wakeup;
 
 	ttwu_activate(p, rq, wake_flags & WF_SYNC);
-	success = true;
-
-out_running:
-	ttwu_post_activation(p, rq, success);
+out_wakeup:
+	ttwu_do_wakeup(rq, p, 0);
+	ttwu_stat(p, cpu, wake_flags);
 out_unlock:
 	task_grq_unlock(&flags);
 
 	if (schedstat_enabled())
 		ttwu_stat(p, cpu, wake_flags);
-
-	put_cpu();
 
 	return success;
 }
@@ -1620,7 +1618,6 @@ out_unlock:
 static void try_to_wake_up_local(struct task_struct *p)
 {
 	struct rq *rq = task_rq(p);
-	bool success = false;
 
 	lockdep_assert_held(&grq.lock);
 
@@ -1630,16 +1627,12 @@ static void try_to_wake_up_local(struct task_struct *p)
 	trace_sched_waking(p);
 
 	if (!task_queued(p)) {
-		if (likely(!task_running(p))) {
-			schedstat_inc(rq, ttwu_count);
-			schedstat_inc(rq, ttwu_local);
-		}
 		ttwu_activate(p, rq, false);
 		if (schedstat_enabled())
 			ttwu_stat(p, smp_processor_id(), 0);
-		success = true;
 	}
-	ttwu_post_activation(p, rq, success);
+	ttwu_do_wakeup(rq, p, 0);
+	ttwu_stat(p, smp_processor_id(), 0);
 }
 
 /**
