@@ -1156,13 +1156,11 @@ unsigned long wait_task_inactive(struct task_struct *p, long match_state)
 		 * work out! In the unlikely event rq is dereferenced
 		 * since we're lockless, grab it again.
 		 */
+		rq = task_rq(p);
 #ifdef CONFIG_SMP
-retry_rq:
-		rq = task_rq(p);
+		WARN_ON_ONCE(!rq);
 		if (unlikely(!rq))
-			goto retry_rq;
-#else /* CONFIG_SMP */
-		rq = task_rq(p);
+			continue;
 #endif
 		/*
 		 * If the task is actively running on another CPU
