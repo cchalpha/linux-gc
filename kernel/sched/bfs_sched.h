@@ -77,10 +77,6 @@ struct rq {
 	unsigned int ttwu_count;
 	unsigned int ttwu_local;
 #endif /* CONFIG_SCHEDSTATS */
-
-#ifdef CONFIG_SMP
-	struct llist_head wake_list;
-#endif
 };
 
 #ifdef CONFIG_SMP
