@@ -1488,63 +1488,6 @@ ttwu_do_wakeup(struct rq *rq, struct task_struct *p, int wake_flags)
 	p->state = TASK_RUNNING;
 }
 
-#ifdef CONFIG_SMP
-static void
-ttwu_do_activate(struct rq *rq, struct task_struct *p, int wake_flags)
-{
-	ttwu_activate(p, rq, false);
-	ttwu_do_wakeup(rq, p, wake_flags);
-}
-
-static void sched_ttwu_pending(void)
-{
-	struct rq *rq = this_rq();
-	struct llist_node *llist = llist_del_all(&rq->wake_list);
-	struct task_struct *p;
-
-	grq_lock();
-
-	while (llist) {
-		p = llist_entry(llist, struct task_struct, wake_entry);
-		llist = llist_next(llist);
-		ttwu_do_activate(rq, p, 0);
-	}
-
-	grq_unlock();
-}
-
-void scheduler_ipi(void)
-{
-	/*
-	 * Fold TIF_NEED_RESCHED into the preempt_count; anybody setting
-	 * TIF_NEED_RESCHED remotely (for the first time) will also send
-	 * this IPI.
-	 */
-	preempt_fold_need_resched();
-
-	if (llist_empty(&this_rq()->wake_list))
-		return;
-
-	/*
-	 * Not all reschedule IPI handlers call irq_enter/irq_exit, since
-	 * traditionally all their work was done from the interrupt return
-	 * path. Now that we actually do some work, we need to make sure
-	 * we do call them.
-	 *
-	 * Some archs already do call them, luckily irq_enter/exit nest
-	 * properly.
-	 *
-	 * Arguably we should visit all archs and update all handlers,
-	 * however a fair share of IPIs are still resched only so this would
-	 * somewhat pessimize the simple resched case.
-	 */
-	irq_enter();
-	sched_ttwu_pending();
-
-	irq_exit();
-}
-#endif /* CONFIG_SMP */
-
 /*
  * wake flags
  */
@@ -3763,12 +3706,6 @@ out:
  */
 int idle_cpu(int cpu)
 {
-#ifdef CONFIG_SMP
-	struct rq *rq = cpu_rq(cpu);
-
-	if (!llist_empty(&rq->wake_list))
-		return 0;
-#endif
 	return cpu_curr(cpu) == cpu_rq(cpu)->idle;
 }
 
@@ -5485,7 +5422,6 @@ migration_call(struct notifier_block *nfb, unsigned long action, void *hcpu)
 		break;
 
 	case CPU_DYING:
-		sched_ttwu_pending();
 		/* Update our root-domain */
 		grq_lock_irqsave(&flags);
 		if (rq->rd) {
