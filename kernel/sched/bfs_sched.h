@@ -33,7 +33,7 @@ struct rq {
 
 	struct root_domain *rd;
 	struct sched_domain *sd;
-	int *cpu_locality; /* CPU relative cache distance */
+	int cpu_locality[NR_CPUS]; /* CPU relative cache distance */
 #ifdef CONFIG_SCHED_SMT
 	/* See if all smt siblings are idle */
 #endif /* CONFIG_SCHED_SMT */
