@@ -33,7 +33,7 @@ struct rq {
 
 	struct root_domain *rd;
 	struct sched_domain *sd;
-	int *cpu_locality; /* CPU relative cache distance */
+	int cpu_locality[NR_CPUS]; /* CPU relative cache distance */
 	u64 last_niffy; /* Last time this RQ updated grq.niffies */
 #endif /* CONFIG_SMP */
 #ifdef CONFIG_IRQ_TIME_ACCOUNTING
