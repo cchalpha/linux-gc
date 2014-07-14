@@ -1537,8 +1537,6 @@ static bool try_to_wake_up(struct task_struct *p, unsigned int state,
 	struct rq *rq;
 	int cpu, success = 0;
 
-	get_cpu();
-
 	/*
 	 * If we are going to wake up a thread waiting for CONDITION we
 	 * need to ensure that CONDITION=1 done by the caller can not be
@@ -1566,8 +1564,6 @@ static bool try_to_wake_up(struct task_struct *p, unsigned int state,
 	ttwu_stat(p, cpu, wake_flags);
 out:
 	task_grq_unlock(&flags);
-
-	put_cpu();
 
 	return success;
 }
