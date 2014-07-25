@@ -1488,8 +1488,10 @@ struct task_struct {
 #if defined(CONFIG_SMP) || defined(CONFIG_SCHED_BFS)
 	int on_cpu;
 #endif
-#ifdef CONFIG_SMP
+#if defined(CONFIG_SMP) && !defined(CONFIG_SCHED_BFS)
 	struct llist_node wake_entry;
+#endif
+#ifdef CONFIG_SMP
 #ifdef CONFIG_THREAD_INFO_IN_TASK
 	unsigned int cpu;	/* current CPU */
 #endif
