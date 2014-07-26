@@ -3315,9 +3315,7 @@ need_resched:
 			deactivate_task(prev);
 		else {
 			/* Task changed affinity off this CPU */
-			if (unlikely(needs_other_cpu(prev, cpu)))
-				resched_suitable_idle(prev);
-			else {
+			if (likely(!needs_other_cpu(prev, cpu))) {
 				if (queued_notrunning())
 					swap_sticky(rq, cpu, prev);
 				else {
