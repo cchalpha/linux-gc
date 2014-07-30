@@ -11,7 +11,7 @@ struct rq {
 	/* runqueue lock: */
 	raw_spinlock_t lock;
 
-	struct task_struct *curr, *idle, *stop;
+	struct task_struct *curr, *idle, *stop, *return_task;
 	struct mm_struct *prev_mm;
 
 	/* Stored data about rq->curr to work outside grq lock */
