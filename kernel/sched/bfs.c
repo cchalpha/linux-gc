@@ -3196,13 +3196,10 @@ static inline void set_rq_task(struct rq *rq, struct task_struct *p)
 	rq->rq_last_ran = p->last_ran = rq->clock_task;
 	rq->rq_policy = p->policy;
 	rq->rq_prio = p->prio;
-	if (p != rq->idle)
-		rq->rq_running = true;
-	else
-		rq->rq_running = false;
+	rq->rq_running = (p != rq->idle);
 }
 
-static void reset_rq_task(struct rq *rq, struct task_struct *p)
+static inline void reset_rq_task(struct rq *rq, struct task_struct *p)
 {
 	rq->rq_policy = p->policy;
 	rq->rq_prio = p->prio;
