@@ -1900,6 +1900,11 @@ static inline void finish_task_switch(struct rq *rq, struct task_struct *prev)
 		grq_unlock();
 		rq->return_task = NULL;
 	}
+	/*
+	 * Once prev->on_cpu set to false, vrq_lock...() will be locked on
+	 * grq.lock
+	 */
+	prev->on_cpu = false;
 	finish_lock_switch(rq, prev);
 	finish_arch_post_lock_switch();
 
@@ -2527,10 +2532,9 @@ ts_account:
  * CPU scheduler quota accounting is also performed here in microseconds.
  */
 static inline void
-update_cpu_clock_switch(struct rq *rq, struct task_struct *p)
+update_cpu_clock_switch_nonidle(struct rq *rq, struct task_struct *p)
 {
 	long account_ns = rq->clock_task - rq->rq_last_ran;
-	struct task_struct *idle = rq->idle;
 	unsigned long account_pc;
 
 	if (unlikely(account_ns < 0))
@@ -2539,21 +2543,34 @@ update_cpu_clock_switch(struct rq *rq, struct task_struct *p)
 	account_pc = NS_TO_PC(account_ns);
 
 	/* Accurate subtick timekeeping */
-	if (p != idle) {
-		pc_user_time(rq, p, account_pc, account_ns);
-	}
-	else
-		pc_idle_time(rq, idle, account_pc);
+	pc_user_time(rq, p, account_pc, account_ns);
 
 ts_account:
 	/* time_slice accounting is done in usecs to avoid overflow on 32bit */
-	if (rq->rq_policy != SCHED_FIFO && p != idle) {
+	if (rq->rq_policy != SCHED_FIFO) {
 		s64 time_diff = rq->clock - rq->timekeep_clock;
 
 		niffy_diff(&time_diff, 1);
 		rq->rq_time_slice -= NS_TO_US(time_diff);
 	}
 
+	rq->rq_last_ran = rq->clock_task;
+	rq->timekeep_clock = rq->clock;
+}
+
+static inline void
+update_cpu_clock_switch_idle(struct rq *rq, struct task_struct *idle)
+{
+	long account_ns = rq->clock_task - rq->rq_last_ran;
+	unsigned long account_pc;
+
+	if (unlikely(account_ns < 0))
+		goto ts_account;
+
+	account_pc = NS_TO_PC(account_ns);
+	/* Accurate subtick timekeeping */
+	pc_idle_time(rq, idle, account_pc);
+ts_account:
 	rq->rq_last_ran = rq->clock_task;
 	rq->timekeep_clock = rq->clock;
 }
@@ -3323,7 +3340,6 @@ need_resched:
 	 */
 	smp_mb__before_spinlock();
 	raw_spin_lock_irq(&rq->lock);
-	grq_lock();
 
 	switch_count = &prev->nivcsw;
 	if (prev->state && !(preempt_count() & PREEMPT_ACTIVE)) {
@@ -3345,8 +3361,11 @@ need_resched:
 					/* This shouldn't happen, but does */
 					if (unlikely(to_wakeup == prev))
 						deactivate = false;
-					else
+					else {
+						grq_lock();
 						try_to_wake_up_local(to_wakeup);
+						grq_unlock();
+					}
 				}
 			}
 		}
@@ -3358,22 +3377,23 @@ need_resched:
 	 * sure to submit it to avoid deadlocks.
 	 */
 	if (unlikely(deactivate && blk_needs_flush_plug(prev))) {
-		grq_unlock();
 		raw_spin_unlock_irq(&rq->lock);
 		preempt_enable_no_resched();
 		blk_schedule_flush_plug(prev);
 		goto need_resched;
 	}
 
-	update_clocks(rq);
-	update_cpu_clock_switch(rq, prev);
-	rq->dither = (rq->clock - rq->last_tick < HALF_JIFFY_NS);
-
 	clear_tsk_need_resched(prev);
 	clear_preempt_need_resched();
 
 	idle = rq->idle;
+
 	if (idle != prev) {
+		grq_lock();
+		update_clocks(rq);
+
+		update_cpu_clock_switch_nonidle(rq, prev);
+		rq->dither = (rq->clock - rq->last_tick < HALF_JIFFY_NS);
 		/* Update all the information stored on struct rq */
 		prev->time_slice = rq->rq_time_slice;
 		prev->deadline = rq->rq_deadline;
@@ -3395,9 +3415,7 @@ need_resched:
 					* again.
 					*/
 					set_rq_task(rq, prev);
-					grq_unlock();
-					raw_spin_unlock_irq(&rq->lock);
-					goto rerun_prev_unlocked;
+					goto unlock_out;
 				}
 			}
 			inc_qnr();
@@ -3410,6 +3428,11 @@ need_resched:
 			}
 			goto unlock_out;
 		}
+	} else {
+		update_rq_clock(rq);
+		update_cpu_clock_switch_idle(rq, prev);
+		rq->dither = (rq->clock - rq->last_tick < HALF_JIFFY_NS);
+		grq_lock();
 	}
 
 	if (likely(queued_notrunning())) {
@@ -3430,6 +3453,13 @@ do_switch:
 		else
 			set_cpuidle_map(cpu);
 		resched_suitable_idle(prev);
+		grq.nr_switches++;
+		/* Once next->on_cpu is set, vrq_lock...() can be locked on
+		 * task's runqueue, so set it before release grq.lock, 
+		 */
+		next->on_cpu = true;
+		grq_unlock();
+
 		/*
 		 * Don't stick tasks when a real time task is going to run as
 		 * they may literally get stuck.
@@ -3437,13 +3467,8 @@ do_switch:
 		if (rt_task(next))
 			unstick_task(rq, prev);
 		set_rq_task(rq, next);
-		grq.nr_switches++;
-		prev->on_cpu = false;
-		next->on_cpu = true;
 		rq->curr = next;
 		++*switch_count;
-
-		grq_unlock();
 
 		context_switch(rq, prev, next); /* unlocks the grq */
 		/*
@@ -3463,7 +3488,6 @@ unlock_out:
 		raw_spin_unlock_irq(&rq->lock);
 	}
 
-rerun_prev_unlocked:
 	sched_preempt_enable_no_resched();
 	if (unlikely(need_resched()))
 		goto need_resched;
