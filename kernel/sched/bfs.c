@@ -241,7 +241,6 @@ int __weak arch_sd_sibling_asym_packing(void)
 #endif /* CONFIG_SMP */
 
 static inline void update_rq_clock(struct rq *rq);
-static unsigned long long do_task_sched_runtime(struct task_struct *p);
 static u64 do_task_delta_exec(struct task_struct *p, struct rq *rq);
 
 /*
@@ -361,6 +360,7 @@ static inline void grq_unlock(void)
 	raw_spin_unlock(&grq.lock);
 }
 
+/*
 static inline void grq_lock_irq(void)
 	__acquires(grq.lock)
 {
@@ -385,15 +385,32 @@ static inline void grq_unlock_irqrestore(unsigned long *flags)
 	raw_spin_unlock_irqrestore(&grq.lock, *flags);
 }
 
+static inline void grq_test_lock(raw_spinlock_t *lock)
+{
+	if (lock != &grq.lock)
+		raw_spin_lock(&grq.lock);
+}
+
+static inline void grq_test_unlock(raw_spinlock_t *lock)
+{
+	if (lock != &grq.lock)
+		raw_spin_unlock(&grq.lock);
+}
+*/
+
 static inline void
-double_vrq_lock_irqsave(struct rq *rq, unsigned long *flags)
+rq_grq_lock_irqsave(struct rq *rq, unsigned long *flags)
+	__acquires(rq->lock)
+	__acquires(grq.lock)
 {
 	raw_spin_lock_irqsave(&rq->lock, *flags);
 	raw_spin_lock(&grq.lock);
 }
 
 static inline void
-double_vrq_unlock_irqrestore(struct rq *rq, unsigned long *flags)
+rq_grq_unlock_irqrestore(struct rq *rq, unsigned long *flags)
+	__releases(grq.lock)
+	__releases(rq->lock)
 {
 	raw_spin_unlock(&grq.lock);
 	raw_spin_unlock_irqrestore(&rq->lock, *flags);
@@ -406,23 +423,34 @@ static inline struct rq
 	for (;;) {
 		rq = task_rq(p);
 		raw_spin_lock(&rq->lock);
-		if (rq == task_rq(p))
-			break;
+		if (likely(rq == task_rq(p))) {
+			if (p->on_cpu) {
+				*plock = NULL;
+				return rq;
+			} else {
+				raw_spin_lock(&grq.lock);
+				/* double check task is not moved to another rq yet */
+				if (likely(rq == task_rq(p))) {
+					*plock = &grq.lock;
+					return rq;
+				}
+				raw_spin_unlock(&grq.lock);
+			}
+		}
 		raw_spin_unlock(&rq->lock);
 	}
-	raw_spin_lock(&grq.lock);
-	*plock = &rq->lock;
-
-	return rq;
 }
 
 static inline void
-task_vrq_unlock(raw_spinlock_t *lock)
+task_vrq_unlock(struct rq *rq, raw_spinlock_t *lock)
 {
-	raw_spin_unlock(&grq.lock);
-	raw_spin_unlock(lock);
+	if (lock == &grq.lock)
+		raw_spin_unlock(lock);
+	BUG_ON(NULL != lock && lock != &grq.lock);
+	raw_spin_unlock(&rq->lock);
 }
 
+/*
 static inline struct rq
 *task_vrq_lock_irq(struct task_struct *p, raw_spinlock_t **plock)
 {
@@ -446,6 +474,7 @@ task_vrq_unlock_irq(raw_spinlock_t *lock)
 	raw_spin_unlock(&grq.lock);
 	raw_spin_unlock_irq(lock);
 }
+*/
 
 static inline struct rq
 *task_vrq_lock_irqsave(struct task_struct *p, raw_spinlock_t **plock, unsigned long *flags)
@@ -454,36 +483,90 @@ static inline struct rq
 	for (;;) {
 		rq = task_rq(p);
 		raw_spin_lock_irqsave(&rq->lock, *flags);
-		if (rq == task_rq(p))
-			break;
+		if (likely(rq == task_rq(p))) {
+			if (p->on_cpu) {
+				*plock = NULL;
+				return rq;
+			} else {
+				raw_spin_lock(&grq.lock);
+				/* double check task is not moved to another rq yet */
+				if (likely(rq == task_rq(p))) {
+					*plock = &grq.lock;
+					return rq;
+				}
+				raw_spin_unlock(&grq.lock);
+			}
+		}
 		raw_spin_unlock_irqrestore(&rq->lock, *flags);
 	}
-	raw_spin_lock(&grq.lock);
-	*plock = &rq->lock;
+}
 
-	return rq;
-	/*
+static inline void
+task_vrq_unlock_irqrestore(struct rq *rq, raw_spinlock_t *lock, unsigned long *flags)
+{
+	if (lock == &grq.lock)
+		raw_spin_unlock(lock);
+	BUG_ON(NULL != lock && lock != &grq.lock);
+	raw_spin_unlock_irqrestore(&rq->lock, *flags);
+}
+
+static inline struct rq
+*task_access_lock(struct task_struct *p, raw_spinlock_t **plock)
+{
+	struct rq *rq;
+	for (;;) {
+		rq = task_rq(p);
+		if (p->on_cpu) {
+			raw_spin_lock(&rq->lock);
+			if (likely(p->on_cpu && rq == task_rq(p))) {
+				*plock = &rq->lock;
+				return rq;
+			}
+			raw_spin_unlock(&rq->lock);
+		} else {
+			raw_spin_lock(&grq.lock);
+			if (likely(!p->on_cpu) && rq == task_rq(p)) {
+				*plock = &grq.lock;
+				return rq;
+			}
+			raw_spin_unlock(&grq.lock);
+		}
+	}
+}
+
+static inline void
+task_access_unlock(raw_spinlock_t *lock)
+{
+	raw_spin_unlock(lock);
+}
+
+static inline struct rq
+*task_access_lock_irqsave(struct task_struct *p, raw_spinlock_t **plock, unsigned long *flags)
+{
+	struct rq *rq;
 	for (;;) {
 		rq = task_rq(p);
 		if (p->on_cpu) {
 			raw_spin_lock_irqsave(&rq->lock, *flags);
-			if (likely(p->on_cpu && rq == task_rq(p)))
+			if (likely(p->on_cpu && rq == task_rq(p))) {
+				*plock = &rq->lock;
 				return rq;
+			}
 			raw_spin_unlock_irqrestore(&rq->lock, *flags);
 		} else {
 			raw_spin_lock_irqsave(&grq.lock, *flags);
-			if (likely(!p->on_cpu && rq == task_rq(p)))
+			if (likely(!p->on_cpu) && rq == task_rq(p)) {
+				*plock = &grq.lock;
 				return rq;
+			}
 			raw_spin_unlock_irqrestore(&grq.lock, *flags);
 		}
 	}
-	*/
 }
 
 static inline void
-task_vrq_unlock_irqrestore(raw_spinlock_t *lock, unsigned long *flags)
+task_access_unlock_irqrestore(raw_spinlock_t *lock, unsigned long *flags)
 {
-	raw_spin_unlock(&grq.lock);
 	raw_spin_unlock_irqrestore(lock, *flags);
 }
 
@@ -1034,7 +1117,7 @@ void set_task_cpu(struct task_struct *p, unsigned int cpu)
 		perf_sw_event(PERF_COUNT_SW_CPU_MIGRATIONS, 1, NULL, 0);
 
 	/*
-	 * After ->cpu is set up to a new value, task_vrq_lock(p, ...) can be
+	 * After ->cpu is set up to a new value, task_access_lock(p, ...) can be
 	 * successfully executed on another CPU. We must ensure that updates of
 	 * per-task data have been completed by this moment.
 	 */
@@ -1261,14 +1344,18 @@ unsigned long wait_task_inactive(struct task_struct *p, long match_state)
 		 * lock now, to be *sure*. If we're wrong, we'll
 		 * just go back and repeat.
 		 */
-		rq = task_vrq_lock_irqsave(p, &lock, &flags);
+		/* Only access p, task_access_lock...() is good enough,
+		 * most likely p already stops running and will lock
+		 * on grq; if not, it will lock on it's rq and running
+		 * will be false*/
+		task_access_lock_irqsave(p, &lock, &flags);
 		trace_sched_wait_task(p);
 		running = task_running(p);
 		on_rq = task_queued(p);
 		ncsw = 0;
 		if (!match_state || p->state == match_state)
 			ncsw = p->nvcsw | LONG_MIN; /* sets MSB */
-		task_vrq_unlock_irqrestore(lock, &flags);
+		task_access_unlock_irqrestore(lock, &flags);
 
 		/*
 		 * If it changed from the expected state, bail out now.
@@ -1396,6 +1483,11 @@ static inline bool needs_other_cpu(struct task_struct *p, int cpu)
 
 /*
  * When all else is equal, still prefer this_rq.
+ *
+ * @this_rq is not used
+ * In all cases, try_preempt() is called with grq lock held. To simplify
+ * per rq->rq_prio/rq->rq_deadline access, grq lock is used.
+ * Thast means set_rq_task()/reset_rq_task() also needs grq lock.
  */
 static void try_preempt(struct task_struct *p, struct rq *this_rq)
 {
@@ -1569,20 +1661,21 @@ static bool try_to_wake_up(struct task_struct *p, unsigned int state,
 	 * We only need to update the rq clock if we activate the task
 	 */
 	rq = task_vrq_lock_irqsave(p, &lock, &flags);
-	cpu = task_cpu(p);
 
 	/* state is a volatile long, どうして、分からない */
 	if (!(p->state & state))
 		goto out;
 
 	success = 1;
-	if (!task_queued(p) && !task_running(p))
+	if (!task_queued(p) && !task_running(p)) {
 		ttwu_activate(p, rq, wake_flags & WF_SYNC);
+	}
 
 	ttwu_do_wakeup(rq, p, 0);
+	cpu = task_cpu(p);
 	ttwu_stat(p, cpu, wake_flags);
 out:
-	task_vrq_unlock_irqrestore(lock, &flags);
+	task_vrq_unlock_irqrestore(rq, lock, &flags);
 
 	return success;
 }
@@ -1709,6 +1802,9 @@ void wake_up_new_task(struct task_struct *p)
 	raw_spinlock_t *lock;
 
 	parent = p->parent;
+	/* p is not running and not queued, task_vrq_lock...() will
+	 * will lock on both rq and grq
+	 */
 	rq = task_vrq_lock_irqsave(p, &lock, &flags);
 
 	/*
@@ -1770,7 +1866,7 @@ after_ts_init:
 		}
 		time_slice_expired(p);
 	}
-	task_vrq_unlock_irqrestore(lock, &flags);
+	task_vrq_unlock_irqrestore(rq, lock, &flags);
 }
 
 #ifdef CONFIG_PREEMPT_NOTIFIERS
@@ -2339,9 +2435,6 @@ void thread_group_cputime(struct task_struct *tsk, struct task_cputime *times)
 	struct signal_struct *sig = tsk->signal;
 	cputime_t utime, stime;
 	struct task_struct *t;
-	struct rq *rq;
-	raw_spinlock_t *lock;
-	unsigned long flags;
 
 	times->utime = sig->utime;
 	times->stime = sig->stime;
@@ -2353,14 +2446,12 @@ void thread_group_cputime(struct task_struct *tsk, struct task_cputime *times)
 		goto out;
 
 	t = tsk;
-	rq = task_vrq_lock_irqsave(tsk, &lock, &flags);
 	do {
 		task_cputime(t, &utime, &stime);
 		times->utime += utime;
 		times->stime += stime;
-		times->sum_exec_runtime += do_task_sched_runtime(t);
+		times->sum_exec_runtime += task_sched_runtime(t);
 	} while_each_thread(tsk, t);
-	task_vrq_unlock_irqrestore(lock, &flags);
 out:
 	rcu_read_unlock();
 }
@@ -2579,14 +2670,14 @@ ts_account:
  * Return any ns on the sched_clock that have not yet been accounted in
  * @p in case that task is currently running.
  *
- * Called with task_grq_lock() held.
+ * Called with rq lock held.
  */
 static u64 do_task_delta_exec(struct task_struct *p, struct rq *rq)
 {
 	u64 ns = 0;
 
 	if (p == rq->curr) {
-		update_clocks(rq);
+		update_rq_clock(rq);
 		ns = rq->clock_task - rq->rq_last_ran;
 		if (unlikely((s64)ns < 0))
 			ns = 0;
@@ -2602,27 +2693,13 @@ unsigned long long task_delta_exec(struct task_struct *p)
 	raw_spinlock_t *lock;
 	u64 ns;
 
+	/* Need rq lock as we going to update rq clocks
+	 * need grq lock to prevent task running away
+	 * from rq which we recorded?
+	 */
 	rq = task_vrq_lock_irqsave(p, &lock, &flags);
 	ns = do_task_delta_exec(p, rq);
-	task_vrq_unlock_irqrestore(lock, &flags);
-
-	return ns;
-}
-
-/*
- * Return accounted runtime for the task.
- * Return separately the current's pending runtime that have not been
- * accounted yet.
- *
- * grq lock already acquired.
- */
-unsigned long long do_task_sched_runtime(struct task_struct *p)
-{
-	struct rq *rq;
-	u64 ns;
-
-	rq = task_rq(p);
-	ns = p->sched_time + do_task_delta_exec(p,rq);
+	task_vrq_unlock_irqrestore(rq, lock, &flags);
 
 	return ns;
 }
@@ -2656,7 +2733,7 @@ unsigned long long task_sched_runtime(struct task_struct *p)
 
 	rq = task_vrq_lock_irqsave(p, &lock, &flags);
 	ns = p->sched_time + do_task_delta_exec(p, rq);
-	task_vrq_unlock_irqrestore(lock, &flags);
+	task_vrq_unlock_irqrestore(rq, lock, &flags);
 
 	return ns;
 }
@@ -2877,7 +2954,6 @@ static inline void no_iso_tick(void)
 static void task_running_tick(struct rq *rq)
 {
 	struct task_struct *p;
-	raw_spinlock_t *lock;
 
 	/*
 	 * If a SCHED_ISO task is running we increment the iso_ticks. In
@@ -2920,12 +2996,14 @@ static void task_running_tick(struct rq *rq)
 	} else if (rq->rq_time_slice >= RESCHED_US)
 			return;
 
-	/* p->time_slice < RESCHED_US. We only modify task_struct under grq lock */
+	/* p->time_slice < RESCHED_US. We will modify task_struct under 
+	 * rq lock as p is rq->curr
+	 */
+	raw_spin_lock(&rq->lock);
 	p = rq->curr;
-	task_vrq_lock(p, &lock);
 	requeue_task(p);
 	set_tsk_need_resched(p);
-	task_vrq_unlock(lock);
+	raw_spin_unlock(&rq->lock);
 }
 
 /*
@@ -3453,12 +3531,6 @@ do_switch:
 		else
 			set_cpuidle_map(cpu);
 		resched_suitable_idle(prev);
-		grq.nr_switches++;
-		/* Once next->on_cpu is set, vrq_lock...() can be locked on
-		 * task's runqueue, so set it before release grq.lock, 
-		 */
-		next->on_cpu = true;
-		grq_unlock();
 
 		/*
 		 * Don't stick tasks when a real time task is going to run as
@@ -3467,8 +3539,14 @@ do_switch:
 		if (rt_task(next))
 			unstick_task(rq, prev);
 		set_rq_task(rq, next);
+		grq.nr_switches++;
+		/* Once next->on_cpu is set, vrq_lock...() can be locked on
+		 * task's runqueue, so set it before release grq.lock, 
+		 */
+		next->on_cpu = true;
 		rq->curr = next;
 		++*switch_count;
+		grq_unlock();
 
 		context_switch(rq, prev, next); /* unlocks the grq */
 		/*
@@ -3613,6 +3691,10 @@ void rt_mutex_setprio(struct task_struct *p, int prio)
 
 	BUG_ON(prio < 0 || prio > MAX_PRIO);
 
+	/* task is running, will lock on task's rq;
+	 * task is queueed, will lock on task's rq and grq;
+	 * otherwise, will on task's rq and grq.
+	 */
 	rq = task_vrq_lock_irqsave(p, &lock, &flags);
 
 	/*
@@ -3636,8 +3718,9 @@ void rt_mutex_setprio(struct task_struct *p, int prio)
 	trace_sched_pi_setprio(p, prio);
 	oldprio = p->prio;
 	queued = task_queued(p);
-	if (queued)
+	if (queued) {
 		dequeue_task(p);
+	}
 	p->prio = prio;
 	if (task_running(p) && prio > oldprio)
 		resched_task(p);
@@ -3647,7 +3730,7 @@ void rt_mutex_setprio(struct task_struct *p, int prio)
 	}
 
 out_unlock:
-	task_vrq_unlock_irqrestore(lock, &flags);
+	task_vrq_unlock_irqrestore(rq, lock, &flags);
 }
 
 #endif
@@ -3676,7 +3759,8 @@ void set_user_nice(struct task_struct *p, long nice)
 	 * the task might be in the middle of scheduling on another CPU.
 	 */
 	rq = task_vrq_lock_irqsave(p, &lock, &flags);
-	update_clocks(rq);
+	/* why we need update_clocks() here? */
+	update_rq_clock(rq);
 	/*
 	 * The RT priorities are set via sched_setscheduler(), but we still
 	 * allow the 'normal' nice value to be set - but as expected
@@ -3688,8 +3772,9 @@ void set_user_nice(struct task_struct *p, long nice)
 		goto out_unlock;
 	}
 	queued = task_queued(p);
-	if (queued)
+	if (queued) {
 		dequeue_task(p);
+	}
 
 	adjust_deadline(p, new_static);
 	old_static = p->static_prio;
@@ -3706,7 +3791,7 @@ void set_user_nice(struct task_struct *p, long nice)
 			resched_task(p);
 	}
 out_unlock:
-	task_vrq_unlock_irqrestore(lock, &flags);
+	task_vrq_unlock_irqrestore(rq, lock, &flags);
 }
 EXPORT_SYMBOL(set_user_nice);
 
@@ -3826,7 +3911,7 @@ static inline struct task_struct *find_process_by_pid(pid_t pid)
 	return pid ? find_task_by_vpid(pid) : current;
 }
 
-/* Actually do priority change: must hold grq lock. */
+/* Actually do priority change: must hold rq lock. */
 static void
 __setscheduler(struct task_struct *p, struct rq *rq, int policy, int prio)
 {
@@ -3982,8 +4067,12 @@ recheck:
 	 */
 	raw_spin_lock_irqsave(&p->pi_lock, flags);
 	/*
-	 * To be able to change p->policy safely, the grunqueue lock must be
-	 * held.
+	 * To be able to change p->policy safely, task_vrq_lock()
+	 * must be called.
+	 * IF use task_access_lock() here:
+	 * For the task p which is not running, reading rq->stop is
+	 * racy but acceptable as ->stop doesn't change much.
+	 * An enhancemnet can be made to read rq->stop saftly.
 	 */
 	rq = task_vrq_lock(p, &lock);
 
@@ -3991,7 +4080,7 @@ recheck:
 	 * Changing the policy of the stop threads its a very bad idea
 	 */
 	if (p == rq->stop) {
-		task_vrq_unlock(lock);
+		task_vrq_unlock(rq, lock);
 		raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 		return -EINVAL;
 	}
@@ -4002,7 +4091,7 @@ recheck:
 	if (unlikely(policy == p->policy && (!is_rt_policy(policy) ||
 			param->sched_priority == p->rt_priority))) {
 
-		task_vrq_unlock(lock);
+		task_vrq_unlock(rq, lock);
 		raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 		return 0;
 	}
@@ -4010,11 +4099,12 @@ recheck:
 	/* recheck policy now with rq lock held */
 	if (unlikely(oldpolicy != -1 && oldpolicy != p->policy)) {
 		policy = oldpolicy = -1;
-		task_vrq_unlock(lock);
+		task_vrq_unlock(rq, lock);
 		raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 		goto recheck;
 	}
-	update_clocks(rq);
+	/* why update_clocks() here? */
+	update_rq_clock(rq);
 	p->sched_reset_on_fork = reset_on_fork;
 
 	queued = task_queued(p);
@@ -4025,7 +4115,7 @@ recheck:
 		enqueue_task(p);
 		try_preempt(p, rq);
 	}
-	task_vrq_unlock(lock);
+	task_vrq_unlock(rq, lock);
 	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 
 	rt_mutex_adjust_pi(p);
@@ -4498,7 +4588,6 @@ SYSCALL_DEFINE3(sched_setaffinity, pid_t, pid, unsigned int, len,
 long sched_getaffinity(pid_t pid, cpumask_t *mask)
 {
 	struct task_struct *p;
-	struct rq *rq;
 	raw_spinlock_t *lock;
 	unsigned long flags;
 	int retval;
@@ -4514,9 +4603,9 @@ long sched_getaffinity(pid_t pid, cpumask_t *mask)
 	if (retval)
 		goto out_unlock;
 
-	rq = task_vrq_lock_irqsave(p, &lock, &flags);
+	task_access_lock_irqsave(p, &lock, &flags);
 	cpumask_and(mask, tsk_cpus_allowed(p), cpu_active_mask);
-	task_vrq_unlock_irqrestore(lock, &flags);
+	task_access_unlock_irqrestore(lock, &flags);
 
 out_unlock:
 	rcu_read_unlock();
@@ -4571,16 +4660,13 @@ SYSCALL_DEFINE3(sched_getaffinity, pid_t, pid, unsigned int, len,
  */
 SYSCALL_DEFINE0(sched_yield)
 {
-	struct task_struct *p;
 	struct rq *rq;
-	raw_spinlock_t *lock;
 
-	p = current;
-	rq = task_vrq_lock_irq(p, &lock);
-	schedstat_inc(task_rq(p), yld_count);
-	requeue_task(p);
+	rq = this_rq();
+	raw_spin_lock_irq(&rq->lock);
+	schedstat_inc(rq, yld_count);
+	requeue_task(rq->curr);
 
-	raw_spin_unlock(&grq.lock);
 	/*
 	 * Since we are going to call schedule() anyway, there's
 	 * no need to preempt or enable interrupts:
@@ -4853,9 +4939,9 @@ SYSCALL_DEFINE2(sched_rr_get_interval, pid_t, pid,
 	if (retval)
 		goto out_unlock;
 
-	task_vrq_lock_irqsave(p, &lock, &flags);
+	task_access_lock_irqsave(p, &lock, &flags);
 	time_slice = p->policy == SCHED_FIFO ? 0 : MS_TO_NS(task_timeslice(p));
-	task_vrq_unlock_irqrestore(lock, &flags);
+	task_access_unlock_irqrestore(lock, &flags);
 
 	rcu_read_unlock();
 	t = ns_to_timespec(time_slice);
@@ -4998,9 +5084,7 @@ void resched_cpu(int cpu)
 
 	rq = cpu_rq(cpu);
 	raw_spin_lock_irqsave(&rq->lock, flags);
-	grq_lock();
 	resched_task(cpu_curr(cpu));
-	grq_unlock();
 	raw_spin_unlock_irqrestore(&rq->lock, flags);
 }
 
@@ -5163,7 +5247,7 @@ int set_cpus_allowed_ptr(struct task_struct *p, const struct cpumask *new_mask)
 out:
 	if (queued)
 		try_preempt(p, rq);
-	task_vrq_unlock_irqrestore(lock, &flags);
+	task_vrq_unlock_irqrestore(rq, lock, &flags);
 
 	if (running_wrong)
 		_cond_resched();
@@ -5491,7 +5575,7 @@ migration_call(struct notifier_block *nfb, unsigned long action, void *hcpu)
 
 	case CPU_ONLINE:
 		/* Update our root-domain */
-		double_vrq_lock_irqsave(rq, &flags);
+		rq_grq_lock_irqsave(rq, &flags);
 		if (rq->rd) {
 			BUG_ON(!cpumask_test_cpu(cpu, rq->rd->span));
 
@@ -5499,27 +5583,27 @@ migration_call(struct notifier_block *nfb, unsigned long action, void *hcpu)
 		}
 		unbind_zero(cpu);
 		grq.noc = num_online_cpus();
-		double_vrq_unlock_irqrestore(rq, &flags);
+		rq_grq_unlock_irqrestore(rq, &flags);
 		break;
 
 #ifdef CONFIG_HOTPLUG_CPU
 	case CPU_DEAD:
-		double_vrq_lock_irqsave(rq, &flags);
+		rq_grq_lock_irqsave(rq, &flags);
 		set_rq_task(rq, idle);
 		update_clocks(rq);
-		double_vrq_unlock_irqrestore(rq, &flags);
+		rq_grq_unlock_irqrestore(rq, &flags);
 		break;
 
 	case CPU_DYING:
 		/* Update our root-domain */
-		double_vrq_lock_irqsave(rq, &flags);
+		rq_grq_lock_irqsave(rq, &flags);
 		if (rq->rd) {
 			BUG_ON(!cpumask_test_cpu(cpu, rq->rd->span));
 			set_rq_offline(rq);
 		}
 		bind_zero(cpu);
 		grq.noc = num_online_cpus();
-		double_vrq_unlock_irqrestore(rq, &flags);
+		rq_grq_unlock_irqrestore(rq, &flags);
 		break;
 #endif
 	}
@@ -5714,7 +5798,7 @@ static void rq_attach_root(struct rq *rq, struct root_domain *rd)
 	struct root_domain *old_rd = NULL;
 	unsigned long flags;
 
-	double_vrq_lock_irqsave(rq, &flags);
+	rq_grq_lock_irqsave(rq, &flags);
 
 	if (rq->rd) {
 		old_rd = rq->rd;
@@ -5740,7 +5824,7 @@ static void rq_attach_root(struct rq *rq, struct root_domain *rd)
 	if (cpumask_test_cpu(rq->cpu, cpu_active_mask))
 		set_rq_online(rq);
 
-	double_vrq_unlock_irqrestore(rq, &flags);
+	rq_grq_unlock_irqrestore(rq, &flags);
 
 	if (old_rd)
 		call_rcu_sched(&old_rd->rcu, free_rootdomain);
@@ -6996,7 +7080,7 @@ void normalize_rt_tasks(void)
 			try_preempt(p, rq);
 		}
 
-		task_vrq_unlock(lock);
+		task_vrq_unlock(rq, lock);
 		raw_spin_unlock(&p->pi_lock);
 	} while_each_thread(g, p);
 
