@@ -119,4 +119,9 @@ static inline u64 rq_clock_task(struct rq *rq)
 #define for_each_domain(cpu, __sd) \
 	for (__sd = rcu_dereference_check_sched_domain(cpu_rq(cpu)->sd); __sd; __sd = __sd->parent)
 
+#ifdef CONFIG_SMP
+/*#define sched_ttwu_pending() do { } while (0)*/
+extern void sched_ttwu_pending(void);
+#endif
+
 #endif

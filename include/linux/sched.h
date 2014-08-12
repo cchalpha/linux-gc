@@ -1003,8 +1003,10 @@ typedef int (*sched_domain_flags_f)(void);
 
 struct sd_data {
 	struct sched_domain **__percpu sd;
+#ifndef CONFIG_SCHED_BFS
 	struct sched_group **__percpu sg;
 	struct sched_group_capacity **__percpu sgc;
+#endif
 };
 
 struct sched_domain_topology_level {

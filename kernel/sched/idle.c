@@ -12,7 +12,11 @@
 
 #include <trace/events/power.h>
 
+#ifdef CONFIG_SCHED_BFS
+#include "bfs_sched.h"
+#else
 #include "sched.h"
+#endif
 
 static int __read_mostly cpu_idle_force_poll;
 
@@ -246,7 +250,9 @@ static void cpu_idle_loop(void)
 		 */
 		smp_mb__after_atomic();
 
+#ifndef CONFIG_SCHED_BFS
 		sched_ttwu_pending();
+#endif
 		schedule_preempt_disabled();
 	}
 }
