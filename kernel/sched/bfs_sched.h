@@ -77,10 +77,6 @@ struct rq {
 	unsigned int ttwu_count;
 	unsigned int ttwu_local;
 #endif /* CONFIG_SCHEDSTATS */
-
-#ifdef CONFIG_SMP
-	struct llist_head wake_list;
-#endif
 };
 
 #ifdef CONFIG_SMP
@@ -120,8 +116,7 @@ static inline u64 rq_clock_task(struct rq *rq)
 	for (__sd = rcu_dereference_check_sched_domain(cpu_rq(cpu)->sd); __sd; __sd = __sd->parent)
 
 #ifdef CONFIG_SMP
-/*#define sched_ttwu_pending() do { } while (0)*/
-extern void sched_ttwu_pending(void);
+#define sched_ttwu_pending() do { } while (0)
 #endif
 
 #endif

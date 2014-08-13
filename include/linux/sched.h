@@ -2509,7 +2509,12 @@ static inline void set_task_comm(struct task_struct *tsk, const char *from)
 extern char *get_task_comm(char *to, struct task_struct *tsk);
 
 #ifdef CONFIG_SMP
+#ifdef CONFIG_SCHED_BFS
+/* scheduler_ipi does nothing on BFS */
+static inline void scheduler_ipi(void) { }
+#else
 void scheduler_ipi(void);
+#endif
 extern unsigned long wait_task_inactive(struct task_struct *, long match_state);
 #else
 static inline void scheduler_ipi(void) { }

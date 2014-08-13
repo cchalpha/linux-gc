@@ -1180,21 +1180,8 @@ unsigned long wait_task_inactive(struct task_struct *p, long match_state)
 	struct rq *rq;
 
 	for (;;) {
-		/*
-		 * We do the initial early heuristics without holding
-		 * any task-queue locks at all. We'll only try to get
-		 * the runqueue lock when things look like they will
-		 * work out! In the unlikely event rq is dereferenced
-		 * since we're lockless, grab it again.
-		 */
-#ifdef CONFIG_SMP
-retry_rq:
 		rq = task_rq(p);
-		if (unlikely(!rq))
-			goto retry_rq;
-#else /* CONFIG_SMP */
-		rq = task_rq(p);
-#endif
+
 		/*
 		 * If the task is actively running on another CPU
 		 * still, just relax and busy-wait without holding
@@ -1479,63 +1466,6 @@ static inline void ttwu_post_activation(struct task_struct *p, struct rq *rq,
 	if ((p->flags & PF_WQ_WORKER) && success)
 		wq_worker_waking_up(p, cpu_of(rq));
 }
-
-#ifdef CONFIG_SMP
-static void
-ttwu_do_activate(struct rq *rq, struct task_struct *p, int wake_flags)
-{
-	ttwu_activate(p, rq, false);
-	ttwu_post_activation(p, rq, true);
-}
-
-void sched_ttwu_pending(void)
-{
-	struct rq *rq = this_rq();
-	struct llist_node *llist = llist_del_all(&rq->wake_list);
-	struct task_struct *p;
-
-	grq_lock();
-
-	while (llist) {
-		p = llist_entry(llist, struct task_struct, wake_entry);
-		llist = llist_next(llist);
-		ttwu_do_activate(rq, p, 0);
-	}
-
-	grq_unlock();
-}
-
-void scheduler_ipi(void)
-{
-	/*
-	 * Fold TIF_NEED_RESCHED into the preempt_count; anybody setting
-	 * TIF_NEED_RESCHED remotely (for the first time) will also send
-	 * this IPI.
-	 */
-	preempt_fold_need_resched();
-
-	if (llist_empty(&this_rq()->wake_list))
-		return;
-
-	/*
-	 * Not all reschedule IPI handlers call irq_enter/irq_exit, since
-	 * traditionally all their work was done from the interrupt return
-	 * path. Now that we actually do some work, we need to make sure
-	 * we do call them.
-	 *
-	 * Some archs already do call them, luckily irq_enter/exit nest
-	 * properly.
-	 *
-	 * Arguably we should visit all archs and update all handlers,
-	 * however a fair share of IPIs are still resched only so this would
-	 * somewhat pessimize the simple resched case.
-	 */
-	irq_enter();
-	sched_ttwu_pending();
-
-	irq_exit();
-}
-#endif /* CONFIG_SMP */
 
 /*
  * wake flags
@@ -3770,12 +3700,6 @@ out:
  */
 int idle_cpu(int cpu)
 {
-#ifdef CONFIG_SMP
-	struct rq *rq = cpu_rq(cpu);
-
-	if (!llist_empty(&rq->wake_list))
-		return 0;
-#endif
 	return cpu_curr(cpu) == cpu_rq(cpu)->idle;
 }
 
@@ -5028,9 +4952,10 @@ int get_nohz_timer_target(int pinned)
 	rcu_read_lock();
 	for_each_domain(cpu, sd) {
 		for_each_cpu(i, sched_domain_span(sd)) {
-			if (!idle_cpu(i))
+			if (!idle_cpu(i)) {
 				cpu = i;
-			goto unlock;
+				goto unlock;
+			}
 		}
 	}
 unlock:
@@ -5465,7 +5390,6 @@ migration_call(struct notifier_block *nfb, unsigned long action, void *hcpu)
 		break;
 
 	case CPU_DYING:
-		sched_ttwu_pending();
 		/* Update our root-domain */
 		grq_lock_irqsave(&flags);
 		if (rq->rd) {
@@ -6747,6 +6671,7 @@ void __init sched_init_smp(void)
 	cpumask_andnot(non_isolated_cpus, cpu_possible_mask, cpu_isolated_map);
 	if (cpumask_empty(non_isolated_cpus))
 		cpumask_set_cpu(smp_processor_id(), non_isolated_cpus);
+	mutex_unlock(&sched_domains_mutex);
 
 	hotcpu_notifier(sched_domains_numa_masks_update, CPU_PRI_SCHED_ACTIVE);
 	hotcpu_notifier(cpuset_cpu_active, CPU_PRI_CPUSET_ACTIVE);
@@ -6801,7 +6726,6 @@ void __init sched_init_smp(void)
 #endif
 	}
 	grq_unlock_irq();
-	mutex_unlock(&sched_domains_mutex);
 
 	for_each_online_cpu(cpu) {
 		struct rq *rq = cpu_rq(cpu);
@@ -6829,7 +6753,7 @@ int in_sched_functions(unsigned long addr)
 
 void __init sched_init(void)
 {
-	int i;
+	int i, cpu_ids;
 	struct rq *rq;
 
 	prio_ratios[0] = 128;
@@ -6869,7 +6793,7 @@ void __init sched_init(void)
 	}
 
 #ifdef CONFIG_SMP
-	nr_cpu_ids = i;
+	cpu_ids = i;
 	/*
 	 * Set the base locality for cpu cache distance calculation to
 	 * "distant" (3). Make sure the distance from a CPU to itself is 0.
@@ -6884,7 +6808,7 @@ void __init sched_init(void)
 #ifdef CONFIG_SCHED_MC
 		rq->cache_idle = sole_cpu_idle;
 #endif
-		rq->cpu_locality = kmalloc(nr_cpu_ids * sizeof(int *), GFP_ATOMIC);
+		rq->cpu_locality = kmalloc(cpu_ids * sizeof(int *), GFP_ATOMIC);
 		for_each_possible_cpu(j) {
 			if (i == j)
 				rq->cpu_locality[j] = 0;

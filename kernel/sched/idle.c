@@ -250,9 +250,7 @@ static void cpu_idle_loop(void)
 		 */
 		smp_mb__after_atomic();
 
-#ifndef CONFIG_SCHED_BFS
 		sched_ttwu_pending();
-#endif
 		schedule_preempt_disabled();
 	}
 }
