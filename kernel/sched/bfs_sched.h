@@ -72,10 +72,12 @@ struct rq {
 };
 
 #ifdef CONFIG_SMP
-struct rq *cpu_rq(int cpu);
-#endif
-
-#ifndef CONFIG_SMP
+DECLARE_PER_CPU(struct rq, runqueues);
+#define cpu_rq(cpu)		(&per_cpu(runqueues, (cpu)))
+#define this_rq()		(&__get_cpu_var(runqueues))
+#define task_rq(p)		cpu_rq(task_cpu(p))
+#define cpu_curr(cpu)		(cpu_rq(cpu)->curr)
+#else
 static struct rq *uprq;
 #define cpu_rq(cpu)	(uprq)
 #define this_rq()	(uprq)
