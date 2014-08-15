@@ -784,6 +784,7 @@ static int hid_scan_report(struct hid_device *hid)
 	*/
 	if ((hid->vendor == USB_VENDOR_ID_SYNAPTICS) &&
 	    (hid->group == HID_GROUP_GENERIC) &&
+	    (hid->product != USB_DEVICE_ID_SYNAPTICS_COMP_TP) &&
 	    /* only bind to the mouse interface of composite USB devices */
 	    (hid->bus != BUS_USB || hid->type == HID_TYPE_USBMOUSE))
 		/* hid-rmi should take care of them, not hid-generic */
