@@ -783,7 +783,8 @@ static int hid_scan_report(struct hid_device *hid)
 	* Vendor specific handlings
 	*/
 	if ((hid->vendor == USB_VENDOR_ID_SYNAPTICS) &&
-	    (hid->group == HID_GROUP_GENERIC))
+	    (hid->group == HID_GROUP_GENERIC) &&
+	    (hid->product != USB_DEVICE_ID_SYNAPTICS_COMP_TP))
 		/* hid-rmi should take care of them, not hid-generic */
 		hid->group = HID_GROUP_RMI;
 
