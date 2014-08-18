@@ -226,7 +226,11 @@ static struct root_domain def_root_domain;
 cpumask_var_t cpu_isolated_map;
 
 /* There can be only one */
-static struct global_rq grq;
+#ifdef CONFIG_SMP
+static struct global_rq grq ____cacheline_aligned_in_smp;
+#else
+static struct global_rq grq ____cacheline_aligned;
+#endif
 
 static DEFINE_MUTEX(sched_hotcpu_mutex);
 
