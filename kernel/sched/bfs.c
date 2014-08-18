@@ -281,12 +281,11 @@ static inline int cpu_of(struct rq *rq)
  * increased since it last updated niffies, minus any added niffies by other
  * CPUs.
  */
-static inline void update_clocks(struct rq *rq)
+static inline void update_grq_clock(struct rq *rq)
 {
 	s64 ndiff;
 	long jdiff;
 
-	update_rq_clock(rq);
 	ndiff = rq->clock - rq->old_clock;
 	/* old_clock is only updated when we are updating niffies */
 	rq->old_clock = rq->clock;
@@ -297,24 +296,36 @@ static inline void update_clocks(struct rq *rq)
 	grq.niffies += ndiff;
 	rq->last_niffy = grq.niffies;
 }
+
+static inline void update_clocks(struct rq *rq)
+{
+	update_rq_clock(rq);
+	update_grq_clock(rq);
+}
+
 #else /* CONFIG_SMP */
 static inline int cpu_of(struct rq *rq)
 {
 	return 0;
 }
 
-static inline void update_clocks(struct rq *rq)
+static inline void update_grq_clock(struct rq *rq)
 {
 	s64 ndiff;
 	long jdiff;
 
-	update_rq_clock(rq);
 	ndiff = rq->clock - rq->old_clock;
 	rq->old_clock = rq->clock;
 	jdiff = jiffies - grq.last_jiffy;
 	niffy_diff(&ndiff, jdiff);
 	grq.last_jiffy += jdiff;
 	grq.niffies += ndiff;
+}
+
+static inline void update_clocks(struct rq *rq)
+{
+	update_rq_clock(rq);
+	update_grq_clock(rq);
 }
 #endif
 #define raw_rq()	(&__raw_get_cpu_var(runqueues))
@@ -1491,7 +1502,7 @@ static inline bool needs_other_cpu(struct task_struct *p, int cpu)
  * @this_rq is not used
  * In all cases, try_preempt() is called with grq lock held. To simplify
  * per rq->rq_prio/rq->rq_deadline access, grq lock is used.
- * Thast means set_rq_task()/reset_rq_task() also needs grq lock.
+ * That means set_rq_task()/reset_rq_task() also needs grq lock.
  */
 static void try_preempt(struct task_struct *p, struct rq *this_rq)
 {
@@ -3471,16 +3482,18 @@ need_resched:
 	idle = rq->idle;
 
 	if (idle != prev) {
-		grq_lock();
-		update_clocks(rq);
+		update_rq_clock(rq);
 
 		update_cpu_clock_switch_nonidle(rq, prev);
 		rq->dither = (rq->clock - rq->last_tick < HALF_JIFFY_NS);
 		/* Update all the information stored on struct rq */
 		prev->time_slice = rq->rq_time_slice;
 		prev->deadline = rq->rq_deadline;
-		check_deadline(prev);
 		prev->last_ran = rq->clock_task;
+
+		grq_lock();
+		update_grq_clock(rq);
+		check_deadline(prev);
 
 		if (deactivate)
 			deactivate_task(prev);
@@ -3790,7 +3803,9 @@ void set_user_nice(struct task_struct *p, long nice)
 		if (new_static < old_static)
 			try_preempt(p, rq);
 	} else if (task_running(p)) {
+		grq_lock();
 		reset_rq_task(rq, p);
+		grq_unlock();
 		if (old_static < new_static)
 			resched_task(p);
 	}
@@ -3916,6 +3931,9 @@ static inline struct task_struct *find_process_by_pid(pid_t pid)
 }
 
 /* Actually do priority change: must hold rq lock. */
+/* reset_rq_task() needs grq lock, when p is running, only rq lock is held
+ * grq lock is not.
+ */
 static void
 __setscheduler(struct task_struct *p, struct rq *rq, int policy, int prio)
 {
@@ -3929,7 +3947,9 @@ __setscheduler(struct task_struct *p, struct rq *rq, int policy, int prio)
 	/* we are holding p->pi_lock already */
 	p->prio = rt_mutex_getprio(p);
 	if (task_running(p)) {
+		grq_lock();
 		reset_rq_task(rq, p);
+		grq_unlock();
 		/* Resched only if we might now be preempted */
 		if (p->prio > oldprio || p->rt_priority > oldrtprio)
 			resched_task(p);
