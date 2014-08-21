@@ -769,7 +769,7 @@ static inline bool scaling_rq(struct rq *rq);
  */
 static int best_mask_cpu(int best_cpu, struct rq *rq, cpumask_t *tmpmask)
 {
-	const static int locality2ranking[] = {
+	static const int locality2ranking[] = {
 		/*locality 0*/
 		0,
 		/*locality 1*/
@@ -6923,9 +6923,6 @@ int in_sched_functions(unsigned long addr)
 
 void __init sched_init(void)
 {
-#ifdef CONFIG_SMP
-	int cpu_ids;
-#endif
 	int i;
 	struct rq *rq;
 
@@ -6966,7 +6963,6 @@ void __init sched_init(void)
 	}
 
 #ifdef CONFIG_SMP
-	cpu_ids = i;
 	/*
 	 * Set the base locality for cpu cache distance calculation to
 	 * "distant" (3). Make sure the distance from a CPU to itself is 0.
@@ -6975,7 +6971,6 @@ void __init sched_init(void)
 		int j;
 
 		rq = cpu_rq(i);
-		rq->cpu_locality = kmalloc(cpu_ids * sizeof(int *), GFP_ATOMIC);
 		for_each_possible_cpu(j) {
 			if (i == j)
 				rq->cpu_locality[j] = 0;
