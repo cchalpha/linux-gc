@@ -3655,10 +3655,11 @@ need_resched:
 			goto unlock_out;
 		}
 	} else {
+		grq_lock();
 		update_rq_clock(rq);
+		update_grq_clock(rq);
 		update_cpu_clock_switch_idle(rq, prev);
 		rq->dither = (rq->clock - rq->last_tick < HALF_JIFFY_NS);
-		grq_lock();
 	}
 
 	if (likely(queued_notrunning())) {
