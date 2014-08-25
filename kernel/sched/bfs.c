@@ -1196,20 +1196,6 @@ static inline void take_task(int cpu, struct task_struct *p)
 	dec_qnr();
 }
 
-/*
- * Returns a descheduling task to the grq runqueue unless it is being
- * deactivated.
- */
-static inline void return_task(struct task_struct *p, bool deactivate)
-{
-	if (deactivate)
-		deactivate_task(p);
-	else {
-		inc_qnr();
-		enqueue_task(p);
-	}
-}
-
 /* Enter with grq lock held. We know p is on the local cpu */
 static inline void __set_tsk_resched(struct task_struct *p)
 {
@@ -3507,29 +3493,40 @@ need_resched:
 		check_deadline(prev);
 		prev->last_ran = rq->clock_task;
 
-		/* Task changed affinity off this CPU */
-		if (needs_other_cpu(prev, cpu)) {
-			if (!deactivate)
+		if (deactivate)
+			deactivate_task(prev);
+		else {
+			/* Task changed affinity off this CPU */
+			if (unlikely(needs_other_cpu(prev, cpu)))
 				resched_suitable_idle(prev);
-		} else if (!deactivate) {
-			if (!queued_notrunning()) {
-				/*
-				* We now know prev is the only thing that is
-				* awaiting CPU so we can bypass rechecking for
-				* the earliest deadline task and just run it
-				* again.
-				*/
-				set_rq_task(rq, prev);
-				check_smt_siblings(cpu);
-				grq_unlock_irq();
-				goto rerun_prev_unlocked;
-			} else
-				swap_sticky(rq, cpu, prev);
+			else {
+				if (queued_notrunning())
+					swap_sticky(rq, cpu, prev);
+				else {
+					/*
+					* We now know prev is the only thing that is
+					* awaiting CPU so we can bypass rechecking for
+					* the earliest deadline task and just run it
+					* again.
+					*/
+					set_rq_task(rq, prev);
+					check_smt_siblings(cpu);
+					grq_unlock_irq();
+					goto rerun_prev_unlocked;
+				}
+			}
+			inc_qnr();
+			enqueue_task(prev);
 		}
-		return_task(prev, deactivate);
 	}
 
-	if (unlikely(!queued_notrunning())) {
+	if (likely(queued_notrunning())) {
+		next = earliest_deadline_task(rq, cpu, idle);
+		if (likely(next->prio != PRIO_LIMIT))
+			clear_cpuidle_map(cpu);
+		else
+			set_cpuidle_map(cpu);
+	} else {
 		/*
 		 * This CPU is now truly idle as opposed to when idle is
 		 * scheduled as a high priority task in its own right.
@@ -3537,12 +3534,6 @@ need_resched:
 		next = idle;
 		schedstat_inc(rq, sched_goidle);
 		set_cpuidle_map(cpu);
-	} else {
-		next = earliest_deadline_task(rq, cpu, idle);
-		if (likely(next->prio != PRIO_LIMIT))
-			clear_cpuidle_map(cpu);
-		else
-			set_cpuidle_map(cpu);
 	}
 
 	if (likely(prev != next)) {
