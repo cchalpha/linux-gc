@@ -395,8 +395,13 @@ static void byt_set_pstate(struct cpudata *cpudata, int pstate)
 	vid_fp = clamp_t(int32_t, vid_fp, cpudata->vid.min, cpudata->vid.max);
 	vid = fp_toint(vid_fp);
 
-	if (pstate > cpudata->pstate.max_pstate)
-		vid = cpudata->vid.turbo;
+	if (pstate < cpudata->pstate.max_pstate)
+		cpu_scaling(cpudata->cpu);
+	else {
+		if (pstate > cpudata->pstate.max_pstate)
+			vid = cpudata->vid.turbo;
+		cpu_nonscaling(cpudata->cpu);
+	}
 
 	val |= vid;
 
