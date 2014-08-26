@@ -88,7 +88,7 @@ DECLARE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
 #define task_rq(p)		cpu_rq(task_cpu(p))
 #define cpu_curr(cpu)		(cpu_rq(cpu)->curr)
 #else
-static struct rq *uprq;
+extern struct rq *uprq;
 #define cpu_rq(cpu)	(uprq)
 #define this_rq()	(uprq)
 #define task_rq(p)	(uprq)
