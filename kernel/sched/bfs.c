@@ -245,6 +245,8 @@ static struct root_domain def_root_domain;
 static struct global_rq grq ____cacheline_aligned_in_smp;
 #else
 static struct global_rq grq ____cacheline_aligned;
+
+struct rq *uprq;
 #endif
 
 DEFINE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
