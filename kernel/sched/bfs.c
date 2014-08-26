@@ -533,6 +533,13 @@ static inline void prepare_lock_switch(struct rq *rq, struct task_struct *next)
 
 static inline void finish_lock_switch(struct rq *rq, struct task_struct *prev)
 {
+/*
+#ifdef CONFIG_DEBUG_SPINLOCK
+	rq->lock.owner = current;
+#endif
+
+	spin_acquire(&rq->lock.dep_map, 0, 0, _THIS_IP_);
+*/
 #ifdef CONFIG_DEBUG_SPINLOCK
 	/* this is a valid case when another task releases the spinlock */
 	grq.lock.owner = current;
@@ -544,6 +551,7 @@ static inline void finish_lock_switch(struct rq *rq, struct task_struct *prev)
 	 */
 	spin_acquire(&grq.lock.dep_map, 0, 0, _THIS_IP_);
 
+	/*raw_spin_unlock(&rq->lock);*/
 	grq_unlock_irq();
 }
 
@@ -1885,6 +1893,7 @@ prepare_task_switch(struct rq *rq, struct task_struct *prev,
  * details.)
  */
 static inline void finish_task_switch(struct rq *rq, struct task_struct *prev)
+	/*__releases(rq->lock)*/
 	__releases(grq.lock)
 {
 	struct mm_struct *mm = rq->prev_mm;
@@ -3402,6 +3411,7 @@ need_resched:
 	 */
 	smp_mb__before_spinlock();
 	grq_lock_irq();
+	raw_spin_lock(&rq->lock);
 
 	switch_count = &prev->nivcsw;
 	if (prev->state && !(preempt_count() & PREEMPT_ACTIVE)) {
@@ -3436,6 +3446,7 @@ need_resched:
 	 * sure to submit it to avoid deadlocks.
 	 */
 	if (unlikely(deactivate && blk_needs_flush_plug(prev))) {
+		raw_spin_unlock(&rq->lock);
 		grq_unlock_irq();
 		preempt_enable_no_resched();
 		blk_schedule_flush_plug(prev);
@@ -3473,6 +3484,7 @@ need_resched:
 					*/
 					set_rq_task(rq, prev);
 					check_smt_siblings(cpu);
+					raw_spin_unlock(&rq->lock);
 					grq_unlock_irq();
 					goto rerun_prev_unlocked;
 				}
@@ -3521,6 +3533,8 @@ need_resched:
 		rq->curr = next;
 		++*switch_count;
 
+		raw_spin_unlock(&rq->lock);
+
 		context_switch(rq, prev, next); /* unlocks the grq */
 		/*
 		 * The context switch have flipped the stack from under us
@@ -3535,6 +3549,7 @@ need_resched:
 		*/
 	} else {
 		check_smt_siblings(cpu);
+		raw_spin_unlock(&rq->lock);
 		grq_unlock_irq();
 	}
 
@@ -6932,6 +6947,7 @@ void __init sched_init(void)
 #endif
 	for_each_possible_cpu(i) {
 		rq = cpu_rq(i);
+		raw_spin_lock_init(&rq->lock);
 		rq->user_pc = rq->nice_pc = rq->softirq_pc = rq->system_pc =
 			      rq->iowait_pc = rq->idle_pc = 0;
 		rq->dither = false;
