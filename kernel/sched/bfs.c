@@ -3535,7 +3535,11 @@ need_resched:
 	}
 
 	if (likely(prev != next)) {
-		resched_suitable_idle(prev);
+		/*
+		 * Don't reschedule an idle task or deactivated task
+		 */
+		if ( prev != idle && !deactivate)
+			resched_suitable_idle(prev);
 		/*
 		 * Don't stick tasks when a real time task is going to run as
 		 * they may literally get stuck.
