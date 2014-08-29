@@ -3494,23 +3494,22 @@ need_resched:
 		prev->last_ran = rq->clock_task;
 
 		/* Task changed affinity off this CPU */
-		if (needs_other_cpu(prev, cpu)) {
-			if (!deactivate)
-				resched_suitable_idle(prev);
-		} else if (!deactivate) {
-			if (!queued_notrunning()) {
-				/*
-				* We now know prev is the only thing that is
-				* awaiting CPU so we can bypass rechecking for
-				* the earliest deadline task and just run it
-				* again.
-				*/
-				set_rq_task(rq, prev);
-				check_smt_siblings(cpu);
-				grq_unlock_irq();
-				goto rerun_prev_unlocked;
-			} else
-				swap_sticky(rq, cpu, prev);
+		if (likely(!needs_other_cpu(prev, cpu))) {
+			if (!deactivate) {
+				if (!queued_notrunning()) {
+					/*
+					 * We now know prev is the only thing that is
+					 * awaiting CPU so we can bypass rechecking for
+					 * the earliest deadline task and just run it
+					 * again.
+					 */
+					set_rq_task(rq, prev);
+					check_smt_siblings(cpu);
+					grq_unlock_irq();
+					goto rerun_prev_unlocked;
+				} else
+					swap_sticky(rq, cpu, prev);
+			}
 		}
 		return_task(prev, deactivate);
 	}
@@ -3532,7 +3531,11 @@ need_resched:
 	}
 
 	if (likely(prev != next)) {
-		resched_suitable_idle(prev);
+		/*
+		 * Don't reschedule an idle task or deactivated tasks
+		 */
+		if ( prev != idle && !deactivate)
+			resched_suitable_idle(prev);
 		/*
 		 * Don't stick tasks when a real time task is going to run as
 		 * they may literally get stuck.
