@@ -2032,6 +2032,7 @@ static inline void finish_task_switch(struct rq *rq, struct task_struct *prev)
 	if (rq->return_task) {
 		grq_lock();
 		enqueue_task(rq->return_task);
+		inc_qnr();
 		grq_unlock();
 		rq->return_task = NULL;
 	}
@@ -3600,10 +3601,25 @@ need_resched:
 			deactivate_task(prev);
 		else {
 			/* Task changed affinity off this CPU */
-			if (likely(!needs_other_cpu(prev, cpu))) {
-				if (queued_notrunning())
+			if (unlikely(needs_other_cpu(prev, cpu))) {
+				/*
+				 * next will be not equal prev, set rq return_task to
+				 * enqueue task before grq_unlock in context_switch.
+				 */
+				rq->return_task = prev;
+			} else {
+				if (queued_notrunning()) {
 					swap_sticky(rq, cpu, prev);
-				else {
+					enqueue_task(prev);
+					next = earliest_deadline_task(rq, cpu, idle);
+					if (likely(prev != next)) {
+						dequeue_task(prev);
+						rq->return_task = prev;
+						goto do_switch;
+					}
+					inc_qnr();
+					goto unlock_out;
+				} else {
 					/*
 					* We now know prev is the only thing that is
 					* awaiting CPU so we can bypass rechecking for
@@ -3614,15 +3630,6 @@ need_resched:
 					goto unlock_out;
 				}
 			}
-			inc_qnr();
-			enqueue_task(prev);
-			next = earliest_deadline_task(rq, cpu, idle);
-			if (likely(prev != next)) {
-				dequeue_task(prev);
-				rq->return_task = prev;
-				goto do_switch;
-			}
-			goto unlock_out;
 		}
 	} else {
 		grq_lock();
