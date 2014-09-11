@@ -1992,6 +1992,13 @@ static inline void finish_task_switch(struct rq *rq, struct task_struct *prev)
 	vtime_task_switch(prev);
 	finish_arch_switch(prev);
 	perf_event_task_sched_in(prev, current);
+	/*
+	 * Before unlock, equeue the return task to grq
+	 */
+	if (rq->return_task) {
+		enqueue_task(rq->return_task);
+		rq->return_task = NULL;
+	}
 	finish_lock_switch(rq, prev);
 	finish_arch_post_lock_switch();
 
@@ -3573,15 +3580,18 @@ need_resched:
 			}
 			inc_qnr();
 			enqueue_task(prev);
+			next = earliest_deadline_task(rq, cpu, idle);
+			if (likely(prev != next)) {
+				dequeue_task(prev);
+				rq->return_task = prev;
+				goto do_switch;
+			}
+			goto unlock_out;
 		}
 	}
 
 	if (likely(queued_notrunning())) {
 		next = earliest_deadline_task(rq, cpu, idle);
-		if (likely(next->prio != PRIO_LIMIT))
-			clear_cpuidle_map(cpu);
-		else
-			set_cpuidle_map(cpu);
 	} else {
 		/*
 		 * This CPU is now truly idle as opposed to when idle is
@@ -3589,15 +3599,20 @@ need_resched:
 		 */
 		next = idle;
 		schedstat_inc(rq, sched_goidle);
-		set_cpuidle_map(cpu);
 	}
 
 	if (likely(prev != next)) {
+do_switch:
+		if (likely(next->prio != PRIO_LIMIT))
+			clear_cpuidle_map(cpu);
+		else
+			set_cpuidle_map(cpu);
 		/*
 		 * Don't reschedule an idle task or deactivated tasks
 		 */
 		if ( prev != idle && !deactivate)
 			resched_suitable_idle(prev);
+
 		/*
 		 * Don't stick tasks when a real time task is going to run as
 		 * they may literally get stuck.
@@ -3630,6 +3645,7 @@ need_resched:
 		idle = rq->idle;
 		*/
 	} else {
+unlock_out:
 		check_smt_siblings(cpu);
 		raw_spin_unlock(&rq->lock);
 		grq_unlock_irq();
@@ -7061,6 +7077,7 @@ void __init sched_init(void)
 #endif
 	for_each_possible_cpu(i) {
 		rq = cpu_rq(i);
+		rq->return_task = NULL;
 		raw_spin_lock_init(&rq->lock);
 		rq->user_pc = rq->nice_pc = rq->softirq_pc = rq->system_pc =
 			      rq->iowait_pc = rq->idle_pc = 0;
