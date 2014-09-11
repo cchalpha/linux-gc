@@ -199,8 +199,6 @@ struct global_rq {
 	bool idle_cpus;
 #endif
 	int noc; /* num_online_cpus stored and updated when it changes */
-	u64 niffies; /* Nanosecond jiffies */
-	unsigned long last_jiffy; /* Last jiffy we updated niffies */
 
 	raw_spinlock_t iso_lock;
 	int iso_ticks;
@@ -301,60 +299,33 @@ static inline int cpu_of(struct rq *rq)
 	return rq->cpu;
 }
 
-/*
- * Niffies are a globally increasing nanosecond counter. Whenever a runqueue
- * clock is updated with the grq.lock held, it is an opportunity to update the
- * niffies value. Any CPU can update it by adding how much its clock has
- * increased since it last updated niffies, minus any added niffies by other
- * CPUs.
- */
-static inline void update_grq_clock(struct rq *rq)
-{
-	s64 ndiff;
-	long jdiff;
-
-	ndiff = rq->clock - rq->old_clock;
-	/* old_clock is only updated when we are updating niffies */
-	rq->old_clock = rq->clock;
-	ndiff -= grq.niffies - rq->last_niffy;
-	jdiff = jiffies - grq.last_jiffy;
-	niffy_diff(&ndiff, jdiff);
-	grq.last_jiffy += jdiff;
-	grq.niffies += ndiff;
-	rq->last_niffy = grq.niffies;
-}
-
-static inline void update_clocks(struct rq *rq)
-{
-	update_rq_clock(rq);
-	update_grq_clock(rq);
-}
 
 #else /* CONFIG_SMP */
 static inline int cpu_of(struct rq *rq)
 {
 	return 0;
 }
+#endif
 
-static inline void update_grq_clock(struct rq *rq)
+/*
+ * RQ niffy is an increasing nanosecond counter.
+ */
+static inline void update_clocks(struct rq *rq)
 {
 	s64 ndiff;
 	long jdiff;
 
+	update_rq_clock(rq);
+
 	ndiff = rq->clock - rq->old_clock;
+	/* old_clock is only updated when we are updating niffies */
 	rq->old_clock = rq->clock;
-	jdiff = jiffies - grq.last_jiffy;
+	jdiff = jiffies - rq->last_jiffy;
 	niffy_diff(&ndiff, jdiff);
-	grq.last_jiffy += jdiff;
-	grq.niffies += ndiff;
+	rq->last_jiffy += jdiff;
+	rq->niffy += ndiff;
 }
 
-static inline void update_clocks(struct rq *rq)
-{
-	update_rq_clock(rq);
-	update_grq_clock(rq);
-}
-#endif
 #define raw_rq()	(&__raw_get_cpu_var(runqueues))
 
 #include "stats.h"
@@ -1796,7 +1767,7 @@ int wake_up_state(struct task_struct *p, unsigned int state)
 	return try_to_wake_up(p, state, 0);
 }
 
-static void time_slice_expired(struct task_struct *p);
+static void time_slice_expired(struct task_struct *p, struct rq *rq);
 
 /*
  * Perform scheduler related setup for a newly forked process p.
@@ -1932,7 +1903,7 @@ after_ts_init:
 			rq->rq_time_slice = 0;
 			__set_tsk_resched(parent);
 		}
-		time_slice_expired(p);
+		time_slice_expired(p, rq);
 	}
 	task_vrq_unlock_irqrestore(rq, lock, &flags);
 }
@@ -3200,10 +3171,10 @@ static inline int ms_longest_deadline_diff(void)
  * The time_slice is only refilled when it is empty and that is when we set a
  * new deadline.
  */
-static void time_slice_expired(struct task_struct *p)
+static void time_slice_expired(struct task_struct *p, struct rq *rq)
 {
 	p->time_slice = timeslice();
-	p->deadline = grq.niffies + task_deadline_diff(p);
+	p->deadline = rq->niffy + task_deadline_diff(p);
 #ifdef CONFIG_SMT_NICE
 	if (!p->mm)
 		p->smt_bias = 0;
@@ -3230,10 +3201,10 @@ static void time_slice_expired(struct task_struct *p)
  * SCHED_NORMAL tasks.
 
  */
-static inline void check_deadline(struct task_struct *p)
+static inline void check_deadline(struct task_struct *p, struct rq *rq)
 {
 	if (p->time_slice < RESCHED_US || batch_task(p))
-		time_slice_expired(p);
+		time_slice_expired(p, rq);
 }
 
 #define BITOP_WORD(nr)		((nr) / BITS_PER_LONG)
@@ -3613,7 +3584,7 @@ need_resched:
 	idle = rq->idle;
 
 	if (idle != prev) {
-		update_rq_clock(rq);
+		update_clocks(rq);
 
 		update_cpu_clock_switch_nonidle(rq, prev);
 		rq->dither = (rq->clock - rq->last_tick < HALF_JIFFY_NS);
@@ -3623,8 +3594,7 @@ need_resched:
 		prev->last_ran = rq->clock_task;
 
 		grq_lock();
-		update_grq_clock(rq);
-		check_deadline(prev);
+		check_deadline(prev, rq);
 
 		if (deactivate)
 			deactivate_task(prev);
@@ -3656,8 +3626,7 @@ need_resched:
 		}
 	} else {
 		grq_lock();
-		update_rq_clock(rq);
-		update_grq_clock(rq);
+		update_clocks(rq);
 		update_cpu_clock_switch_idle(rq, prev);
 		rq->dither = (rq->clock - rq->last_tick < HALF_JIFFY_NS);
 	}
@@ -4024,7 +3993,7 @@ int task_prio(const struct task_struct *p)
 		goto out;
 
 	/* Convert to ms to avoid overflows */
-	delta = NS_TO_MS(p->deadline - grq.niffies);
+	delta = NS_TO_MS(p->deadline - this_rq()->niffy);
 	delta = delta * 40 / ms_longest_deadline_diff();
 	if (delta > 0 && delta <= 80)
 		prio += delta;
@@ -7134,6 +7103,7 @@ void __init sched_init(void)
 	int cpu_ids;
 #endif
 	int i;
+	unsigned long jiffy;
 	struct rq *rq;
 
 	prio_ratios[0] = 128;
@@ -7142,8 +7112,6 @@ void __init sched_init(void)
 
 	raw_spin_lock_init(&grq.lock);
 	grq.nr_running = grq.nr_uninterruptible = grq.nr_switches = 0;
-	grq.niffies = 0;
-	grq.last_jiffy = jiffies;
 	raw_spin_lock_init(&grq.iso_lock);
 	grq.iso_ticks = 0;
 	grq.iso_refractory = false;
@@ -7155,6 +7123,7 @@ void __init sched_init(void)
 #else
 	uprq = &per_cpu(runqueues, 0);
 #endif
+	jiffy = jiffies;
 	for_each_possible_cpu(i) {
 		rq = cpu_rq(i);
 		rq->return_task = NULL;
@@ -7164,7 +7133,8 @@ void __init sched_init(void)
 		rq->dither = false;
 #ifdef CONFIG_SMP
 		rq->sticky_task = NULL;
-		rq->last_niffy = 0;
+		rq->last_jiffy = jiffy;
+		rq->niffy = 0;
 		rq->sd = NULL;
 		rq->rd = NULL;
 		rq->online = false;
