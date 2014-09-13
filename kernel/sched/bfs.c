@@ -1867,26 +1867,26 @@ void wake_up_new_task(struct task_struct *p)
 	struct task_struct *parent;
 	unsigned long flags;
 	struct rq *rq;
-	raw_spinlock_t *lock;
 
 	parent = p->parent;
-	/* p is not running and not queued, task_vrq_lock...() will
-	 * will lock on both rq and grq
+	/*
+	 * p is new task, the only reference is right here, this_cpu() is one
+	 * p allowed to run, lock on this_rq to avoid waiting for other rq
 	 */
-	rq = task_vrq_lock_irqsave(p, &lock, &flags);
+retry:
+	rq = this_rq();
+	raw_spin_lock_irqsave(&rq->lock, flags);
+	if (unlikely(rq != this_rq())) {
+		raw_spin_unlock_irqrestore(&rq->lock, flags);
+		goto retry;
+	}
 
+	set_task_cpu(p, rq->cpu);
 	/*
 	 * Reinit new task deadline as its creator deadline could have changed
 	 * since call to dup_task_struct().
 	 */
 	p->deadline = rq->rq_deadline;
-
-	/*
-	 * If the task is a new process, current and parent are the same. If
-	 * the task is a new thread in the thread group, it will have much more
-	 * in common with current than with the parent.
-	 */
-	set_task_cpu(p, task_cpu(rq->curr));
 
 	/*
 	 * Make sure we do not leak PI boosting priority to the child.
@@ -1895,7 +1895,9 @@ void wake_up_new_task(struct task_struct *p)
 
 	update_task_priodl(p);
 
+	grq_lock();
 	activate_task(p, rq);
+
 	trace_sched_wakeup_new(p, 1);
 	if (unlikely(p->policy == SCHED_FIFO))
 		goto after_ts_init;
@@ -1921,8 +1923,9 @@ after_ts_init:
 			 * usually avoids a lot of COW overhead.
 			 */
 			__set_tsk_resched(parent);
-		} else
+		} else {
 			try_preempt(p, rq);
+		}
 	} else {
 		if (rq->curr == parent) {
 			/*
@@ -1936,7 +1939,8 @@ after_ts_init:
 		}
 		time_slice_expired(p, rq);
 	}
-	task_vrq_unlock_irqrestore(rq, lock, &flags);
+	grq_unlock();
+	raw_spin_unlock_irqrestore(&rq->lock, flags);
 }
 
 #ifdef CONFIG_PREEMPT_NOTIFIERS
