@@ -3611,14 +3611,17 @@ need_resched:
 		else {
 			/* Task changed affinity off this CPU */
 			if (unlikely(needs_other_cpu(prev, cpu))) {
-				goto return_task;
+				enqueue_task(prev);
+				inc_qnr();
+				next = earliest_deadline_task(rq, cpu, idle);
+				goto handle_next;
 			} else {
 				if (queued_notrunning()) {
 					swap_sticky(rq, cpu, prev);
-return_task:
 					enqueue_task(prev);
 					inc_qnr();
-					goto earliest_deadline_next;
+					next = earliest_deadline_task(rq, cpu, idle);
+					goto handle_next;
 				} else {
 					/*
 					* We now know prev is the only thing that is
@@ -3639,7 +3642,6 @@ return_task:
 	}
 
 	if (likely(queued_notrunning())) {
-earliest_deadline_next:
 		next = earliest_deadline_task(rq, cpu, idle);
 	} else {
 		/*
@@ -3650,6 +3652,7 @@ earliest_deadline_next:
 		schedstat_inc(rq, sched_goidle);
 	}
 
+handle_next:
 	if (likely(prev != next)) {
 		if (likely(next->prio != PRIO_LIMIT))
 			clear_cpuidle_map(cpu);
