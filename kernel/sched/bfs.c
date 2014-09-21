@@ -1202,30 +1202,31 @@ static inline bool task_sticky(struct task_struct *p)
 }
 
 /*
- * We set the sticky flag on a task that is descheduled involuntarily meaning
- * it is awaiting further CPU time. If the last sticky task is still sticky
- * but unlucky enough to not be the next task scheduled, we unstick it and try
- * to find it an idle CPU. Realtime tasks do not stick to minimise their
- * latency at all times.
+ * If the last sticky task is still sticky but unlucky enough to not be the
+ * next task scheduled, we unstick it and try to find it an idle CPU.
  */
 static inline void
-swap_sticky(struct rq *rq, int cpu, struct task_struct *p)
+check_sticky_task(struct rq *rq, int cpu)
 {
-	if (rq->sticky_task) {
-		if (rq->sticky_task == p) {
-			p->sticky = true;
-			return;
-		}
-		if (task_sticky(rq->sticky_task)) {
-			clear_sticky(rq->sticky_task);
-			resched_closest_idle(rq, cpu, rq->sticky_task);
-		}
-	}
-	if (!rt_task(p)) {
-		p->sticky = true;
-		rq->sticky_task = p;
-	} else {
+	struct task_struct *p = rq->sticky_task;
+
+	if (p && task_sticky(p) && task_cpu(p) == cpu) {
+		clear_sticky(p);
 		resched_closest_idle(rq, cpu, p);
+	}
+}
+
+/*
+ * We set the sticky flag on a task that is descheduled involuntarily meaning
+ * it is awaiting further CPU time.
+ * Realtime tasks do not stick to minimise their latency at all times.
+ */
+static inline void stick_task(struct rq *rq, struct task_struct *p)
+{
+	if(!rt_task(p)) {
+		rq->sticky_task = p;
+		p->sticky = true;
+	} else {
 		rq->sticky_task = NULL;
 	}
 }
@@ -3603,11 +3604,21 @@ need_resched:
 				goto handle_next;
 			} else {
 				if (queued_notrunning()) {
-					swap_sticky(rq, cpu, prev);
 					enqueue_task(prev);
 					inc_qnr();
 					next = earliest_deadline_task(rq, cpu, idle);
-					goto handle_next;
+					check_sticky_task(rq, cpu);
+					if (prev != next) {
+						/*
+						 * Don't stick tasks when a real time
+						 * task is going to run as they may
+						 * literally get stuck.
+						 */
+						if (!rt_task(next))
+							stick_task(rq, prev);
+						goto do_switch;
+					}
+					goto unlock_out;
 				} else {
 					/*
 					* We now know prev is the only thing that is
@@ -3640,6 +3651,7 @@ need_resched:
 
 handle_next:
 	if (likely(prev != next)) {
+do_switch:
 		if (likely(next->prio != PRIO_LIMIT))
 			clear_cpuidle_map(cpu);
 		else
@@ -3650,12 +3662,6 @@ handle_next:
 		if ( prev != idle && !deactivate)
 			resched_best_idle(prev);
 
-		/*
-		 * Don't stick tasks when a real time task is going to run as
-		 * they may literally get stuck.
-		 */
-		if (rt_task(next))
-			unstick_task(rq, prev);
 		set_rq_task(rq, next);
 
 		if (next != idle)
