@@ -361,6 +361,22 @@ static inline bool task_running(struct task_struct *p)
 	return p->on_cpu;
 }
 
+static inline void _grq_lock(void)
+	__acquires(grq.lock)
+{
+	raw_spinlock_t *lock = &grq.lock;
+	spin_acquire(&lock->dep_map, 0, 0, _RET_IP_);
+	LOCK_CONTENDED(lock, do_raw_spin_trylock, do_raw_spin_lock);
+}
+
+static inline void _grq_unlock(void)
+	__releases(grq.lock)
+{
+	raw_spinlock_t *lock = &grq.lock;
+	spin_release(&lock->dep_map, 1, _RET_IP_);
+	do_raw_spin_unlock(lock);
+}
+
 static inline void grq_lock(void)
 	__acquires(grq.lock)
 {
@@ -630,24 +646,20 @@ static inline void prepare_lock_switch(struct rq *rq, struct task_struct *next)
 
 static inline void finish_lock_switch(struct rq *rq, struct task_struct *prev)
 {
-/*
-#ifdef CONFIG_DEBUG_SPINLOCK
-	rq->lock.owner = current;
-#endif
-
-	spin_acquire(&rq->lock.dep_map, 0, 0, _THIS_IP_);
-*/
 #ifdef CONFIG_DEBUG_SPINLOCK
 	/* this is a valid case when another task releases the spinlock */
 	rq->lock.owner = current;
+	grq.lock.owner = current;
 #endif
 	/*
 	 * If we are tracking spinlock dependencies then we have to
 	 * fix up the runqueue lock - which gets 'carried over' from
 	 * prev into current:
 	 */
+	spin_acquire(&grq.lock.dep_map, 0, 0, _THIS_IP_);
 	spin_acquire(&rq->lock.dep_map, 0, 0, _THIS_IP_);
 
+	_grq_unlock();
 	raw_spin_unlock_irq(&rq->lock);
 }
 
@@ -2010,6 +2022,7 @@ prepare_task_switch(struct rq *rq, struct task_struct *prev,
  * details.)
  */
 static inline void finish_task_switch(struct rq *rq, struct task_struct *prev)
+	__releases(grq.lock)
 	__releases(rq->lock)
 {
 	struct mm_struct *mm = rq->prev_mm;
@@ -2032,16 +2045,6 @@ static inline void finish_task_switch(struct rq *rq, struct task_struct *prev)
 	vtime_task_switch(prev);
 	finish_arch_switch(prev);
 	perf_event_task_sched_in(prev, current);
-	/*
-	 * Before unlock, equeue the return task to grq
-	 */
-	if (rq->return_task) {
-		grq_lock();
-		enqueue_task(rq->return_task);
-		inc_qnr();
-		grq_unlock();
-		rq->return_task = NULL;
-	}
 	/*
 	 * Once prev->on_cpu set to false, vrq_lock...() will be locked on
 	 * grq.lock
@@ -3600,7 +3603,7 @@ need_resched:
 		prev->deadline = rq->rq_deadline;
 		prev->last_ran = rq->clock_task;
 
-		grq_lock();
+		_grq_lock();
 		check_deadline(prev, rq);
 
 		if (deactivate)
@@ -3608,23 +3611,14 @@ need_resched:
 		else {
 			/* Task changed affinity off this CPU */
 			if (unlikely(needs_other_cpu(prev, cpu))) {
-				/*
-				 * next will be not equal prev, set rq return_task to
-				 * enqueue task before grq_unlock in context_switch.
-				 */
-				rq->return_task = prev;
+				goto return_task;
 			} else {
 				if (queued_notrunning()) {
 					swap_sticky(rq, cpu, prev);
+return_task:
 					enqueue_task(prev);
-					next = earliest_deadline_task(rq, cpu, idle);
-					if (likely(prev != next)) {
-						dequeue_task(prev);
-						rq->return_task = prev;
-						goto do_switch;
-					}
 					inc_qnr();
-					goto unlock_out;
+					goto earliest_deadline_next;
 				} else {
 					/*
 					* We now know prev is the only thing that is
@@ -3641,10 +3635,11 @@ need_resched:
 		update_clocks(rq);
 		update_cpu_clock_switch_idle(rq, prev);
 		rq->dither = (rq->clock - rq->last_tick < HALF_JIFFY_NS);
-		grq_lock();
+		_grq_lock();
 	}
 
 	if (likely(queued_notrunning())) {
+earliest_deadline_next:
 		next = earliest_deadline_task(rq, cpu, idle);
 	} else {
 		/*
@@ -3656,7 +3651,6 @@ need_resched:
 	}
 
 	if (likely(prev != next)) {
-do_switch:
 		if (likely(next->prio != PRIO_LIMIT))
 			clear_cpuidle_map(cpu);
 		else
@@ -3687,7 +3681,6 @@ do_switch:
 		next->on_cpu = true;
 		rq->curr = next;
 		++*switch_count;
-		grq_unlock();
 
 		context_switch(rq, prev, next); /* unlocks the grq */
 		/*
@@ -3704,7 +3697,7 @@ do_switch:
 	} else {
 unlock_out:
 		check_smt_siblings(cpu);
-		grq_unlock();
+		_grq_unlock();
 		raw_spin_unlock_irq(&rq->lock);
 	}
 
@@ -7139,7 +7132,6 @@ void __init sched_init(void)
 	jiffy = jiffies;
 	for_each_possible_cpu(i) {
 		rq = cpu_rq(i);
-		rq->return_task = NULL;
 		raw_spin_lock_init(&rq->lock);
 		rq->user_pc = rq->nice_pc = rq->softirq_pc = rq->system_pc =
 			      rq->iowait_pc = rq->idle_pc = 0;
