@@ -49,6 +49,8 @@ struct rq {
 #endif /* CONFIG_SCHED_MC */
 	u64 last_niffy; /* Last time this RQ updated grq.niffies */
 #endif /* CONFIG_SMP */
+	u64 niffy; /* Nanosecond jiffies of this RQ */
+	unsigned long last_jiffy; /* Last jiffy when updated niffy */
 #ifdef CONFIG_IRQ_TIME_ACCOUNTING
 	u64 prev_irq_time;
 #endif /* CONFIG_IRQ_TIME_ACCOUNTING */
