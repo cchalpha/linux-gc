@@ -3614,79 +3614,73 @@ static inline void activate_schedule(int cpu, struct rq *rq, struct task_struct 
 		enqueue_task(prev);
 		inc_qnr();
 		next = earliest_deadline_task(rq, cpu, idle);
+		resched_best_idle(prev);
 		goto do_switch;
-	} else {
-		if (queued_notrunning()) {
-			enqueue_task(prev);
-			inc_qnr();
-			next = earliest_deadline_task(rq, cpu, idle);
-			check_sticky_task(rq, cpu);
-			if (prev != next) {
-				/*
-				 * Don't stick tasks when a real time
-				 * task is going to run as they may
-				 * literally get stuck.
-				 */
-				if (!rt_task(next))
-					stick_task(rq, prev);
-				goto do_switch;
-			}
-			set_rq_task(rq, prev);
-			goto unlock_out;
-		} else {
+	}
+
+	if (queued_notrunning()) {
+		enqueue_task(prev);
+		inc_qnr();
+		next = earliest_deadline_task(rq, cpu, idle);
+		check_sticky_task(rq, cpu);
+		if (prev != next) {
+			resched_best_idle(prev);
 			/*
-			* We now know prev is the only thing that is
-			* awaiting CPU so we can bypass rechecking for
-			* the earliest deadline task and just run it
-			* again.
-			*/
-			set_rq_task(rq, prev);
-			goto unlock_out;
+			 * Don't stick tasks when a real time task is going
+			 * to run as they may literally get stuck.
+			 */
+			if (!rt_task(next))
+				stick_task(rq, prev);
+			goto do_switch;
 		}
 	}
 
-	if (likely(prev != next)) {
+	/*
+	 * We now know prev is the only thing that is
+	 * awaiting CPU so we can bypass rechecking for
+	 * the earliest deadline task and just run it
+	 * again.
+	 */
+	set_rq_task(rq, prev);
+
+	check_smt_siblings(cpu);
+	_grq_unlock();
+	raw_spin_unlock_irq(&rq->lock);
+	return;
+
 do_switch:
-		if (likely(next->prio != PRIO_LIMIT))
-			clear_cpuidle_map(cpu);
-		else
-			set_cpuidle_map(cpu);
+	if (likely(next->prio != PRIO_LIMIT))
+		clear_cpuidle_map(cpu);
+	else
+		set_cpuidle_map(cpu);
 
-		resched_best_idle(prev);
+	set_rq_task(rq, next);
 
-		set_rq_task(rq, next);
-
-		if (next != idle)
-			check_smt_siblings(cpu);
-		else
-			wake_smt_siblings(cpu);
-
-		grq.nr_switches++;
-		/* Once next->on_cpu is set, vrq_lock...() can be locked on
-		 * task's runqueue, so set it before release grq.lock,
-		 */
-		next->on_cpu = true;
-		rq->curr = next;
-		++*switch_count;
-
-		context_switch(rq, prev, next); /* unlocks the grq */
-		/*
-		 * The context switch have flipped the stack from under us
-		 * and restored the local variables which were saved when
-		 * this task called schedule() in the past. prev == current
-		 * is still correct, but it can be moved to another cpu/rq.
-		 */
-		/* stack variables need to be evaluated again
-		cpu = smp_processor_id();
-		rq = cpu_rq(cpu);
-		idle = rq->idle;
-		*/
-	} else {
-unlock_out:
+	if (next != idle)
 		check_smt_siblings(cpu);
-		_grq_unlock();
-		raw_spin_unlock_irq(&rq->lock);
-	}
+	else
+		wake_smt_siblings(cpu);
+
+	grq.nr_switches++;
+	/* Once next->on_cpu is set, vrq_lock...() can be locked on
+	 * task's runqueue, so set it before release grq.lock,
+	 */
+	next->on_cpu = true;
+	rq->curr = next;
+	++*switch_count;
+
+	context_switch(rq, prev, next); /* unlocks the grq */
+	/*
+	 * The context switch have flipped the stack from under us
+	 * and restored the local variables which were saved when
+	 * this task called schedule() in the past. prev == current
+	 * is still correct, but it can be moved to another cpu/rq.
+	 */
+	/* stack variables need to be evaluated again
+	cpu = smp_processor_id();
+	rq = cpu_rq(cpu);
+	idle = rq->idle;
+	*/
 }
 /*
  * schedule() is the main scheduler function.
