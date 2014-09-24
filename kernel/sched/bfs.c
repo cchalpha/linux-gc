@@ -3306,7 +3306,10 @@ task_struct *earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *
 			if (task_sticky(p) && task_rq(p) != rq) {
 				if (scaling_rq(rq))
 					continue;
-				dl = p->deadline << locality_diff(p, rq);
+				if ( rq->cpu_locality[task_cpu(p)] < 3 )
+					dl = p->deadline;
+				else
+					dl = p->deadline << locality_diff(p, rq);
 			} else
 				dl = p->deadline;
 
@@ -7034,12 +7037,6 @@ static const cpumask_t *thread_cpumask(int cpu)
 	return topology_thread_cpumask(cpu);
 }
 #endif
-#ifdef CONFIG_SCHED_MC
-static const cpumask_t *core_cpumask(int cpu)
-{
-	return topology_core_cpumask(cpu);
-}
-#endif
 
 enum sched_domain_level {
 	SD_LV_NONE = 0,
@@ -7110,12 +7107,8 @@ void __init sched_init_smp(void)
 			}
 		}
 
-		/*
-		 * Each runqueue has its own function in case it doesn't have
-		 * siblings of its own allowing mixed topologies.
-		 */
 #ifdef CONFIG_SCHED_MC
-		for_each_cpu_mask(other_cpu, *core_cpumask(cpu)) {
+		for_each_cpu_mask(other_cpu, *cpu_coregroup_mask(cpu)) {
 			if (rq->cpu_locality[other_cpu] > 2)
 				rq->cpu_locality[other_cpu] = 2;
 		}
