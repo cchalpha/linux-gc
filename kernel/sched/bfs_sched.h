@@ -39,7 +39,6 @@ struct rq {
 	struct root_domain *rd;
 	struct sched_domain *sd;
 	int *cpu_locality; /* CPU relative cache distance */
-	u64 last_niffy; /* Last time this RQ updated grq.niffies */
 #endif /* CONFIG_SMP */
 	u64 niffy; /* Nanosecond jiffies of this RQ */
 	unsigned long last_jiffy; /* Last jiffy when updated niffy */
