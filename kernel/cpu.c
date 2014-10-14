@@ -280,7 +280,11 @@ static inline void check_for_tasks(int dead_cpu)
 
 	read_lock_irq(&tasklist_lock);
 	do_each_thread(g, p) {
+#ifdef CONFIG_SCHED_BFS
+		if (!p->on_cpu)
+#else
 		if (!p->on_rq)
+#endif
 			continue;
 		/*
 		 * We do the check with unlocked task_rq(p)->lock.
