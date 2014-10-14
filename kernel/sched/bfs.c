@@ -371,6 +371,8 @@ static void update_rq_clock_task(struct rq *rq, s64 delta);
 static inline void update_rq_clock(struct rq *rq)
 {
 	s64 delta = sched_clock_cpu(cpu_of(rq)) - rq->clock;
+	if (delta < 0)
+		return;
 
 	rq->clock += delta;
 	update_rq_clock_task(rq, delta);
@@ -726,7 +728,7 @@ static bool suitable_idle_cpus(struct task_struct *p)
 #define CPUIDLE_THROTTLED	(32)
 #define CPUIDLE_DIFF_NODE	(64)
 
-static void resched_task(struct task_struct *p);
+static void resched_curr(struct rq *rq);
 static inline bool scaling_rq(struct rq *rq);
 
 /*
@@ -796,7 +798,7 @@ out:
 static void resched_best_mask(int best_cpu, struct rq *rq, cpumask_t *tmpmask)
 {
 	best_cpu = best_mask_cpu(best_cpu, rq, tmpmask);
-	resched_task(cpu_rq(best_cpu)->curr);
+	resched_curr(cpu_rq(best_cpu));
 }
 
 bool cpus_share_cache(int this_cpu, int that_cpu)
@@ -885,7 +887,7 @@ static bool resched_best_idle(struct task_struct *p)
 	if (!smt_should_schedule(p, best_cpu))
 		return false;
 #endif
-	resched_task(cpu_rq(best_cpu)->curr);
+	resched_curr(cpu_rq(best_cpu));
 	return true;
 }
 
@@ -1187,24 +1189,25 @@ static inline void __set_tsk_resched(struct task_struct *p)
 }
 
 /*
- * resched_task - mark a task 'to be rescheduled now'.
+ * resched_curr - mark rq's current task 'to be rescheduled now'.
  *
  * On UP this means the setting of the need_resched flag, on SMP it
  * might also involve a cross-CPU call to trigger the scheduler on
  * the target CPU.
  */
-void resched_task(struct task_struct *p)
+void resched_curr(struct rq *rq)
 {
+	struct task_struct *curr = rq->curr;
 	int cpu;
 
 	lockdep_assert_held(&grq.lock);
 
-	if (test_tsk_need_resched(p))
+	if (test_tsk_need_resched(curr))
 		return;
 
-	set_tsk_need_resched(p);
+	set_tsk_need_resched(curr);
 
-	cpu = task_cpu(p);
+	cpu = cpu_of(rq);
 	if (cpu == smp_processor_id()) {
 		set_preempt_need_resched();
 		return;
@@ -1464,7 +1467,7 @@ static void try_preempt(struct task_struct *p, struct rq *this_rq)
 			return;
 #endif
 		if (can_preempt(p, highest_prio, highest_prio_rq->rq_deadline))
-			resched_task(highest_prio_rq->curr);
+			resched_curr(highest_prio_rq);
 	}
 }
 #else /* CONFIG_SMP */
@@ -1478,7 +1481,7 @@ static void try_preempt(struct task_struct *p, struct rq *this_rq)
 	if (p->policy == SCHED_IDLEPRIO)
 		return;
 	if (can_preempt(p, uprq->rq_prio, uprq->rq_deadline))
-		resched_task(uprq->curr);
+		resched_curr(uprq);
 }
 #endif /* CONFIG_SMP */
 
@@ -2073,16 +2076,18 @@ unsigned long nr_iowait_cpu(int cpu)
 	return atomic_read(&this->nr_iowait);
 }
 
+void get_iowait_load(unsigned long *nr_waiters, unsigned long *load)
+{
+	struct rq *this = this_rq();
+	*nr_waiters = atomic_read(&this->nr_iowait);
+	/* Beyond a task running on this CPU, load is equal everywhere on BFS */
+	*load = this->rq_running +
+		((queued_notrunning() + nr_uninterruptible()) / grq.noc);
+}
+
 unsigned long nr_active(void)
 {
 	return nr_running() + nr_uninterruptible();
-}
-
-/* Beyond a task running on this CPU, load is equal everywhere on BFS */
-unsigned long this_cpu_load(void)
-{
-	return this_rq()->rq_running +
-		((queued_notrunning() + nr_uninterruptible()) / grq.noc);
 }
 
 /* Variables and functions for calc_load */
@@ -3712,7 +3717,7 @@ void rt_mutex_setprio(struct task_struct *p, int prio)
 		dequeue_task(p);
 	p->prio = prio;
 	if (task_running(p) && prio > oldprio)
-		resched_task(p);
+		resched_curr(rq);
 	if (queued) {
 		enqueue_task(p);
 		try_preempt(p, rq);
@@ -3773,7 +3778,7 @@ void set_user_nice(struct task_struct *p, long nice)
 	} else if (task_running(p)) {
 		reset_rq_task(rq, p);
 		if (old_static < new_static)
-			resched_task(p);
+			resched_curr(rq);
 	}
 out_unlock:
 	task_grq_unlock(&flags);
@@ -3907,7 +3912,7 @@ __setscheduler(struct task_struct *p, struct rq *rq, int policy, int prio)
 		reset_rq_task(rq, p);
 		/* Resched only if we might now be preempted */
 		if (p->prio > oldprio || p->rt_priority > oldrtprio)
-			resched_task(p);
+			resched_curr(rq);
 	}
 }
 
@@ -4785,7 +4790,7 @@ int __sched yield_to(struct task_struct *p, bool preempt)
 	if (p->time_slice > timeslice())
 		p->time_slice = timeslice();
 	if (preempt && rq != rq)
-		resched_task(p_rq->curr);
+		resched_curr(p_rq);
 out_unlock:
 	grq_unlock_irqrestore(&flags);
 
@@ -5058,7 +5063,7 @@ void resched_cpu(int cpu)
 	unsigned long flags;
 
 	grq_lock_irqsave(&flags);
-	resched_task(cpu_curr(cpu));
+	resched_curr(cpu_rq(cpu));
 	grq_unlock_irqrestore(&flags);
 }
 
@@ -5207,7 +5212,7 @@ int set_cpus_allowed_ptr(struct task_struct *p, const struct cpumask *new_mask)
 			set_tsk_need_resched(p);
 			running_wrong = true;
 		} else
-			resched_task(p);
+			resched_curr(rq);
 	} else
 		set_task_cpu(p, cpumask_any_and(cpu_active_mask, new_mask));
 
@@ -6468,6 +6473,19 @@ struct sched_domain *build_sched_domain(struct sched_domain_topology_level *tl,
 		sched_domain_level_max = max(sched_domain_level_max, sd->level);
 		child->parent = sd;
 		sd->child = child;
+
+		if (!cpumask_subset(sched_domain_span(child),
+				    sched_domain_span(sd))) {
+			pr_err("BUG: arch topology borken\n");
+#ifdef CONFIG_SCHED_DEBUG
+			pr_err("     the %s domain not a subset of the %s domain\n",
+					child->name, sd->name);
+#endif
+			/* Fixup, ensure @sd has at least @child cpus. */
+			cpumask_or(sched_domain_span(sd),
+				   sched_domain_span(sd),
+				   sched_domain_span(child));
+		}
 	}
 	set_domain_attribute(sd, attr);
 
