@@ -1483,9 +1483,7 @@ can_preempt(struct task_struct *p, int prio, u64 deadline)
  */
 static inline bool needs_other_cpu(struct task_struct *p, int cpu)
 {
-	if (unlikely(!cpumask_test_cpu(cpu, &p->cpus_allowed)))
-		return true;
-	return false;
+	return !cpumask_test_cpu(cpu, &p->cpus_allowed);
 }
 
 /*
