@@ -14,6 +14,7 @@ struct rq {
 
 	/* Stored data about rq->curr to work outside grq lock */
 	u64 rq_deadline;
+	u64 rq_priodl;
 	unsigned int rq_policy;
 	int rq_time_slice;
 	u64 rq_last_ran;
