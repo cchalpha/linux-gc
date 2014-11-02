@@ -588,6 +588,11 @@ static inline bool deadline_after(u64 deadline, u64 time)
 	return (deadline > time);
 }
 
+static inline void update_task_priodl(struct task_struct *p)
+{
+	p->priodl = (((u64) (p->prio))<<56) | ((p->deadline)>>8);
+}
+
 /*
  * A task that is queued but not running will be on the grq run list.
  * A task that is not running or queued will not be on the grq run list.
@@ -641,6 +646,7 @@ static void enqueue_task(struct task_struct *p, struct rq *rq)
 			p->prio = p->normal_prio;
 		else
 			p->prio = NORMAL_PRIO;
+		update_task_priodl(p);
 	}
 	__set_bit(p->prio, grq.prio_bitmap);
 	list_add_tail(&p->run_list, grq.queue + p->prio);
@@ -1386,17 +1392,9 @@ EXPORT_SYMBOL_GPL(kick_process);
  * prio PRIO_LIMIT so it is always preempted.
  */
 static inline bool
-can_preempt(struct task_struct *p, int prio, u64 deadline)
+can_preempt(struct task_struct *p, u64 priodl)
 {
-	/* Better static priority RT task or better policy preemption */
-	if (p->prio < prio)
-		return true;
-	if (p->prio > prio)
-		return false;
-	/* SCHED_NORMAL, BATCH and ISO will preempt based on deadline */
-	if (!deadline_before(p->deadline, deadline))
-		return false;
-	return true;
+	return (p->priodl < priodl);
 }
 
 #ifdef CONFIG_SMP
@@ -1414,9 +1412,9 @@ static inline bool needs_other_cpu(struct task_struct *p, int cpu)
  */
 static void try_preempt(struct task_struct *p, struct rq *this_rq)
 {
-	struct rq *highest_prio_rq = NULL;
-	int cpu, highest_prio;
-	u64 latest_deadline;
+	struct rq *rq, *highest_prio_rq = NULL;
+	int cpu;
+	u64 highest_priodl;
 	cpumask_t tmp;
 
 	/*
@@ -1436,34 +1434,29 @@ static void try_preempt(struct task_struct *p, struct rq *this_rq)
 	if (unlikely(!cpumask_and(&tmp, cpu_online_mask, &p->cpus_allowed)))
 		return;
 
-	highest_prio = latest_deadline = 0;
+	cpu = cpumask_first(&tmp);
+	rq = cpu_rq(cpu);
+	highest_prio_rq = rq;
+	highest_priodl = rq->rq_priodl;
 
-	for_each_cpu_mask(cpu, tmp) {
-		struct rq *rq;
-		int rq_prio;
+	for(;cpu = cpumask_next(cpu, &tmp), cpu < nr_cpu_ids;) {
+		u64 rq_priodl;
 
 		rq = cpu_rq(cpu);
-		rq_prio = rq->rq_prio;
-		if (rq_prio < highest_prio)
-			continue;
-
-		if (rq_prio > highest_prio ||
-		    deadline_after(rq->rq_deadline, latest_deadline)) {
-			latest_deadline = rq->rq_deadline;
-			highest_prio = rq_prio;
+		rq_priodl = rq->rq_priodl;
+		if (rq_priodl > highest_priodl ) {
+			highest_priodl = rq_priodl;
 			highest_prio_rq = rq;
 		}
 	}
 
-	if (likely(highest_prio_rq)) {
 #ifdef CONFIG_SMT_NICE
-		cpu = cpu_of(highest_prio_rq);
-		if (!smt_should_schedule(p, cpu))
-			return;
+	cpu = cpu_of(highest_prio_rq);
+	if (!smt_should_schedule(p, cpu))
+		return;
 #endif
-		if (can_preempt(p, highest_prio, highest_prio_rq->rq_deadline))
-			resched_curr(highest_prio_rq);
-	}
+	if (can_preempt(p, highest_priodl))
+		resched_curr(highest_prio_rq);
 }
 #else /* CONFIG_SMP */
 static inline bool needs_other_cpu(struct task_struct *p, int cpu)
@@ -1475,7 +1468,7 @@ static void try_preempt(struct task_struct *p, struct rq *this_rq)
 {
 	if (p->policy == SCHED_IDLEPRIO)
 		return;
-	if (can_preempt(p, uprq->rq_prio, uprq->rq_deadline))
+	if (can_preempt(p, uprq->rq_priodl))
 		resched_curr(uprq);
 }
 #endif /* CONFIG_SMP */
@@ -1768,6 +1761,8 @@ void wake_up_new_task(struct task_struct *p)
 	 * Make sure we do not leak PI boosting priority to the child.
 	 */
 	p->prio = rq->curr->normal_prio;
+
+	update_task_priodl(p);
 
 	activate_task(p, rq);
 	trace_sched_wakeup_new(p, 1);
@@ -3093,6 +3088,7 @@ static void time_slice_expired(struct task_struct *p)
 {
 	p->time_slice = timeslice();
 	p->deadline = grq.niffies + task_deadline_diff(p);
+	update_task_priodl(p);
 #ifdef CONFIG_SMT_NICE
 	if (!p->mm)
 		p->smt_bias = 0;
@@ -3324,6 +3320,7 @@ static inline void set_rq_task(struct rq *rq, struct task_struct *p)
 	rq->rq_last_ran = p->last_ran = rq->clock_task;
 	rq->rq_policy = p->policy;
 	rq->rq_prio = p->prio;
+	rq->rq_priodl = p->priodl;
 #ifdef CONFIG_SMT_NICE
 	rq->rq_smt_bias = p->smt_bias;
 #endif
@@ -3337,6 +3334,8 @@ static void reset_rq_task(struct rq *rq, struct task_struct *p)
 {
 	rq->rq_policy = p->policy;
 	rq->rq_prio = p->prio;
+	rq->rq_deadline = p->deadline;
+	rq->rq_priodl = p->priodl;
 #ifdef CONFIG_SMT_NICE
 	rq->rq_smt_bias = p->smt_bias;
 #endif
@@ -3512,7 +3511,6 @@ need_resched:
 	if (idle != prev) {
 		/* Update all the information stored on struct rq */
 		prev->time_slice = rq->rq_time_slice;
-		prev->deadline = rq->rq_deadline;
 		check_deadline(prev);
 		prev->last_ran = rq->clock_task;
 
@@ -3742,6 +3740,7 @@ void rt_mutex_setprio(struct task_struct *p, int prio)
 	if (queued)
 		dequeue_task(p);
 	p->prio = prio;
+	update_task_priodl(p);
 	if (queued) {
 		enqueue_task(p, rq);
 		try_preempt(p, rq);
@@ -3796,6 +3795,7 @@ void set_user_nice(struct task_struct *p, long nice)
 	old_static = p->static_prio;
 	p->static_prio = new_static;
 	p->prio = effective_prio(p);
+	update_task_priodl(p);
 
 	if (queued) {
 		enqueue_task(p, rq);
@@ -3967,6 +3967,7 @@ static void __setscheduler(struct rq *rq, struct task_struct *p,
 	 * task. It is safe to use the normal prio.
 	 */
 	p->prio = normal_prio(p);
+	update_task_priodl(p);
 
 	if (task_running(p)) {
 		reset_rq_task(rq, p);
@@ -4874,8 +4875,10 @@ int __sched yield_to(struct task_struct *p, bool preempt)
 
 	p_rq = task_rq(p);
 	yielded = 1;
-	if (p->deadline > rq->rq_deadline)
+	if (p->deadline > rq->rq_deadline) {
 		p->deadline = rq->rq_deadline;
+		update_task_priodl(p);
+	}
 	p->time_slice += rq->rq_time_slice;
 	rq->rq_time_slice = 0;
 	if (p->time_slice > timeslice())
@@ -5127,6 +5130,8 @@ void init_idle(struct task_struct *idle, int cpu)
 	idle->state = TASK_RUNNING;
 	/* Setting prio to illegal value shouldn't matter when never queued */
 	idle->prio = PRIO_LIMIT;
+	idle->deadline = 0ULL;
+	update_task_priodl(idle);
 #ifdef CONFIG_SMT_NICE
 	idle->smt_bias = 0;
 #endif
