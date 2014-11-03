@@ -246,6 +246,14 @@ static struct global_rq grq;
 DEFINE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
 static DEFINE_MUTEX(sched_hotcpu_mutex);
 
+#ifndef CONFIG_SMP
+struct rq *uprq;
+#define cpu_rq(cpu)     (uprq)
+#define this_rq()       (uprq)
+#define task_rq(p)      (uprq)
+#define cpu_curr(cpu)   ((uprq)->curr)
+#endif
+
 #ifdef CONFIG_SMP
 struct rq *cpu_rq(int cpu)
 {
@@ -663,6 +671,8 @@ static inline int task_timeslice(struct task_struct *p)
 	return (rr_interval * task_prio_ratio(p) / 128);
 }
 
+static void resched_curr(struct rq *rq);
+
 #ifdef CONFIG_SMP
 /*
  * qnr is the "queued but not running" count which is the total number of
@@ -720,7 +730,6 @@ static bool suitable_idle_cpus(struct task_struct *p)
 #define CPUIDLE_THROTTLED	(32)
 #define CPUIDLE_DIFF_NODE	(64)
 
-static void resched_curr(struct rq *rq);
 static inline bool scaling_rq(struct rq *rq);
 
 /*
