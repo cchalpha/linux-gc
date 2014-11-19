@@ -12,7 +12,11 @@
 
 #include <trace/events/power.h>
 
+#ifdef CONFIG_SCHED_BFS
+#include "bfs_sched.h"
+#else
 #include "sched.h"
+#endif
 
 static int __read_mostly cpu_idle_force_poll;
 
