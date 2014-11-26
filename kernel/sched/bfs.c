@@ -4155,17 +4155,21 @@ recheck:
 	/*
 	 * make sure no PI-waiters arrive (or leave) while we are
 	 * changing the priority of the task:
-	 *
+	 */
+	raw_spin_lock_irqsave(&p->pi_lock, flags);
+
+	/*
 	 * To be able to change p->policy safely, the grunqueue lock must be
 	 * held.
 	 */
-	rq = task_grq_lock(p, &flags);
+	rq = __task_grq_lock(p);
 
 	/*
 	 * Changing the policy of the stop threads its a very bad idea
 	 */
 	if (p == rq->stop) {
-		task_grq_unlock(&flags);
+		__task_grq_unlock();
+		raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 		return -EINVAL;
 	}
 
@@ -4174,15 +4178,16 @@ recheck:
 	 */
 	if (unlikely(policy == p->policy && (!is_rt_policy(policy) ||
 			attr->sched_priority == p->rt_priority))) {
-
-		task_grq_unlock(&flags);
+		__task_grq_unlock();
+		raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 		return 0;
 	}
 
 	/* recheck policy now with rq lock held */
 	if (unlikely(oldpolicy != -1 && oldpolicy != p->policy)) {
 		policy = oldpolicy = -1;
-		task_grq_unlock(&flags);
+		__task_grq_unlock();
+		raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 		goto recheck;
 	}
 
@@ -4200,7 +4205,8 @@ recheck:
 	 */
 	if (rt_mutex_check_prio(p, newprio)) {
 		__setscheduler_params(p, attr);
-		task_grq_unlock(&flags);
+		__task_grq_unlock();
+		raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 		return 0;
 	}
 
@@ -4214,7 +4220,8 @@ recheck:
 	}
 
 	check_task_changed(rq, p, oldprio);
-	task_grq_unlock(&flags);
+	__task_grq_unlock();
+	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 
 	rt_mutex_adjust_pi(p);
 out:
