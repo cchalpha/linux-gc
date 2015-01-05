@@ -3516,13 +3516,13 @@ static inline void activate_schedule(int cpu, struct rq *rq, struct task_struct 
 	prev->time_slice = rq->rq_time_slice;
 	prev->last_ran = rq->clock_task;
 
-	_grq_lock();
 	check_deadline(prev, rq);
 
 	bfs_stat_activate++;
 	/* Task changed affinity off this CPU */
 	if (unlikely(needs_other_cpu(prev, cpu))) {
 		bfs_stat_activate_needother++;
+		_grq_lock();
 		enqueue_task(prev, rq);
 		inc_qnr();
 		next = earliest_deadline_task(rq, cpu, idle);
@@ -3532,6 +3532,7 @@ static inline void activate_schedule(int cpu, struct rq *rq, struct task_struct 
 
 	if (queued_notrunning()) {
 		bfs_stat_activate_qnr++;
+		_grq_lock();
 		enqueue_task(prev, rq);
 		inc_qnr();
 		next = earliest_deadline_task(rq, cpu, idle);
@@ -3548,6 +3549,11 @@ static inline void activate_schedule(int cpu, struct rq *rq, struct task_struct 
 		}
 
 		bfs_stat_activate_qnr_eq++;
+		set_rq_task(rq, prev);
+		check_smt_siblings(cpu);
+		_grq_unlock();
+		raw_spin_unlock_irq(&rq->lock);
+		return;
 	}
 
 	/*
@@ -3557,7 +3563,6 @@ static inline void activate_schedule(int cpu, struct rq *rq, struct task_struct 
 	 */
 	set_rq_task(rq, prev);
 	check_smt_siblings(cpu);
-	_grq_unlock();
 	raw_spin_unlock_irq(&rq->lock);
 	return;
 
