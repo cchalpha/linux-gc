@@ -1118,7 +1118,6 @@ static void activate_task(struct task_struct *p, struct rq *rq)
 	if (task_contributes_to_load(p))
 		grq.nr_uninterruptible--;
 	enqueue_task(p, rq);
-	rq->soft_affined++;
 	p->on_rq = 1;
 	grq.nr_running++;
 	inc_qnr();
@@ -1134,7 +1133,6 @@ static inline void deactivate_task(struct task_struct *p, struct rq *rq)
 {
 	if (task_contributes_to_load(p))
 		grq.nr_uninterruptible++;
-	rq->soft_affined--;
 	p->on_rq = 0;
 	grq.nr_running--;
 	clear_sticky(p);
@@ -1160,10 +1158,7 @@ void set_task_cpu(struct task_struct *p, unsigned int cpu)
 	 * per-task data have been completed by this moment.
 	 */
 	smp_wmb();
-	if (p->on_rq) {
-		task_rq(p)->soft_affined--;
-		cpu_rq(cpu)->soft_affined++;
-	}
+
 	task_thread_info(p)->cpu = cpu;
 }
 
@@ -2102,10 +2097,8 @@ static unsigned long nr_uninterruptible(void)
  */
 bool single_task_running(void)
 {
-	if (cpu_rq(smp_processor_id())->soft_affined == 1)
-		return true;
-	else
-		return false;
+	return cpu_rq(smp_processor_id())->rq_running &&
+		(0 == queued_notrunning());
 }
 EXPORT_SYMBOL(single_task_running);
 
@@ -2148,7 +2141,9 @@ void get_iowait_load(unsigned long *nr_waiters, unsigned long *load)
 	struct rq *rq = this_rq();
 
 	*nr_waiters = atomic_read(&rq->nr_iowait);
-	*load = rq->soft_affined;
+	/* Beyond a task running on this CPU, load is equal everywhere on BFS */
+	*load = rq->rq_running +
+		((queued_notrunning() + nr_uninterruptible()) / grq.noc);
 }
 
 /* Variables and functions for calc_load */
