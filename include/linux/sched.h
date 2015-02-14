@@ -546,6 +546,8 @@ struct task_struct {
 	int				sl_level;
 	/* skip list node */
 	struct skiplist_node		sl_node;
+	/* 8bits prio and 56bits deadline for quick processing */
+	u64				priodl;
 	struct list_head		run_list;
 	u64				last_ran;
 	/* sched_clock time spent running */

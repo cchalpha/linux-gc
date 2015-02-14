@@ -182,7 +182,11 @@ struct global_rq {
 #ifdef CONFIG_SMP
 	cpumask_t cpu_idle_map;
 	bool idle_cpus;
+#ifndef CONFIG_64BIT
+	raw_spinlock_t priodl_lock;
 #endif
+#endif
+	u64 rq_priodls[NR_CPUS];
 	int noc; /* num_online_cpus stored and updated when it changes */
 	u64 niffies; /* Nanosecond jiffies */
 	unsigned long last_jiffy; /* Last jiffy we updated niffies */
@@ -499,6 +503,34 @@ static inline bool deadline_after(u64 deadline, u64 time)
 	return (deadline > time);
 }
 
+static inline void update_task_priodl(struct task_struct *p)
+{
+	if (p->prio <= ISO_PRIO)
+		p->priodl = (((u64) (p->prio))<<56);
+	else
+		p->priodl = (((u64) (p->prio))<<56) | ((p->deadline)>>8);
+}
+
+#if defined(CONFIG_SMP) && !defined(CONFIG_64BIT)
+static inline void grq_priodl_lock(void)
+{
+	raw_spin_lock(&grq.priodl_lock);
+}
+
+static inline void grq_priodl_unlock(void)
+{
+	raw_spin_unlock(&grq.priodl_lock);
+}
+#else
+static inline void grq_priodl_lock(void)
+{
+}
+
+static inline void grq_priodl_unlock(void)
+{
+}
+#endif
+
 /*
  * A task that is not running or queued will have an empty skip list node.
  * A task that is queued but not running will be on the grq skip list.
@@ -586,8 +618,8 @@ static inline int bfs_skiplist_random_level(void)
 static inline bool
 bfs_skiplist_task_search(struct skiplist_node *it, struct skiplist_node *node)
 {
-	return (skiplist_entry(it, struct task_struct, sl_node)->sl_node.key <=
-		skiplist_entry(node, struct task_struct, sl_node)->sl_node.key);
+	return (skiplist_entry(it, struct task_struct, sl_node)->priodl <=
+		skiplist_entry(node, struct task_struct, sl_node)->priodl);
 }
 
 /*
@@ -600,8 +632,6 @@ DEFINE_SKIPLIST_INSERT_FUNC(bfs_skiplist_insert, bfs_skiplist_task_search);
  */
 static void enqueue_task(struct task_struct *p, struct rq *rq)
 {
-	u64 sl_id;
-
 	if (!rt_task(p)) {
 		/* Check it hasn't gotten rt from PI */
 		if ((idleprio_task(p) && idleprio_suitable(p)) ||
@@ -609,28 +639,9 @@ static void enqueue_task(struct task_struct *p, struct rq *rq)
 			p->prio = p->normal_prio;
 		else
 			p->prio = NORMAL_PRIO;
-	}
-	/*
-	 * The sl_id key passed to the skiplist generates a sorted list.
-	 * Realtime and sched iso tasks run FIFO so they only need be sorted
-	 * according to priority. The skiplist will put tasks of the same
-	 * key inserted later in FIFO order. Tasks of sched normal, batch
-	 * and idleprio are sorted according to their deadlines. Idleprio
-	 * tasks are offset by an impossibly large deadline value ensuring
-	 * they get sorted into last positions, but still according to their
-	 * own deadlines. This creates a "landscape" of skiplists running
-	 * from priority 0 realtime in first place to the lowest priority
-	 * idleprio tasks last. Skiplist insertion is an O(log n) process.
-	 */
-	if (p->prio <= ISO_PRIO)
-		sl_id = p->prio;
-	else {
-		sl_id = p->deadline;
-		if (p->prio == IDLE_PRIO)
-			sl_id |= 0xF000000000000000;
+		update_task_priodl(p);
 	}
 
-	p->sl_node.key = sl_id;
 	p->sl_node.level = p->sl_level;
 	bfs_skiplist_insert(&grq.sl_header, &p->sl_node);
 
@@ -1100,6 +1111,7 @@ static void activate_task(struct task_struct *p, struct rq *rq)
 	}
 
 	p->prio = effective_prio(p);
+	update_task_priodl(p);
 	if (task_contributes_to_load(p))
 		grq.nr_uninterruptible--;
 	enqueue_task(p, rq);
@@ -1463,17 +1475,9 @@ EXPORT_SYMBOL_GPL(kick_process);
  * prio PRIO_LIMIT so it is always preempted.
  */
 static inline bool
-can_preempt(struct task_struct *p, int prio, u64 deadline)
+can_preempt(struct task_struct *p, u64 priodl)
 {
-	/* Better static priority RT task or better policy preemption */
-	if (p->prio < prio)
-		return true;
-	if (p->prio > prio)
-		return false;
-	/* SCHED_NORMAL, BATCH and ISO will preempt based on deadline */
-	if (!deadline_before(p->deadline, deadline))
-		return false;
-	return true;
+	return (p->priodl < priodl);
 }
 
 #ifdef CONFIG_SMP
@@ -1491,9 +1495,8 @@ static inline bool needs_other_cpu(struct task_struct *p, int cpu)
  */
 static void try_preempt(struct task_struct *p, struct rq *this_rq)
 {
-	struct rq *highest_prio_rq = NULL;
-	int cpu, highest_prio;
-	u64 latest_deadline;
+	int cpu, target_cpu;
+	u64 highest_priodl;
 	cpumask_t tmp;
 
 	/*
@@ -1513,53 +1516,36 @@ static void try_preempt(struct task_struct *p, struct rq *this_rq)
 	if (unlikely(!cpumask_and(&tmp, cpu_online_mask, &p->cpus_allowed)))
 		return;
 
-	/* See if this task can preempt the task on the current CPU first. */
-	cpu = cpu_of(this_rq);
-	if (cpumask_test_cpu(cpu, &tmp)) {
-		if (smt_should_schedule(p, cpu) && can_preempt(p, this_rq->rq_prio, this_rq->rq_deadline)) {
-			resched_curr(this_rq);
-			return;
-		}
-		cpumask_clear_cpu(cpu, &tmp);
-	}
+	target_cpu = cpu = cpumask_first(&tmp);
 
-	highest_prio = latest_deadline = 0;
+	grq_priodl_lock();
+	highest_priodl = grq.rq_priodls[cpu];
 
-	/* Now look for the CPU with the latest deadline */
-	for_each_cpu(cpu, &tmp) {
-		struct rq *rq;
-		int rq_prio;
+	for(;cpu = cpumask_next(cpu, &tmp), cpu < nr_cpu_ids;) {
+		u64 rq_priodl;
 
-		rq = cpu_rq(cpu);
-		rq_prio = rq->rq_prio;
-		if (rq_prio < highest_prio)
-			continue;
-
-		if (rq_prio > highest_prio ||
-		    deadline_after(rq->rq_deadline, latest_deadline)) {
-			latest_deadline = rq->rq_deadline;
-			highest_prio = rq_prio;
-			highest_prio_rq = rq;
+		rq_priodl = grq.rq_priodls[cpu];
+		if (rq_priodl > highest_priodl ) {
+			target_cpu = cpu;
+			highest_priodl = rq_priodl;
 		}
 	}
+	grq_priodl_unlock();
 
-	if (likely(highest_prio_rq)) {
-		cpu = cpu_of(highest_prio_rq);
 #ifdef CONFIG_SMT_NICE
-		if (!smt_should_schedule(p, cpu))
-			return;
+	if (!smt_should_schedule(p, target_cpu))
+		return;
 #endif
-		if (can_preempt(p, highest_prio, latest_deadline)) {
-			/*
-			 * If we have decided this task should preempt this CPU,
-			 * set the task's CPU to match so there is no discrepancy
-			 * in earliest_deadline_task which biases away tasks with
-			 * a different CPU set. This means waking tasks are
-			 * treated differently to rescheduling tasks.
-			 */
-			set_task_cpu(p, cpu);
-			resched_curr(highest_prio_rq);
-		}
+	if (can_preempt(p, highest_priodl)) {
+		/*
+		 * If we have decided this task should preempt this CPU,
+		 * set the task's CPU to match so there is no discrepancy
+		 * in earliest_deadline_task which biases away tasks with
+		 * a different CPU set. This means waking tasks are
+		 * treated differently to rescheduling tasks.
+		 */
+		set_task_cpu(p, target_cpu);
+		resched_curr(cpu_rq(target_cpu));
 	}
 }
 #else /* CONFIG_SMP */
@@ -1572,7 +1558,7 @@ static void try_preempt(struct task_struct *p, struct rq *this_rq)
 {
 	if (p->policy == SCHED_IDLEPRIO)
 		return;
-	if (can_preempt(p, uprq->rq_prio, uprq->rq_deadline))
+	if (can_preempt(p, grq.rq_priodls[0]))
 		resched_curr(uprq);
 }
 #endif /* CONFIG_SMP */
@@ -1961,6 +1947,8 @@ void wake_up_new_task(struct task_struct *p)
 	 * Make sure we do not leak PI boosting priority to the child.
 	 */
 	p->prio = rq->curr->normal_prio;
+
+	update_task_priodl(p);
 
 	activate_task(p, rq);
 	trace_sched_wakeup_new(p);
@@ -3302,6 +3290,7 @@ static void time_slice_expired(struct task_struct *p)
 {
 	p->time_slice = timeslice();
 	p->deadline = grq.niffies + task_deadline_diff(p);
+	update_task_priodl(p);
 #ifdef CONFIG_SMT_NICE
 	if (!p->mm)
 		p->smt_bias = 0;
@@ -3513,6 +3502,11 @@ static inline void set_rq_task(struct rq *rq, struct task_struct *p)
 	rq->rq_last_ran = p->last_ran = rq->clock_task;
 	rq->rq_policy = p->policy;
 	rq->rq_prio = p->prio;
+
+	grq_priodl_lock();
+	grq.rq_priodls[cpu_of(rq)] = p->priodl;
+	grq_priodl_unlock();
+
 #ifdef CONFIG_SMT_NICE
 	rq->rq_mm = p->mm;
 	rq->rq_smt_bias = p->smt_bias;
@@ -3527,6 +3521,12 @@ static void reset_rq_task(struct rq *rq, struct task_struct *p)
 {
 	rq->rq_policy = p->policy;
 	rq->rq_prio = p->prio;
+	rq->rq_deadline = p->deadline;
+
+	grq_priodl_lock();
+	grq.rq_priodls[cpu_of(rq)] = p->priodl;
+	grq_priodl_unlock();
+
 #ifdef CONFIG_SMT_NICE
 	rq->rq_smt_bias = p->smt_bias;
 #endif
@@ -3692,7 +3692,6 @@ static void __sched notrace __schedule(bool preempt)
 	if (idle != prev) {
 		/* Update all the information stored on struct rq */
 		prev->time_slice = rq->rq_time_slice;
-		prev->deadline = rq->rq_deadline;
 		check_deadline(prev);
 		prev->last_ran = rq->clock_task;
 
@@ -4052,6 +4051,7 @@ void rt_mutex_setprio(struct task_struct *p, int prio)
 	trace_sched_pi_setprio(p, prio);
 	oldprio = p->prio;
 	p->prio = prio;
+	update_task_priodl(p);
 
 	check_task_changed(rq, p, oldprio);
 
@@ -4102,6 +4102,7 @@ void set_user_nice(struct task_struct *p, long nice)
 	old_static = p->static_prio;
 	p->static_prio = new_static;
 	p->prio = effective_prio(p);
+	update_task_priodl(p);
 
 	if (queued) {
 		enqueue_task(p, rq);
@@ -4373,6 +4374,7 @@ static void __setscheduler(struct rq *rq, struct task_struct *p,
 		p->prio = rt_mutex_get_effective_prio(p, p->normal_prio);
 	else
 		p->prio = p->normal_prio;
+	update_task_priodl(p);
 }
 
 /*
@@ -5274,8 +5276,10 @@ int __sched yield_to(struct task_struct *p, bool preempt)
 
 	p_rq = task_rq(p);
 	yielded = 1;
-	if (p->deadline > rq->rq_deadline)
+	if (p->deadline > rq->rq_deadline) {
 		p->deadline = rq->rq_deadline;
+		update_task_priodl(p);
+	}
 	p->time_slice += rq->rq_time_slice;
 	rq->rq_time_slice = 0;
 	if (p->time_slice > timeslice())
@@ -5519,6 +5523,8 @@ void init_idle(struct task_struct *idle, int cpu)
 	idle->state = TASK_RUNNING;
 	/* Setting prio to illegal value shouldn't matter when never queued */
 	idle->prio = PRIO_LIMIT;
+	idle->deadline = 0ULL;
+	update_task_priodl(idle);
 
 	kasan_unpoison_task_stack(idle);
 
@@ -7284,6 +7290,9 @@ void __init sched_init(void)
 	init_defrootdomain();
 	grq.qnr = grq.idle_cpus = 0;
 	cpumask_clear(&grq.cpu_idle_map);
+#ifndef CONFIG_64BIT
+	raw_spin_lock_init(&grq.priodl_lock);
+#endif
 #else
 	uprq = &per_cpu(runqueues, 0);
 #endif
