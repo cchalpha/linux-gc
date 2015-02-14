@@ -1484,6 +1484,7 @@ struct task_struct {
 	u64 deadline;
 	int sl_level;			/* skip list level */
 	struct skiplist_node sl_node;	/* Skip list node */
+	u64 priodl; /* 8bits prio and 56bits deadline for quick processing */
 	u64 last_ran;
 	u64 sched_time; /* sched_clock time spent running */
 #ifdef CONFIG_SMT_NICE
