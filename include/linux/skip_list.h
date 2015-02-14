@@ -50,16 +50,12 @@ aid of prev<->next pointer manipulation and no searching.
 
 #include <linux/kernel.h>
 
-typedef u64 keyType;
-
 #define NUM_SKIPLIST_LEVEL (8)
 
 struct skiplist_node {
 	int level;	/* Levels in this node */
 	struct skiplist_node *next[NUM_SKIPLIST_LEVEL];
 	struct skiplist_node *prev[NUM_SKIPLIST_LEVEL];
-	/* keep key only for compatible */
-	keyType key;
 };
 
 #define SKIPLIST_NODE_INIT(name) { 0,\
@@ -67,7 +63,7 @@ struct skiplist_node {
 				    &name, &name, &name, &name},\
 				   {&name, &name, &name, &name,\
 				    &name, &name, &name, &name},\
-				   ~0x00}
+				 }
 
 static inline void INIT_SKIPLIST_NODE(struct skiplist_node *node)
 {
