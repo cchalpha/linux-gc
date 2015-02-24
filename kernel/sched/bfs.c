@@ -138,6 +138,11 @@ void print_scheduler_version(void)
 }
 
 /*
+ * Debug stat
+ */
+int bfs_test[10];
+
+/*
  * This is the time all tasks within the same priority round robin.
  * Value is in ms and set to a minimum of 6ms. Scales with number of cpus.
  * Tunable via /proc interface.
@@ -3388,6 +3393,8 @@ static void check_smt_siblings(int __maybe_unused cpu) {}
 static void wake_smt_siblings(int __maybe_unused cpu) {}
 #endif
 
+static int bfs_stat_idle, bfs_stat_idle_qnr, bfs_stat_idle_qnr_eq;
+
 static inline void idle_schedule(int cpu, struct rq *rq, struct task_struct *prev,
 				unsigned long *switch_count)
 {
@@ -3396,9 +3403,11 @@ static inline void idle_schedule(int cpu, struct rq *rq, struct task_struct *pre
 	rq->dither = (rq->clock - rq->last_tick < HALF_JIFFY_NS);
 	_grq_lock();
 
+	bfs_stat_idle++;
 	if (likely(queued_notrunning())) {
 		struct task_struct *next;
 
+		bfs_stat_idle_qnr++;
 		next = earliest_deadline_task(rq, cpu, prev);
 
 		if (likely(prev != next)) {
@@ -3419,6 +3428,7 @@ static inline void idle_schedule(int cpu, struct rq *rq, struct task_struct *pre
 
 			return;
 		}
+		bfs_stat_idle_qnr_eq++;
 	} else {
 		/*
 		 * This CPU is now truly idle as opposed to when idle is
@@ -3432,6 +3442,8 @@ static inline void idle_schedule(int cpu, struct rq *rq, struct task_struct *pre
 	_grq_unlock();
 	raw_spin_unlock_irq(&rq->lock);
 }
+
+static int bfs_stat_deactivate, bfs_stat_deactivate_qnr, bfs_stat_deactivate_eq;
 
 static inline void deactivate_schedule(int cpu, struct rq *rq, struct task_struct *prev,
 				      unsigned long *switch_count)
@@ -3451,7 +3463,9 @@ static inline void deactivate_schedule(int cpu, struct rq *rq, struct task_struc
 
 	deactivate_task(prev, rq);
 
+	bfs_stat_deactivate++;
 	if (likely(queued_notrunning())) {
+		bfs_stat_deactivate_qnr++;
 		next = earliest_deadline_task(rq, cpu, idle);
 	} else {
 		/*
@@ -3485,6 +3499,9 @@ static inline void deactivate_schedule(int cpu, struct rq *rq, struct task_struc
 	rq = context_switch(rq, prev, next); /* unlocks the grq */
 }
 
+static int bfs_stat_activate, bfs_stat_activate_needother, bfs_stat_activate_qnr,
+	bfs_stat_activate_qnr_eq;
+
 static inline void activate_schedule(int cpu, struct rq *rq, struct task_struct *prev,
 				    unsigned long *switch_count)
 {
@@ -3502,8 +3519,10 @@ static inline void activate_schedule(int cpu, struct rq *rq, struct task_struct 
 	_grq_lock();
 	check_deadline(prev, rq);
 
+	bfs_stat_activate++;
 	/* Task changed affinity off this CPU */
 	if (unlikely(needs_other_cpu(prev, cpu))) {
+		bfs_stat_activate_needother++;
 		enqueue_task(prev, rq);
 		inc_qnr();
 		next = earliest_deadline_task(rq, cpu, idle);
@@ -3512,6 +3531,7 @@ static inline void activate_schedule(int cpu, struct rq *rq, struct task_struct 
 	}
 
 	if (queued_notrunning()) {
+		bfs_stat_activate_qnr++;
 		enqueue_task(prev, rq);
 		inc_qnr();
 		next = earliest_deadline_task(rq, cpu, idle);
@@ -3526,6 +3546,8 @@ static inline void activate_schedule(int cpu, struct rq *rq, struct task_struct 
 			rq->return_task = prev;
 			goto do_switch;
 		}
+
+		bfs_stat_activate_qnr_eq++;
 	}
 
 	/*
@@ -5184,6 +5206,19 @@ SYSCALL_DEFINE2(sched_rr_get_interval, pid_t, pid,
 	struct timespec t;
 	raw_spinlock_t *lock;
 
+	printk(KERN_INFO "bfs: bfs_test0 %d, bfs_test1 %d, bfs_test2 %d\n",
+		bfs_test[0], bfs_test[1], bfs_test[2]);
+	printk(KERN_INFO "bfs: bfs_test3 %d, bfs_test3 %d, bfs_test5 %d\n",
+		bfs_test[3], bfs_test[4], bfs_test[5]);
+	printk(KERN_INFO "bfs: bfs_test6 %d, bfs_test7 %d, bfs_test8 %d\n",
+		bfs_test[6], bfs_test[7], bfs_test[8]);
+	printk(KERN_INFO "bfs: idle %d, idle_qnr %d, idle_qnr_eq %d\n",
+		bfs_stat_idle, bfs_stat_idle_qnr, bfs_stat_idle_qnr_eq);
+	printk(KERN_INFO "bfs: deact %d, deact_qnr %d, deact_eq %d\n",
+		bfs_stat_deactivate, bfs_stat_deactivate_qnr, bfs_stat_deactivate_eq);
+	printk(KERN_INFO "bfs: act %d, act_needother %d, act_qnr %d, act_qnr_eq %d\n",
+		bfs_stat_activate, bfs_stat_activate_needother, bfs_stat_activate_qnr,
+		bfs_stat_activate_qnr_eq);
 	if (pid < 0)
 		return -EINVAL;
 
