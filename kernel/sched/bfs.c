@@ -5530,7 +5530,6 @@ void wake_up_nohz_cpu(int cpu)
  */
 int set_cpus_allowed_ptr(struct task_struct *p, const struct cpumask *new_mask)
 {
-	bool running_wrong = false;
 	bool queued = false;
 	unsigned long flags;
 	struct rq *rq, *prq = NULL;
@@ -5555,15 +5554,9 @@ int set_cpus_allowed_ptr(struct task_struct *p, const struct cpumask *new_mask)
 	if (cpumask_test_cpu(task_cpu(p), new_mask))
 		goto out;
 
-	if (task_running(p)) {
+	if (task_running(p))
 		/* Task is running on the wrong cpu now, reschedule it. */
-		if (rq == this_rq()) {
-			set_tsk_need_resched(p);
-			running_wrong = true;
-		} else
-			resched_curr(rq);
-	} else
-		set_task_cpu(p, cpumask_any_and(cpu_active_mask, new_mask));
+		resched_curr(rq);
 
 out:
 	if (queued)
@@ -5571,9 +5564,6 @@ out:
 	task_access_unlock_irqrestore(lock, &flags);
 
 	preempt_rq(prq);
-
-	if (running_wrong)
-		preempt_schedule_common();
 
 	return ret;
 }
