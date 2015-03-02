@@ -1909,17 +1909,13 @@ int __cpufreq_driver_target(struct cpufreq_policy *policy,
 			    unsigned int relation)
 {
 	unsigned int old_target_freq = target_freq;
-	int index;
+	int index, retval;
 
 	if (cpufreq_disabled())
 		return -ENODEV;
 
 	/* Make sure that target_freq is within supported range */
 	target_freq = clamp_val(target_freq, policy->min, policy->max);
-	if (target_freq >= policy->max)
-		cpu_nonscaling(policy->cpu);
-	else
-		cpu_scaling(policy->cpu);
 
 	pr_debug("target for CPU %u: %u kHz, relation %u, requested %u kHz\n",
 		 policy->cpu, target_freq, relation, old_target_freq);
@@ -1944,7 +1940,15 @@ int __cpufreq_driver_target(struct cpufreq_policy *policy,
 
 	index = cpufreq_frequency_table_target(policy, target_freq, relation);
 
-	return __target_index(policy, index);
+	retval = __target_index(policy, index);
+
+	if (likely(retval != -EINVAL)) {
+		if (target_freq == policy->max)
+			cpu_nonscaling(policy->cpu);
+		else if (policy->restore_freq == policy->max)
+			cpu_scaling(policy->cpu);
+	}
+	return retval;
 }
 EXPORT_SYMBOL_GPL(__cpufreq_driver_target);
 
