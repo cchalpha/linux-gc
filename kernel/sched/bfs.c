@@ -5117,8 +5117,7 @@ int __sched yield_to(struct task_struct *p, bool preempt)
 	int yielded = 0;
 
 	rq = this_rq();
-	raw_spin_lock_irqsave(&rq->lock, flags);
-	grq_lock();
+	raw_spin_lock_irqsave(&grq.lock, flags);
 	if (task_running(p) || p->state) {
 		yielded = -ESRCH;
 		goto out_unlock;
@@ -5137,8 +5136,7 @@ int __sched yield_to(struct task_struct *p, bool preempt)
 	if (preempt && rq != p_rq)
 		resched_curr(p_rq);
 out_unlock:
-	grq_unlock();
-	raw_spin_unlock_irqrestore(&rq->lock, flags);
+	raw_spin_unlock_irqrestore(&grq.lock, flags);
 
 	if (yielded > 0)
 		schedule();
