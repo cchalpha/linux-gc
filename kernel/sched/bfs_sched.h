@@ -14,6 +14,7 @@ struct rq {
 
 	struct task_struct *curr, *idle, *stop;
 	struct task_struct *return_task, *wakeup_worker, *unsticky_task;
+	struct task_struct *preempt_task;
 	struct mm_struct *prev_mm;
 
 	/* Pointer to grq spinlock */
@@ -35,6 +36,10 @@ struct rq {
 	unsigned long user_pc, nice_pc, irq_pc, softirq_pc, system_pc,
 		iowait_pc, idle_pc;
 	atomic_t nr_iowait;
+
+	/* rq cached counters */
+	unsigned long nr_running;
+	unsigned long nr_interruptible;
 
 #ifdef CONFIG_SMP
 	int cpu;		/* cpu of this runqueue */

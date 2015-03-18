@@ -1059,8 +1059,12 @@ static inline void deactivate_task(struct task_struct *p, struct rq *rq)
 {
 	if (task_contributes_to_load(p))
 		grq.nr_uninterruptible++;
+	grq.nr_uninterruptible -= rq->nr_interruptible;
+	rq->nr_interruptible = 0;
 	p->on_rq = 0;
+	grq.nr_running += rq->nr_running;
 	grq.nr_running--;
+	rq->nr_running = 0;
 	clear_sticky(p);
 }
 
@@ -1170,6 +1174,18 @@ static inline void take_task(int cpu, struct task_struct *p)
 	dequeue_task(p);
 	clear_sticky(p);
 	dec_qnr();
+}
+
+static inline void take_preempt_task(struct task_struct *p)
+{
+#ifdef CONFIG_SMP
+	/*
+	 * We can optimise this out completely for !SMP, because the
+	 * SMP rebalancing from interrupt is the only thing that cares
+	 * here.
+	 */
+	p->on_cpu = ON_CPU;
+#endif
 }
 
 /* Enter with grq lock held. We know p is on the local cpu */
@@ -1379,23 +1395,11 @@ static inline bool needs_other_cpu(struct task_struct *p, int cpu)
 	return !cpumask_test_cpu(cpu, &p->cpus_allowed);
 }
 
-static struct rq* task_preemptable_rq(struct task_struct *p)
+static struct rq* __task_preemptable_rq(struct task_struct *p)
 {
 	int cpu, target_cpu;
-	struct rq *target_rq;
 	u64 highest_priodl;
 	cpumask_t tmp;
-
-	/*
-	 * We clear the sticky flag here because for a task to have called
-	 * try_preempt with the sticky flag enabled means some complicated
-	 * re-scheduling has occurred and we should ignore the sticky flag.
-	 */
-	clear_sticky(p);
-
-	target_rq = task_best_idle_rq(p);
-	if (target_rq)
-		return target_rq;
 
 	/* IDLEPRIO tasks never preempt anything but idle */
 	if (p->policy == SCHED_IDLEPRIO)
@@ -1429,6 +1433,31 @@ static struct rq* task_preemptable_rq(struct task_struct *p)
 
 	return NULL;
 }
+
+/*
+ * task_preemptable_rq - get the rq which the given task can preempt on
+ * @p: task wants to preempt cpu
+ * This function should be called without any rq lock or grq lock, as it
+ * will decide which cpu to be preempted and require to lock on that rq
+ * to do reschedule.
+ */
+static struct rq* task_preemptable_rq(struct task_struct *p)
+{
+	struct rq *target_rq;
+	/*
+	 * We clear the sticky flag here because for a task to have called
+	 * try_preempt with the sticky flag enabled means some complicated
+	 * re-scheduling has occurred and we should ignore the sticky flag.
+	 */
+	clear_sticky(p);
+
+	target_rq = task_best_idle_rq(p);
+	if (target_rq)
+		return target_rq;
+
+	return __task_preemptable_rq(p);
+}
+
 #else /* CONFIG_SMP */
 static inline bool needs_other_cpu(struct task_struct *p, int cpu)
 {
@@ -1529,6 +1558,68 @@ ttwu_do_wakeup(struct rq *rq, struct task_struct *p, int wake_flags)
 	p->state = TASK_RUNNING;
 }
 
+static inline void task_preempt_rq(struct task_struct *p, struct rq * rq)
+{
+	struct task_struct *preempt;
+
+	bfs_test[6]++;
+
+	preempt = rq->preempt_task;
+	if (preempt) {
+		grq_lock();
+
+		bfs_test[7]++;
+		if (preempt->priodl < p->priodl) {
+			ttwu_activate(p, rq);
+			ttwu_do_wakeup(rq, p, 0);
+			p->on_cpu = NOT_ON_CPU;
+
+			grq_unlock();
+			return;
+		}
+		bfs_test[8]++;
+		/* put preempt back to grq */
+		p->prio = effective_prio(p);
+		enqueue_task(preempt, rq);
+		inc_qnr();
+		/* decouple with rq */
+		preempt->on_cpu = NOT_ON_CPU;
+
+		grq_unlock();
+	} else
+		resched_curr(rq);
+
+	rq->preempt_task = p;
+
+	/*
+	 * Sleep time is in units of nanosecs, so shift by 20 to get a
+	 * milliseconds-range estimation of the amount of time that the task
+	 * spent sleeping:
+	 */
+	if (unlikely(prof_on == SLEEP_PROFILING)) {
+		if (p->state == TASK_UNINTERRUPTIBLE) {
+			update_rq_clock(rq);
+			profile_hits(SLEEP_PROFILING, (void *)get_wchan(p),
+				     (rq->clock_task - p->last_ran) >> 20);
+		}
+	}
+
+	if (task_contributes_to_load(p))
+		rq->nr_interruptible++;
+	p->on_rq = 1;
+	rq->nr_running++;
+
+	/*
+	 * if a worker is waking up, notify workqueue. Note that on BFS, we
+	 * don't really know what cpu it will be, so we fake it for
+	 * wq_worker_waking_up :/
+	 */
+	if (p->flags & PF_WQ_WORKER)
+		wq_worker_waking_up(p, cpu_of(rq));
+
+	ttwu_do_wakeup(rq, p, 0);
+}
+
 /*
  * wake flags
  */
@@ -1587,10 +1678,13 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 		return success;
 	}
 
-	_grq_lock();
+	bfs_test[0]++;
 
-	ttwu_activate(p, rq);
-	ttwu_do_wakeup(rq, p, 0);
+	if ((prq = task_best_idle_rq(p))) {
+		bfs_test[1]++;
+
+		goto preempt_out;
+	}
 
 	/*
 	 * Sync wakeups (i.e. those types of wakeups where the waker
@@ -1598,10 +1692,17 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 	 * don't trigger a preemption if there are no idle cpus,
 	 * instead waiting for current to deschedule.
 	 */
-	if (!(wake_flags & WF_SYNC) || suitable_idle_cpus(p))
-		prq = task_preemptable_rq(p);
-	else
-		prq = NULL;
+	if (!(wake_flags & WF_SYNC) &&
+	   (prq = __task_preemptable_rq(p))) {
+		bfs_test[2]++;
+
+		goto preempt_out;
+	}
+
+	_grq_lock();
+
+	ttwu_activate(p, rq);
+	ttwu_do_wakeup(rq, p, 0);
 
 	_grq_unlock();
 
@@ -1609,7 +1710,18 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 	ttwu_stat(p, cpu, wake_flags);
 	task_access_unlock_irqrestore(lock, &flags);
 
-	preempt_rq(prq);
+	return success;
+
+preempt_out:
+	raw_spin_lock(&prq->lock);
+
+	set_task_cpu(p, cpu_of(prq));
+	p->on_cpu = ON_CPU_RQ;
+	task_preempt_rq(p, prq);
+
+	raw_spin_unlock(&prq->lock);
+
+	task_access_unlock_irqrestore(lock, &flags);
 
 	return success;
 }
@@ -3430,53 +3542,56 @@ static void check_smt_siblings(int __maybe_unused cpu) {}
 static void wake_smt_siblings(int __maybe_unused cpu) {}
 #endif
 
-static int bfs_stat_idle, bfs_stat_idle_qnr, bfs_stat_idle_qnr_eq;
+static int bfs_stat_idle, bfs_stat_idle_preempt, bfs_stat_idle_qnr, bfs_stat_idle_qnr_eq;
 
 static inline void idle_schedule(int cpu, struct rq *rq, struct task_struct *prev,
 				unsigned long *switch_count)
 {
+	struct task_struct *next;
+
 	update_rq_clock(rq);
 	update_cpu_clock_switch_idle(rq, prev);
 	rq->dither = (rq->clock - rq->last_tick < HALF_JIFFY_NS);
 
 	bfs_stat_idle++;
-	if (likely(queued_notrunning())) {
-		struct task_struct *next;
 
+	next = rq->preempt_task;
+	if (next) {
+		bfs_stat_idle_preempt++;
+
+		rq->preempt_task = NULL;
+		take_preempt_task(next);
+	} else if(likely(queued_notrunning())) {
 		bfs_stat_idle_qnr++;
 
 		_grq_lock();
 		next = earliest_deadline_task(rq, cpu, prev);
-
-		if (likely(prev != next)) {
-			grq.nr_switches++;
-			_grq_unlock();
-
-			if (likely(next->prio != PRIO_LIMIT))
-				clear_cpuidle_map(cpu);
-			else
-				set_cpuidle_map(cpu);
-
-			set_rq_task(rq, next);
-
-			check_smt_siblings(cpu);
-
-			rq->curr = next;
-			++*switch_count;
-
-			rq = context_switch(rq, prev, next); /* unlocks the rq */
-
-			return;
-		}
 		_grq_unlock();
+		if (next == prev) {
+			bfs_stat_idle_qnr_eq++;
 
-		bfs_stat_idle_qnr_eq++;
+			goto noswitch;
+		}
+	} else
+		goto noswitch;
 
-		check_smt_siblings(cpu);
-		raw_spin_unlock_irq(&rq->lock);
+	if (likely(next->prio != PRIO_LIMIT))
+		clear_cpuidle_map(cpu);
+	else
+		set_cpuidle_map(cpu);
 
-		return;
-	}
+	set_rq_task(rq, next);
+
+	check_smt_siblings(cpu);
+
+	rq->curr = next;
+	++*switch_count;
+
+	rq = context_switch(rq, prev, next); /* unlocks the rq */
+
+	return;
+
+noswitch:
 	/*
 	 * This CPU is now truly idle as opposed to when idle is
 	 * scheduled as a high priority task in its own right.
@@ -3488,7 +3603,7 @@ static inline void idle_schedule(int cpu, struct rq *rq, struct task_struct *pre
 	raw_spin_unlock_irq(&rq->lock);
 }
 
-static int bfs_stat_deactivate, bfs_stat_deactivate_qnr, bfs_stat_deactivate_eq;
+static int bfs_stat_deactivate, bfs_stat_deactivate_preempt, bfs_stat_deactivate_qnr, bfs_stat_deactivate_idle;
 
 static inline void deactivate_schedule(int cpu, struct rq *rq, struct task_struct *prev,
 				      unsigned long *switch_count)
@@ -3509,15 +3624,27 @@ static inline void deactivate_schedule(int cpu, struct rq *rq, struct task_struc
 	deactivate_task(prev, rq);
 
 	bfs_stat_deactivate++;
-	if (likely(queued_notrunning())) {
+
+	next = rq->preempt_task;
+	if (next) {
+		bfs_stat_deactivate_preempt++;
+
+		rq->preempt_task = NULL;
+		take_preempt_task(next);
+	} else if (likely(queued_notrunning())) {
 		bfs_stat_deactivate_qnr++;
+
 		next = earliest_deadline_task(rq, cpu, idle);
-	} else {
+	} else
+		next = idle;
+
+	if (unlikely(next == idle)) {
+		bfs_stat_deactivate_idle++;
+
 		/*
 		 * This CPU is now truly idle as opposed to when idle is
 		 * scheduled as a high priority task in its own right.
 		 */
-		next = idle;
 		next->on_cpu = ON_CPU;
 		schedstat_inc(rq, sched_goidle);
 	}
@@ -3544,8 +3671,27 @@ static inline void deactivate_schedule(int cpu, struct rq *rq, struct task_struc
 	rq = context_switch(rq, prev, next); /* unlocks the grq */
 }
 
-static int bfs_stat_activate, bfs_stat_activate_needother, bfs_stat_activate_qnr,
-	bfs_stat_activate_qnr_eq;
+static inline struct task_struct *
+pick_next_task(struct rq *rq, int cpu, struct task_struct *prefer)
+{
+	struct task_struct *next = rq->preempt_task;
+
+	if (next) {
+		rq->preempt_task = NULL;
+		take_preempt_task(next);
+
+		return next;
+	}
+	if (likely(queued_notrunning()))
+		next = earliest_deadline_task(rq, cpu, prefer);
+	else
+		next = prefer;
+
+	return next;
+}
+
+static int bfs_stat_activate, bfs_stat_activate_needother, bfs_stat_activate_preempt,
+	bfs_stat_activate_qnr, bfs_stat_activate_qnr_eq;
 
 static inline void activate_schedule(int cpu, struct rq *rq, struct task_struct *prev,
 				    unsigned long *switch_count)
@@ -3570,42 +3716,67 @@ static inline void activate_schedule(int cpu, struct rq *rq, struct task_struct 
 		_grq_lock();
 		enqueue_task(prev, rq);
 		inc_qnr();
-		next = earliest_deadline_task(rq, cpu, idle);
+		next = pick_next_task(rq, cpu, idle);
 		rq->return_task = prev;
 		goto do_switch;
 	}
 
-	if (queued_notrunning()) {
-		bfs_stat_activate_qnr++;
+	next = rq->preempt_task;
+
+	if (next) {
+		bfs_stat_activate_preempt++;
+
+		rq->preempt_task = NULL;
+		take_preempt_task(next);
+
 		_grq_lock();
+		/* put prev back to grq */
 		enqueue_task(prev, rq);
 		inc_qnr();
-		next = earliest_deadline_task(rq, cpu, idle);
+
 		check_sticky_task(rq, cpu);
-		if (prev != next) {
+		/*
+		 * Don't stick tasks when a real time task is going
+		 * to run as they may literally get stuck.
+		 */
+		if (!rt_task(next))
+			stick_task(rq, prev);
+		/*rq->return_task = prev;*/
+		goto do_switch;
+	}
+	if (likely(queued_notrunning())) {
+		_grq_lock();
+
+		bfs_stat_activate_qnr++;
+		/* put prev back to grq */
+		enqueue_task(prev, rq);
+		inc_qnr();
+
+		next = earliest_deadline_task(rq, cpu, prev);
+		check_sticky_task(rq, cpu);
+		if (next != prev) {
+			rq->return_task = prev;
 			/*
 			 * Don't stick tasks when a real time task is going
 			 * to run as they may literally get stuck.
 			 */
 			if (!rt_task(next))
 				stick_task(rq, prev);
-			rq->return_task = prev;
+			/*rq->return_task = prev;*/
 			goto do_switch;
 		}
-
 		bfs_stat_activate_qnr_eq++;
+
 		set_rq_task(rq, prev);
 		check_smt_siblings(cpu);
 		_grq_unlock();
 		raw_spin_unlock_irq(&rq->lock);
 		return;
-	}
+	} else
+		next = prev;
 
-	/*
-	 * We now know prev is the only thing that is awaiting CPU so we can
-	 * bypass rechecking for the earliest deadline task and just run it
-	 * again.
-	 */
+	check_sticky_task(rq, cpu);
+
 	set_rq_task(rq, prev);
 	check_smt_siblings(cpu);
 	raw_spin_unlock_irq(&rq->lock);
@@ -5256,17 +5427,19 @@ SYSCALL_DEFINE2(sched_rr_get_interval, pid_t, pid,
 
 	printk(KERN_INFO "bfs: bfs_test0 %d, bfs_test1 %d, bfs_test2 %d\n",
 		bfs_test[0], bfs_test[1], bfs_test[2]);
-	printk(KERN_INFO "bfs: bfs_test3 %d, bfs_test3 %d, bfs_test5 %d\n",
+	printk(KERN_INFO "bfs: bfs_test3 %d, bfs_test4 %d, bfs_test5 %d\n",
 		bfs_test[3], bfs_test[4], bfs_test[5]);
 	printk(KERN_INFO "bfs: bfs_test6 %d, bfs_test7 %d, bfs_test8 %d\n",
 		bfs_test[6], bfs_test[7], bfs_test[8]);
-	printk(KERN_INFO "bfs: idle %d, idle_qnr %d, idle_qnr_eq %d\n",
-		bfs_stat_idle, bfs_stat_idle_qnr, bfs_stat_idle_qnr_eq);
-	printk(KERN_INFO "bfs: deact %d, deact_qnr %d, deact_eq %d\n",
-		bfs_stat_deactivate, bfs_stat_deactivate_qnr, bfs_stat_deactivate_eq);
-	printk(KERN_INFO "bfs: act %d, act_needother %d, act_qnr %d, act_qnr_eq %d\n",
-		bfs_stat_activate, bfs_stat_activate_needother, bfs_stat_activate_qnr,
-		bfs_stat_activate_qnr_eq);
+	printk(KERN_INFO "bfs: idle %d, preempt %d, qnr %d, qnr_eq %d\n",
+		bfs_stat_idle, bfs_stat_idle_preempt,
+		bfs_stat_idle_qnr, bfs_stat_idle_qnr_eq);
+	printk(KERN_INFO "bfs: deact %d, preempt %d, qnr %d, idle %d\n",
+		bfs_stat_deactivate, bfs_stat_deactivate_preempt,
+		bfs_stat_deactivate_qnr, bfs_stat_deactivate_idle);
+	printk(KERN_INFO "bfs: act %d, needother %d, preempt %d, qnr %d, qnr_eq %d\n",
+		bfs_stat_activate, bfs_stat_activate_needother, bfs_stat_activate_preempt,
+		bfs_stat_activate_qnr, bfs_stat_activate_qnr_eq);
 	if (pid < 0)
 		return -EINVAL;
 
@@ -7339,6 +7512,7 @@ void __init sched_init(void)
 		rq->user_pc = rq->nice_pc = rq->softirq_pc = rq->system_pc =
 			      rq->iowait_pc = rq->idle_pc = 0;
 		rq->dither = false;
+		rq->nr_running = rq->nr_interruptible = 0;
 #ifdef CONFIG_SMP
 		rq->sticky_task = NULL;
 		rq->sd = NULL;
