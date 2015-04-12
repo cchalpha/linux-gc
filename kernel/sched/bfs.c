@@ -1399,27 +1399,43 @@ static inline bool needs_other_cpu(struct task_struct *p, int cpu)
 	return !cpumask_test_cpu(cpu, &p->cpus_allowed);
 }
 
-static struct rq* __task_preemptable_rq(struct task_struct *p)
+static struct rq*
+__task_preemptable_rq(struct task_struct *p, int idle_preempt)
 {
 	int cpu, target_cpu;
 	u64 highest_priodl;
-	cpumask_t tmp;
+        cpumask_t check, tmp;
 
-	/* IDLEPRIO tasks never preempt anything but idle */
-	if (p->policy == SCHED_IDLEPRIO)
-		return NULL;
-
-	if (unlikely(!cpumask_and(&tmp,
+	/* check whether any preemptable rq */
+	if (unlikely(!cpumask_and(&check,
 				  &grq.cpu_preemptable_mask,
 				  &p->cpus_allowed)))
 		return NULL;
 
-	target_cpu = cpu = cpumask_first(&tmp);
+	/* check idle rq */
+	if(likely(cpumask_and(&tmp, &check, &grq.cpu_idle_map))) {
+                target_cpu = best_mask_cpu(task_cpu(p), &tmp);
+#ifdef CONFIG_SMT_NICE
+		if (!smt_should_schedule(p, target_cpu))
+			return NULL;
+#endif
+		return cpu_rq(target_cpu);
+	}
+
+	/* idle_preempt indicate just preempt idle rq */
+	if (unlikely(idle_preempt != 0))
+		return NULL;
+
+	/* IDLEPRIO tasks never preempt anything but idle */
+	if (unlikely(p->policy == SCHED_IDLEPRIO))
+		return NULL;
+
+	target_cpu = cpu = cpumask_first(&check);
 
 	grq_priodl_lock();
 	highest_priodl = grq.rq_priodls[cpu];
 
-	for(;cpu = cpumask_next(cpu, &tmp), cpu < nr_cpu_ids;) {
+	for(;cpu = cpumask_next(cpu, &check), cpu < nr_cpu_ids;) {
 		u64 rq_priodl;
 
 		rq_priodl = grq.rq_priodls[cpu];
@@ -1434,7 +1450,7 @@ static struct rq* __task_preemptable_rq(struct task_struct *p)
 	if (!smt_should_schedule(p, target_cpu))
 		return NULL;
 #endif
-	if (can_preempt(p, highest_priodl))
+	if (likely(can_preempt(p, highest_priodl)))
 		return cpu_rq(target_cpu);
 
 	return NULL;
@@ -1449,7 +1465,10 @@ static struct rq* __task_preemptable_rq(struct task_struct *p)
  */
 static struct rq* task_preemptable_rq(struct task_struct *p)
 {
-	struct rq *target_rq;
+	int cpu, target_cpu;
+	u64 highest_priodl;
+        cpumask_t check, tmp;
+
 	/*
 	 * We clear the sticky flag here because for a task to have called
 	 * try_preempt with the sticky flag enabled means some complicated
@@ -1457,11 +1476,50 @@ static struct rq* task_preemptable_rq(struct task_struct *p)
 	 */
 	clear_sticky(p);
 
-	target_rq = task_best_idle_rq(p);
-	if (target_rq)
-		return target_rq;
+	/* check whether any preemptable rq */
+	if (unlikely(!cpumask_and(&check,
+				  &grq.cpu_preemptable_mask,
+				  &p->cpus_allowed)))
+		return NULL;
 
-	return __task_preemptable_rq(p);
+	/* check idle rq */
+	if(likely(cpumask_and(&tmp, &check, &grq.cpu_idle_map))) {
+                target_cpu = best_mask_cpu(task_cpu(p), &tmp);
+#ifdef CONFIG_SMT_NICE
+		if (!smt_should_schedule(p, target_cpu))
+			return NULL;
+#endif
+		return cpu_rq(target_cpu);
+	}
+
+	/* IDLEPRIO tasks never preempt anything but idle */
+	if (unlikely(p->policy == SCHED_IDLEPRIO))
+		return NULL;
+
+	target_cpu = cpu = cpumask_first(&check);
+
+	grq_priodl_lock();
+	highest_priodl = grq.rq_priodls[cpu];
+
+	for(;cpu = cpumask_next(cpu, &check), cpu < nr_cpu_ids;) {
+		u64 rq_priodl;
+
+		rq_priodl = grq.rq_priodls[cpu];
+		if (rq_priodl > highest_priodl ) {
+			target_cpu = cpu;
+			highest_priodl = rq_priodl;
+		}
+	}
+	grq_priodl_unlock();
+
+#ifdef CONFIG_SMT_NICE
+	if (!smt_should_schedule(p, target_cpu))
+		return NULL;
+#endif
+	if (likely(can_preempt(p, highest_priodl)))
+		return cpu_rq(target_cpu);
+
+	return NULL;
 }
 
 #else /* CONFIG_SMP */
@@ -1585,7 +1643,7 @@ static inline void task_preempt_rq(struct task_struct *p, struct rq * rq)
 	bfs_test[6]++;
 
 	preempt = rq->preempt_task;
-	if (preempt) {
+	if (unlikely(preempt)) {
 		grq_lock();
 
 		bfs_test[7]++;
@@ -1696,25 +1754,24 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 		return success;
 	}
 
-	bfs_test[0]++;
-
-	if ((prq = task_best_idle_rq(p))) {
-		bfs_test[1]++;
-
-		goto preempt_out;
-	}
-
 	/*
 	 * Sync wakeups (i.e. those types of wakeups where the waker
 	 * has indicated that it will leave the CPU in short order)
 	 * don't trigger a preemption if there are no idle cpus,
 	 * instead waiting for current to deschedule.
 	 */
-	if (!(wake_flags & WF_SYNC) &&
-	   (prq = __task_preemptable_rq(p))) {
-		bfs_test[2]++;
+	prq = __task_preemptable_rq(p, wake_flags & WF_SYNC);
+	if (likely(prq != NULL)) {
+		raw_spin_lock(&prq->lock);
 
-		goto preempt_out;
+		set_task_cpu(p, cpu_of(prq));
+		p->on_cpu = ON_CPU_RQ;
+		task_preempt_rq(p, prq);
+
+		raw_spin_unlock(&prq->lock);
+		task_access_unlock_irqrestore(lock, &flags);
+
+		return success;
 	}
 
 	_grq_lock();
@@ -1726,19 +1783,6 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 
 	cpu = task_cpu(p);
 	ttwu_stat(p, cpu, wake_flags);
-	task_access_unlock_irqrestore(lock, &flags);
-
-	return success;
-
-preempt_out:
-	raw_spin_lock(&prq->lock);
-
-	set_task_cpu(p, cpu_of(prq));
-	p->on_cpu = ON_CPU_RQ;
-	task_preempt_rq(p, prq);
-
-	raw_spin_unlock(&prq->lock);
-
 	task_access_unlock_irqrestore(lock, &flags);
 
 	return success;
