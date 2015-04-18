@@ -3370,7 +3370,6 @@ static void __sched __schedule(void)
 	struct rq *rq;
 	int cpu;
 
-need_resched:
 	preempt_disable();
 	cpu = smp_processor_id();
 	rq = cpu_rq(cpu);
@@ -3416,17 +3415,6 @@ need_resched:
 			}
 		}
 		switch_count = &prev->nvcsw;
-	}
-
-	/*
-	 * If we are going to sleep and we have plugged IO queued, make
-	 * sure to submit it to avoid deadlocks. This usually clears before
-	 * grabbing the lock but still may rarely happen here. */
-	if (unlikely(deactivate && blk_needs_flush_plug(prev))) {
-		grq_unlock_irq();
-		preempt_enable_no_resched();
-		blk_schedule_flush_plug(prev);
-		goto need_resched;
 	}
 
 	update_clocks(rq);
@@ -4830,22 +4818,21 @@ EXPORT_SYMBOL_GPL(yield_to);
 
 long __sched io_schedule_timeout(long timeout)
 {
-	struct task_struct *curr = current;
-	int old_iowait = curr->in_iowait;
+	int old_iowait = current->in_iowait;
 	struct rq *rq;
 	long ret;
 
-	curr->in_iowait = 1;
+	current->in_iowait = 1;
 	if (old_iowait)
-		blk_schedule_flush_plug(curr);
+		blk_schedule_flush_plug(current);
 	else
-		blk_flush_plug(curr);
+		blk_flush_plug(current);
 
 	delayacct_blkio_start();
 	rq = raw_rq();
 	atomic_inc(&rq->nr_iowait);
 	ret = schedule_timeout(timeout);
-	curr->in_iowait = old_iowait;
+	current->in_iowait = old_iowait;
 	atomic_dec(&rq->nr_iowait);
 	delayacct_blkio_end();
 
