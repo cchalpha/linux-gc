@@ -187,8 +187,6 @@ struct global_rq {
 	u64 rq_priodls[NR_CPUS];
 #endif
 	int noc; /* num_online_cpus stored and updated when it changes */
-	u64 niffies; /* Nanosecond jiffies */
-	unsigned long last_jiffy; /* Last jiffy we updated niffies */
 
 	raw_spinlock_t iso_lock;
 	int iso_ticks;
@@ -256,87 +254,17 @@ int __weak arch_sd_sibling_asym_packing(void)
 }
 #endif /* CONFIG_SMP */
 
-static inline void update_rq_clock(struct rq *rq);
-
-/*
- * Sanity check should sched_clock return bogus values. We make sure it does
- * not appear to go backwards, and use jiffies to determine the maximum and
- * minimum it could possibly have increased, and round down to the nearest
- * jiffy when it falls outside this.
- */
-static inline void niffy_diff(s64 *niff_diff, int jiff_diff)
-{
-	unsigned long min_diff, max_diff;
-
-	if (jiff_diff > 1)
-		min_diff = JIFFIES_TO_NS(jiff_diff - 1);
-	else
-		min_diff = 1;
-	/*  Round up to the nearest tick for maximum */
-	max_diff = JIFFIES_TO_NS(jiff_diff + 1);
-
-	if (unlikely(*niff_diff < min_diff || *niff_diff > max_diff))
-		*niff_diff = min_diff;
-}
-
 #ifdef CONFIG_SMP
 static inline int cpu_of(struct rq *rq)
 {
 	return rq->cpu;
 }
 
-/*
- * Niffies are a globally increasing nanosecond counter. Whenever a runqueue
- * clock is updated with the grq.lock held, it is an opportunity to update the
- * niffies value. Any CPU can update it by adding how much its clock has
- * increased since it last updated niffies, minus any added niffies by other
- * CPUs.
- */
-static inline void update_grq_clock(struct rq *rq)
-{
-	s64 ndiff;
-	long jdiff;
-
-	ndiff = rq->clock - rq->old_clock;
-	/* old_clock is only updated when we are updating niffies */
-	rq->old_clock = rq->clock;
-	ndiff -= grq.niffies - rq->last_niffy;
-	jdiff = jiffies - grq.last_jiffy;
-	niffy_diff(&ndiff, jdiff);
-	grq.last_jiffy += jdiff;
-	grq.niffies += ndiff;
-	rq->last_niffy = grq.niffies;
-}
-
-static inline void update_clocks(struct rq *rq)
-{
-	update_rq_clock(rq);
-	update_grq_clock(rq);
-}
 
 #else /* CONFIG_SMP */
 static inline int cpu_of(struct rq *rq)
 {
 	return 0;
-}
-
-static inline void update_grq_clock(struct rq *rq)
-{
-	s64 ndiff;
-	long jdiff;
-
-	ndiff = rq->clock - rq->old_clock;
-	rq->old_clock = rq->clock;
-	jdiff = jiffies - grq.last_jiffy;
-	niffy_diff(&ndiff, jdiff);
-	grq.last_jiffy += jdiff;
-	grq.niffies += ndiff;
-}
-
-static inline void update_clocks(struct rq *rq)
-{
-	update_rq_clock(rq);
-	update_grq_clock(rq);
 }
 #endif
 
@@ -364,7 +292,7 @@ static inline void update_rq_clock(struct rq *rq)
 {
 	s64 delta = sched_clock_cpu(cpu_of(rq)) - rq->clock;
 
-	if (unlikely(delta < 0))
+	if (unlikely(delta <= 0))
 		return;
 	rq->clock += delta;
 	update_rq_clock_task(rq, delta);
@@ -1064,7 +992,7 @@ static int effective_prio(struct task_struct *p)
  */
 static void activate_task(struct task_struct *p, struct rq *rq)
 {
-	update_clocks(rq);
+	update_rq_clock(rq);
 
 	/*
 	 * Sleep time is in units of nanosecs, so shift by 20 to get a
@@ -1704,7 +1632,7 @@ int wake_up_state(struct task_struct *p, unsigned int state)
 	return try_to_wake_up(p, state, 0);
 }
 
-static void time_slice_expired(struct task_struct *p);
+static void time_slice_expired(struct task_struct *p, struct rq *rq);
 
 /*
  * Perform scheduler related setup for a newly forked process p.
@@ -1843,7 +1771,7 @@ after_ts_init:
 			rq->rq_time_slice = 0;
 			__set_tsk_resched(parent);
 		}
-		time_slice_expired(p);
+		time_slice_expired(p, rq);
 	}
 	task_access_unlock_irqrestore(lock, &flags);
 
@@ -2632,7 +2560,6 @@ ts_account:
 	if (rq->rq_policy != SCHED_FIFO && p != idle) {
 		s64 time_diff = rq->clock - rq->timekeep_clock;
 
-		niffy_diff(&time_diff, 1);
 		rq->rq_time_slice -= NS_TO_US(time_diff);
 	}
 
@@ -2664,7 +2591,6 @@ ts_account:
 	if (rq->rq_policy != SCHED_FIFO) {
 		s64 time_diff = rq->clock - rq->timekeep_clock;
 
-		niffy_diff(&time_diff, 1);
 		rq->rq_time_slice -= NS_TO_US(time_diff);
 	}
 
@@ -2705,7 +2631,7 @@ static inline u64 do_task_delta_exec(struct task_struct *p, struct rq *rq)
 	 * thread, breaking clock_gettime().
 	 */
 	if (p == rq->curr && p->on_rq) {
-		update_clocks(rq);
+		update_rq_clock(rq);
 		ns = rq->clock_task - rq->rq_last_ran;
 		if (unlikely((s64)ns < 0))
 			ns = 0;
@@ -3031,7 +2957,7 @@ void scheduler_tick(void)
 	struct rq *rq = cpu_rq(cpu);
 
 	sched_clock_tick();
-	/* grq lock not grabbed, so only update rq clock */
+	/* update rq clock */
 	update_rq_clock(rq);
 	update_cpu_clock_tick(rq, rq->curr);
 	if (!rq_idle(rq))
@@ -3144,10 +3070,10 @@ static inline int ms_longest_deadline_diff(void)
  * The time_slice is only refilled when it is empty and that is when we set a
  * new deadline.
  */
-static void time_slice_expired(struct task_struct *p)
+static void time_slice_expired(struct task_struct *p, struct rq *rq)
 {
 	p->time_slice = timeslice();
-	p->deadline = grq.niffies + task_deadline_diff(p);
+	p->deadline = rq->clock + task_deadline_diff(p);
 	update_task_priodl(p);
 #ifdef CONFIG_SMT_NICE
 	if (!p->mm)
@@ -3175,10 +3101,10 @@ static void time_slice_expired(struct task_struct *p)
  * SCHED_NORMAL tasks.
 
  */
-static inline void check_deadline(struct task_struct *p)
+static inline void check_deadline(struct task_struct *p, struct rq *rq)
 {
 	if (p->time_slice < RESCHED_US || batch_task(p))
-		time_slice_expired(p);
+		time_slice_expired(p, rq);
 }
 
 #define BITOP_WORD(nr)		((nr) / BITS_PER_LONG)
@@ -3577,8 +3503,7 @@ static void __sched __schedule(void)
 		prev->last_ran = rq->clock_task;
 
 		_grq_lock();
-		update_grq_clock(rq);
-		check_deadline(prev);
+		check_deadline(prev, rq);
 
 		if (deactivate)
 			deactivate_task(prev, rq);
@@ -4059,7 +3984,7 @@ int task_prio(const struct task_struct *p)
 		goto out;
 
 	/* Convert to ms to avoid overflows */
-	delta = NS_TO_MS(p->deadline - grq.niffies);
+	delta = NS_TO_MS(p->deadline - this_rq()->clock);
 	delta = delta * 40 / ms_longest_deadline_diff();
 	if (delta > 0 && delta <= 80)
 		prio += delta;
@@ -5314,7 +5239,6 @@ void init_idle(struct task_struct *idle, int cpu)
 	 */
 	raw_spin_lock_irqsave(&rq->lock, flags);
 	_grq_lock();
-	update_clocks(rq);
 
 	update_rq_clock(rq);
 	idle->last_ran = rq->clock_task;
@@ -5882,7 +5806,7 @@ migration_call(struct notifier_block *nfb, unsigned long action, void *hcpu)
 	case CPU_DEAD:
 		rq_grq_lock_irqsave(rq, &flags);
 		set_rq_task(rq, idle);
-		update_clocks(rq);
+		update_rq_clock(rq);
 		rq_grq_unlock_irqrestore(rq, &flags);
 		break;
 
@@ -7245,8 +7169,6 @@ void __init sched_init(void)
 
 	raw_spin_lock_init(&grq.lock);
 	grq.nr_running = grq.nr_uninterruptible = grq.nr_switches = 0;
-	grq.niffies = 0;
-	grq.last_jiffy = jiffies;
 	raw_spin_lock_init(&grq.iso_lock);
 	grq.iso_ticks = 0;
 	grq.iso_refractory = false;
@@ -7272,7 +7194,6 @@ void __init sched_init(void)
 		rq->dither = false;
 #ifdef CONFIG_SMP
 		rq->sticky_task = NULL;
-		rq->last_niffy = 0;
 		rq->sd = NULL;
 		rq->rd = NULL;
 		rq->online = false;
