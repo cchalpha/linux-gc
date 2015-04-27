@@ -1307,7 +1307,7 @@ struct task_struct {
 	int smt_bias; /* Policy/nice level bias across smt siblings */
 #endif
 #ifdef CONFIG_SMP
-	bool sticky; /* Soft affined flag */
+	int cache_count; /* cache hot indicator */
 #endif
 #ifdef CONFIG_HOTPLUG_CPU
 	bool zerobound; /* Bound to CPU0 for hotplug */
