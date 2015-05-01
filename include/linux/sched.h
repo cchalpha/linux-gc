@@ -1375,9 +1375,6 @@ struct task_struct {
 #ifdef CONFIG_SMP
 	bool sticky; /* Soft affined flag */
 #endif
-#ifdef CONFIG_HOTPLUG_CPU
-	bool zerobound; /* Bound to CPU0 for hotplug */
-#endif
 	unsigned long rt_timeout;
 #else /* CONFIG_SCHED_BFS */
 	const struct sched_class *sched_class;
@@ -1401,6 +1398,9 @@ struct task_struct {
 	unsigned int policy;
 	int nr_cpus_allowed;
 	cpumask_t cpus_allowed;
+#ifdef CONFIG_SCHED_BFS
+	cpumask_t cpus_allowed_master;
+#endif
 
 #ifdef CONFIG_PREEMPT_RCU
 	int rcu_read_lock_nesting;
