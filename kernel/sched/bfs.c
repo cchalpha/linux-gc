@@ -7435,7 +7435,7 @@ void __init sched_init(void)
 #ifdef CONFIG_SMP
 	init_defrootdomain();
 	cpumask_clear(&grq.cpu_idle_map);
-	cpumask_setall(&grq.cpu_preemptable_mask);
+	cpumask_clear(&grq.cpu_preemptable_mask);
 #ifndef CONFIG_64BIT
 	raw_spin_lock_init(&grq.priodl_lock);
 #endif
