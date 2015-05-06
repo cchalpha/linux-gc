@@ -7445,7 +7445,6 @@ void __init sched_init(void)
 #endif
 	for_each_possible_cpu(i) {
 		rq = cpu_rq(i);
-		rq->grq_lock = &grq.lock;
 		rq->return_task = NULL;
 		rq->wakeup_worker = NULL;
 		raw_spin_lock_init(&rq->lock);
