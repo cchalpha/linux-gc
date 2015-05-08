@@ -1061,7 +1061,6 @@ static inline void deactivate_task(struct task_struct *p, struct rq *rq)
 	grq.nr_uninterruptible -= rq->nr_interruptible;
 	rq->nr_interruptible = 0;
 	p->on_rq = 0;
-	p->cache_count = 4;
 	grq.nr_running += rq->nr_running;
 	grq.nr_running--;
 	rq->nr_running = 0;
@@ -1098,10 +1097,10 @@ void set_task_cpu(struct task_struct *p, unsigned int cpu)
  * stick to non_scaling cpu or its original cpu.
  * Realtime tasks don't use cache count to minimise their latency at all times.
  */
-static inline void cache_task(struct task_struct *p)
+static inline void cache_task(struct task_struct *p, struct rq *rq)
 {
 	if(!rt_task(p))
-		p->cache_count = 14;
+		p->cache_switches = rq->nr_switches;
 }
 #endif
 
@@ -1120,7 +1119,7 @@ static inline void take_task(int cpu, struct task_struct *p)
 	p->on_cpu = ON_CPU;
 	dequeue_task(p);
 	dec_qnr();
-	p->cache_count = 0;
+	p->cache_switches = 0;
 }
 
 static inline void take_preempt_task(struct rq *rq, struct task_struct *p)
@@ -1746,7 +1745,7 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 	p->stime_pc =
 	p->utime_pc = 0;
 
-	p->cache_count = 0;
+	p->cache_switches = 0;
 
 	/*
 	 * Revert to default priority/policy on fork if requested.
@@ -3320,8 +3319,9 @@ task_struct *earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *
 			 * against its deadline when not, based on cpu cache
 			 * locality.
 			 */
-			if (p->cache_count) {
-				p->cache_count--;
+			if (p->cache_switches) {
+				if (task_rq(p)->nr_switches - p->cache_switches > 4)
+					p->cache_switches = 0;
 				if (scaling_rq(rq) && task_cpu(p) != cpu)
 					continue;
 
@@ -3675,7 +3675,7 @@ static inline void activate_schedule(int cpu, struct rq *rq, struct task_struct 
 		 * to run as they may literally get stuck.
 		 */
 		if (!rt_task(next))
-			cache_task(prev);
+			cache_task(prev, rq);
 		else
 			rq->return_task = prev;
 		goto do_switch;
@@ -3695,7 +3695,7 @@ static inline void activate_schedule(int cpu, struct rq *rq, struct task_struct 
 			 * to run as they may literally get stuck.
 			 */
 			if (!rt_task(next))
-				cache_task(prev);
+				cache_task(prev, rq);
 			else
 				rq->return_task = prev;
 			goto do_switch;

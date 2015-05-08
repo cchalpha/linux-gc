@@ -1307,7 +1307,7 @@ struct task_struct {
 	int smt_bias; /* Policy/nice level bias across smt siblings */
 #endif
 #ifdef CONFIG_SMP
-	int cache_count; /* cache hot indicator */
+	u64 cache_switches; /* last switch count of rq */
 #endif
 #ifdef CONFIG_HOTPLUG_CPU
 	bool zerobound; /* Bound to CPU0 for hotplug */
