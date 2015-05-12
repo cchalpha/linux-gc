@@ -525,12 +525,12 @@ static inline void update_task_priodl(struct task_struct *p)
 }
 
 #if defined(CONFIG_SMP) && !defined(CONFIG_64BIT)
-static inline void grq_priodl_lock()
+static inline void grq_priodl_lock(void)
 {
 	raw_spin_lock(&grq.priodl_lock);
 }
 
-static inline void grq_priodl_unlock()
+static inline void grq_priodl_unlock(void)
 {
 	raw_spin_unlock(&grq.priodl_lock);
 }
