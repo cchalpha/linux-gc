@@ -5411,8 +5411,6 @@ out:
 EXPORT_SYMBOL_GPL(set_cpus_allowed_ptr);
 
 #ifdef CONFIG_HOTPLUG_CPU
-extern struct task_struct *cpu_stopper_task;
-
 /*
  * Ensures that the idle task is using init_mm right before its cpu goes
  * offline.
@@ -5429,8 +5427,6 @@ void idle_task_exit(void)
 	}
 	mmdrop(mm);
 }
-#else /* CONFIG_HOTPLUG_CPU */
-static void unbind_zero(int src_cpu) {}
 #endif /* CONFIG_HOTPLUG_CPU */
 
 void sched_set_stop_task(int cpu, struct task_struct *stop)
@@ -5647,6 +5643,8 @@ static void set_rq_offline(struct rq *rq)
 		rq->online = false;
 	}
 }
+
+extern struct task_struct *cpu_stopper_task;
 
 /* Run through task list and find tasks affined to the dead cpu, then remove
  * that cpu from the list, enable cpu0 and set the zerobound flag. */
