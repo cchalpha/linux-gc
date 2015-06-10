@@ -447,25 +447,6 @@ static inline void task_grq_unlock(unsigned long *flags)
 	grq_unlock_irqrestore(flags);
 }
 
-/**
- * grunqueue_is_locked
- *
- * Returns true if the global runqueue is locked.
- * This interface allows printk to be called with the runqueue lock
- * held and know whether or not it is OK to wake up the klogd.
- */
-bool grunqueue_is_locked(void)
-{
-	return raw_spin_is_locked(&grq.lock);
-}
-
-void grq_unlock_wait(void)
-	__releases(grq.lock)
-{
-	smp_mb(); /* spin-unlock-wait is not a full memory barrier */
-	raw_spin_unlock_wait(&grq.lock);
-}
-
 static inline void time_grq_lock(struct rq *rq, unsigned long *flags)
 	__acquires(grq.lock)
 {
