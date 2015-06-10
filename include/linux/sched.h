@@ -1750,8 +1750,6 @@ struct task_struct {
 };
 
 #ifdef CONFIG_SCHED_BFS
-bool grunqueue_is_locked(void);
-void grq_unlock_wait(void);
 void cpu_scaling(int cpu);
 void cpu_nonscaling(int cpu);
 #define tsk_seruntime(t)		((t)->sched_time)
@@ -1759,11 +1757,6 @@ void cpu_nonscaling(int cpu);
 
 static inline void tsk_cpus_current(struct task_struct *p)
 {
-}
-
-static inline int runqueue_is_locked(int cpu)
-{
-	return grunqueue_is_locked();
 }
 
 void print_scheduler_version(void);
