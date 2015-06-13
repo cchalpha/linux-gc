@@ -184,8 +184,8 @@ struct global_rq {
 #ifndef CONFIG_64BIT
 	raw_spinlock_t priodl_lock;
 #endif
-	u64 rq_priodls[NR_CPUS];
 #endif
+	u64 rq_priodls[NR_CPUS];
 	int noc; /* num_online_cpus stored and updated when it changes */
 	u64 niffies; /* Nanosecond jiffies */
 	unsigned long last_jiffy; /* Last jiffy we updated niffies */
