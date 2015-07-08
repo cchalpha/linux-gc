@@ -6979,6 +6979,7 @@ void __init sched_init_smp(void)
 		BUG();
 	free_cpumask_var(non_isolated_cpus);
 
+	mutex_lock(&sched_domains_mutex);
 	grq_lock_irq();
 	/*
 	 * Set up the relative cache distance of each online cpu from each
@@ -7023,6 +7024,7 @@ void __init sched_init_smp(void)
 #endif
 	}
 	grq_unlock_irq();
+	mutex_unlock(&sched_domains_mutex);
 
 	for_each_online_cpu(cpu) {
 		struct rq *rq = cpu_rq(cpu);
