@@ -177,7 +177,6 @@ struct global_rq {
 	raw_spinlock_t lock;
 	unsigned long nr_running;
 	unsigned long nr_uninterruptible;
-	unsigned long long nr_switches;
 	unsigned long qnr; /* queued not running */
 #ifdef CONFIG_SMP
 	cpumask_t cpu_idle_map;
@@ -2202,12 +2201,13 @@ EXPORT_SYMBOL(single_task_running);
 
 unsigned long long nr_context_switches(void)
 {
-	long long ns = grq.nr_switches;
+	int i;
+	unsigned long long sum = 0;
 
-	/* This is of course impossible */
-	if (unlikely(ns < 0))
-		ns = 1;
-	return (unsigned long long)ns;
+	for_each_possible_cpu(i)
+		sum += cpu_rq(i)->nr_switches;
+
+	return sum;
 }
 
 unsigned long nr_iowait(void)
@@ -3647,7 +3647,7 @@ static void __sched notrace __schedule(bool preempt)
 			check_smt_siblings(cpu);
 		else
 			wake_smt_siblings(cpu);
-		grq.nr_switches++;
+		rq->nr_switches++;
 		prev->on_cpu = false;
 		next->on_cpu = true;
 		rq->curr = next;
@@ -7149,7 +7149,7 @@ void __init sched_init(void)
 		prio_ratios[i] = prio_ratios[i - 1] * 11 / 10;
 
 	raw_spin_lock_init(&grq.lock);
-	grq.nr_running = grq.nr_uninterruptible = grq.nr_switches = 0;
+	grq.nr_running = grq.nr_uninterruptible = 0;
 	raw_spin_lock_init(&grq.iso_lock);
 	grq.iso_ticks = 0;
 	grq.iso_refractory = false;
@@ -7179,6 +7179,7 @@ void __init sched_init(void)
 		rq->cpu = i;
 		rq_attach_root(rq, &def_root_domain);
 #endif
+		rq->nr_switches = 0;
 		atomic_set(&rq->nr_iowait, 0);
 	}
 
