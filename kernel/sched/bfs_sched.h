@@ -17,6 +17,8 @@ struct rq {
 
 	/* switch count */
 	u64 nr_switches;
+	/* switch cost */
+	u64 switch_cost;
 
 	/* Stored data about rq->curr to work outside grq lock */
 	u64 rq_deadline;

@@ -1372,9 +1372,8 @@ struct task_struct {
 #ifdef CONFIG_SMT_NICE
 	int smt_bias; /* Policy/nice level bias across smt siblings */
 #endif
-#ifdef CONFIG_SMP
-	bool sticky; /* Soft affined flag */
-#endif
+	u64 cached;		/* task cached indicator */
+	u64 cache_scost;/* last switch cost when schedul off a rq */
 	unsigned long rt_timeout;
 #else /* CONFIG_SCHED_BFS */
 	const struct sched_class *sched_class;
