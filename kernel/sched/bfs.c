@@ -142,12 +142,39 @@ void print_scheduler_version(void)
 	printk(KERN_INFO "BFS enhancement patchset v4.7_0472_0 by Alfred Chen.\n");
 }
 
+/* BFS default rr interval in ms */
+#define DEFAULT_RR_INTERVAL (6)
+
 /*
  * This is the time all tasks within the same priority round robin.
  * Value is in ms and set to a minimum of 6ms. Scales with number of cpus.
  * Tunable via /proc interface.
  */
-int rr_interval __read_mostly = 6;
+int rr_interval __read_mostly = DEFAULT_RR_INTERVAL;
+
+/* Unlimited cached task wait time in ms */
+#define UNLIMITED_CACHED_WAITTIME (1000)
+
+/*
+ * Normal policy task cached wait time, based on Preemption Model Kernel config
+ */
+#ifdef CONFIG_PREEMPT_NONE
+#define NORMAL_POLICY_CACHED_WAITTIME UNLIMITED_CACHED_WAITTIME
+#else
+#define NORMAL_POLICY_CACHED_WAITTIME DEFAULT_RR_INTERVAL
+#endif
+
+/*
+ * task policy cached timeout (in ns)
+ */
+static unsigned long policy_cached_timeout[] = {
+	MS_TO_NS(NORMAL_POLICY_CACHED_WAITTIME),	/* NORMAL */
+	MS_TO_NS(DEFAULT_RR_INTERVAL),			/* FIFO */
+	MS_TO_NS(DEFAULT_RR_INTERVAL),			/* RR */
+	MS_TO_NS(UNLIMITED_CACHED_WAITTIME),		/* BATCH */
+	MS_TO_NS(DEFAULT_RR_INTERVAL),			/* ISO */
+	MS_TO_NS(UNLIMITED_CACHED_WAITTIME)		/* IDLE */
+};
 
 /* Tunable to choose whether to prioritise latency or throughput, simple
  * binary yes or no */
@@ -1149,8 +1176,6 @@ static void activate_task(struct task_struct *p, struct rq *rq)
 			(queued_notrunning() + grq.nr_uninterruptible) / grq.noc);
 }
 
-static inline void clear_sticky(struct task_struct *p);
-
 /*
  * deactivate_task - If it's running, it's not on the grq and we can just
  * decrement the nr_running. Enter with grq locked.
@@ -1165,7 +1190,6 @@ static inline void deactivate_task(struct task_struct *p, struct rq *rq)
 	grq.nr_running += rq->nr_running;
 	grq.nr_running--;
 	rq->nr_running = 0;
-	clear_sticky(p);
 	cpufreq_trigger(rq->clock, rq->rq_running +
 			(queued_notrunning() + grq.nr_uninterruptible) / grq.noc);
 }
@@ -1194,6 +1218,7 @@ void set_task_cpu(struct task_struct *p, unsigned int cpu)
 
 	task_thread_info(p)->cpu = cpu;
 }
+#endif
 
 static inline void
 set_cpus_allowed_common(struct task_struct *p, const struct cpumask *new_mask)
@@ -1215,65 +1240,32 @@ void do_set_cpus_allowed(struct task_struct *p, const struct cpumask *new_mask)
 	set_cpus_allowed_common(p, new_mask);
 }
 
-static inline void clear_sticky(struct task_struct *p)
-{
-	p->sticky = false;
-}
-
-static inline bool task_sticky(struct task_struct *p)
-{
-	return p->sticky;
-}
-
 /*
- * We set the sticky flag on a task that is descheduled involuntarily meaning
- * it is awaiting further CPU time. If the last sticky task is still sticky
- * but unlucky enough to not be the next task scheduled, we unstick it and try
- * to find it an idle CPU. Realtime tasks do not stick to minimise their
- * latency at all times.
+ * We set the task cached when it is descheduled involuntarily meaning it is
+ * awaiting further CPU time. Before caching time out, task will stick to
+ * non_scaling cpu or its original cpu.
+ * Realtime tasks don't use cache count to minimise their latency at all times.
  */
-static inline void
-swap_sticky(struct rq *rq, int cpu, struct task_struct *p)
+static inline void cache_task(struct task_struct *p, struct rq *rq)
 {
-	if (rq->sticky_task) {
-		if (rq->sticky_task == p) {
-			p->sticky = true;
-			return;
-		}
-		if (task_sticky(rq->sticky_task))
-			clear_sticky(rq->sticky_task);
+	if(!rt_task(p) && p->mm) {
+		p->cached = 1ULL;
+		p->policy_cached_timeout = rq->clock_task +
+			policy_cached_timeout[p->policy];
 	}
-	if (!rt_task(p)) {
-		p->sticky = true;
-		rq->sticky_task = p;
-	} else
-		rq->sticky_task = NULL;
 }
 
-static inline void unstick_task(struct rq *rq, struct task_struct *p)
+static inline bool
+is_task_policy_cached_timeout(struct task_struct *p, struct rq *rq)
 {
-	rq->sticky_task = NULL;
-	clear_sticky(p);
-}
-#else
-static inline void clear_sticky(struct task_struct *p)
-{
+	return (rq->clock_task > p->policy_cached_timeout);
 }
 
-static inline bool task_sticky(struct task_struct *p)
+static inline bool
+is_task_should_cached_off(struct task_struct *p, struct rq *rq)
 {
-	return false;
+	return is_task_policy_cached_timeout(p, rq);
 }
-
-static inline void
-swap_sticky(struct rq *rq, int cpu, struct task_struct *p)
-{
-}
-
-static inline void unstick_task(struct rq *rq, struct task_struct *p)
-{
-}
-#endif
 
 /*
  * Move a task off the global queue and take it to a cpu for it will
@@ -1289,7 +1281,6 @@ static inline void take_task(int cpu, struct task_struct *p)
 	 */
 	p->on_cpu = ON_CPU;
 	dequeue_task(p);
-	clear_sticky(p);
 	dec_qnr();
 }
 
@@ -1517,13 +1508,6 @@ task_preemptable_rq(struct task_struct *p, int only_preempt_idle)
 {
 	int cpu;
 	cpumask_t check, tmp;
-
-	/*
-	 * We clear the sticky flag here because for a task to have called
-	 * try_preempt with the sticky flag enabled means some complicated
-	 * re-scheduling has occurred and we should ignore the sticky flag.
-	 */
-	clear_sticky(p);
 
 	/* check whether any preemptable rq */
 	if (unlikely(!cpumask_and(&check,
@@ -1937,7 +1921,7 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 		memset(&p->sched_info, 0, sizeof(p->sched_info));
 #endif
 	p->on_cpu = NOT_ON_CPU;
-	clear_sticky(p);
+	p->cached = 0ULL;
 	init_task_preempt_count(p);
 	return 0;
 }
@@ -3586,6 +3570,7 @@ task_struct *earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *
 		earliest_deadline = ~0ULL;
 		list_for_each_entry(p, queue, run_list) {
 			u64 dl;
+			int tcpu;
 
 			/* Make sure cpu affinity is ok */
 			if (needs_other_cpu(p, cpu))
@@ -3596,21 +3581,20 @@ task_struct *earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *
 				continue;
 #endif
 			/*
-			 * Soft affinity happens here by not scheduling a task
-			 * with its sticky flag set that ran on a different CPU
-			 * last when the CPU is scaling, or by greatly biasing
-			 * against its deadline when not, based on cpu cache
-			 * locality.
+			 * Soft affinity happens here by not scheduling a cache
+			 * task to a different CPU that the task is last ran on,
+			 * or by greatly biasing against its deadline based on
+			 * cpu cache locality.
 			 */
-			if (sched_interactive)
-				dl = p->deadline;
-			else {
-				int tcpu = task_cpu(p);
+			tcpu = task_cpu(p);
 
-				if (tcpu != cpu && task_sticky(p) && scaling_rq(rq))
+			if (p->cached) {
+				if (is_task_should_cached_off(p, task_rq(p)))
+					p->cached = 0ULL;
+				else if (tcpu != cpu && scaling_rq(rq))
 					continue;
-				dl = p->deadline << locality_diff(tcpu, rq);
 			}
+			dl = p->deadline << locality_diff(tcpu, rq);
 
 			if (deadline_before(dl, earliest_deadline)) {
 				earliest_deadline = dl;
@@ -3950,7 +3934,7 @@ activate_choose_task##subfix(struct rq *rq, int cpu,\
 		enqueue_task(prev, rq);\
 		inc_qnr();\
 		if (!rt_task(next))\
-			swap_sticky(rq, cpu, prev);\
+			cache_task(prev, rq);\
 		else\
 			rq->try_preempt_tsk = prev;\
 \
@@ -3971,7 +3955,7 @@ activate_choose_task##subfix(struct rq *rq, int cpu,\
 			 * to run as they may literally get stuck.\
 			 */\
 			if (!rt_task(next))\
-				swap_sticky(rq, cpu, prev);\
+				cache_task(prev, rq);\
 			else\
 				rq->try_preempt_tsk = prev;\
 		}\
@@ -4135,13 +4119,6 @@ static void __sched notrace __schedule(bool preempt)
 	next = rq->choose_task_func(rq, prev, preempt, &switch_count);
 
 	if (likely(prev != next)) {
-		/*
-		 * Don't stick tasks when a real time task is going to run as
-		 * they may literally get stuck.
-		 */
-		if (rt_task(next))
-			unstick_task(rq, prev);
-
 		if (likely(next->prio != PRIO_LIMIT)) {
 			clear_cpuidle_map(cpu);
 			rq->choose_task_func = RQ_CHOOSE_TASK_FUNC(rq, default);
@@ -4158,6 +4135,7 @@ static void __sched notrace __schedule(bool preempt)
 		 * task's runqueue, so set it before release grq.lock 
 		 */
 		next->on_cpu = ON_CPU;
+		next->cached = 0ULL;
 		rq->curr = next;
 		++*switch_count;
 		rq->nr_switches++;
@@ -5973,6 +5951,7 @@ void init_idle(struct task_struct *idle, int cpu)
 	idle->prio = PRIO_LIMIT;
 	idle->deadline = 0ULL;
 	update_task_priodl(idle);
+	idle->cached = 0ULL;
 
 	kasan_unpoison_task_stack(idle);
 
@@ -7401,7 +7380,8 @@ static void tasks_cpu_hotplug(int cpu)
 		return;
 
 	do_each_thread(t, p) {
-		clear_sticky(p);
+		if (p->cached == 1ULL && task_cpu(p) == cpu)
+			p->cached = 0ULL;
 
 		if (cpumask_test_cpu(cpu, &p->cpus_allowed_master)) {
 			count++;
@@ -7692,14 +7672,13 @@ void __init sched_init(void)
 		rq->dither = false;
 		rq->nr_running = rq->nr_uninterruptible = 0;
 #ifdef CONFIG_SMP
-		rq->sticky_task = NULL;
 		rq->sd = NULL;
 		rq->rd = NULL;
 		rq->online = false;
 		rq->cpu = i;
 		rq_attach_root(rq, &def_root_domain);
 #endif
-		rq->nr_switches = 0;
+		rq->nr_switches = 0ULL;
 		atomic_set(&rq->nr_iowait, 0);
 	}
 
