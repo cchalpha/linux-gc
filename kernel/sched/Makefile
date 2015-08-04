@@ -17,6 +17,7 @@ endif
 
 ifdef CONFIG_SCHED_BFS
 obj-y += bfs.o clock.o
+obj-$(CONFIG_SCHED_DEBUG) += bfs_debug.o
 else
 obj-y += core.o loadavg.o clock.o cputime.o
 obj-y += idle_task.o fair.o rt.o deadline.o stop_task.o

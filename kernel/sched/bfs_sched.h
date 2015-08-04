@@ -105,8 +105,24 @@ extern struct rq *uprq;
 #define cpu_curr(cpu)	((uprq)->curr)
 #else /* CONFIG_SMP */
 DECLARE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
+#define cpu_rq(cpu)		(&per_cpu(runqueues, (cpu)))
 #define this_rq()		this_cpu_ptr(&runqueues)
 #define raw_rq()		raw_cpu_ptr(&runqueues)
+#define task_rq(p)		cpu_rq(task_cpu(p))
+#define cpu_curr(cpu)		(cpu_rq(cpu)->curr)
+
+#if defined(CONFIG_SCHED_DEBUG) && defined(CONFIG_SYSCTL)
+void register_sched_domain_sysctl(void);
+void unregister_sched_domain_sysctl(void);
+#else
+static inline void register_sched_domain_sysctl(void)
+{
+}
+static inline void unregister_sched_domain_sysctl(void)
+{
+}
+#endif
+
 #endif /* CONFIG_SMP */
 
 static inline u64 __rq_clock_broken(struct rq *rq)
@@ -143,30 +159,12 @@ extern struct static_key_false sched_schedstats;
 #define for_each_domain(cpu, __sd) \
 	for (__sd = rcu_dereference_check_sched_domain(cpu_rq(cpu)->sd); __sd; __sd = __sd->parent)
 
-#if defined(CONFIG_SCHED_DEBUG) && defined(CONFIG_SYSCTL)
-void register_sched_domain_sysctl(void);
-void unregister_sched_domain_sysctl(void);
-#else
-static inline void register_sched_domain_sysctl(void)
-{
-}
-static inline void unregister_sched_domain_sysctl(void)
-{
-}
-#endif
-
 static inline void sched_ttwu_pending(void) { }
 
 static inline int task_on_rq_queued(struct task_struct *p)
 {
 	return p->on_rq;
 }
-
-#ifdef CONFIG_SMP
-
-extern void set_cpus_allowed_common(struct task_struct *p, const struct cpumask *new_mask);
-
-#endif
 
 #ifdef CONFIG_CPU_IDLE
 static inline void idle_set_state(struct rq *rq,
@@ -216,5 +214,18 @@ static inline void cpufreq_trigger(u64 time, unsigned long util)
 #else /* arch_scale_freq_capacity */
 #define arch_scale_freq_invariant()	(false)
 #endif
+
+static inline void account_reset_rq(struct rq *rq)
+{
+#ifdef CONFIG_IRQ_TIME_ACCOUNTING
+	rq->prev_irq_time = 0;
+#endif
+#ifdef CONFIG_PARAVIRT
+	rq->prev_steal_time = 0;
+#endif
+#ifdef CONFIG_PARAVIRT_TIME_ACCOUNTING
+	rq->prev_steal_time_rq = 0;
+#endif
+}
 
 #endif /* BFS_SCHED_H */
