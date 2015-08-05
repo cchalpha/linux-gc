@@ -130,6 +130,7 @@
 void print_scheduler_version(void)
 {
 	printk(KERN_INFO "BFS CPU scheduler v0.463 by Con Kolivas.\n");
+	printk(KERN_INFO "BFS enhancement patchset v4.3_0463_1 by Alfred Chen.\n");
 }
 
 /*
