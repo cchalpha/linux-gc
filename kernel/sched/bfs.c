@@ -3844,10 +3844,6 @@ void rt_mutex_setprio(struct task_struct *p, int prio)
 
 	trace_sched_pi_setprio(p, prio);
 	oldprio = p->prio;
-
-	if (task_queued(p))
-		dequeue_task(p);
-
 	p->prio = prio;
 	update_task_priodl(p);
 
@@ -4255,9 +4251,6 @@ recheck:
 		raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 		return 0;
 	}
-
-	if (task_queued(p))
-		dequeue_task(p);
 
 	__setscheduler(rq, p, attr, true);
 
@@ -7279,9 +7272,6 @@ static void normalize_task(struct rq *rq, struct task_struct *p)
 		.sched_policy = SCHED_NORMAL,
 	};
 	int old_prio = p->prio;
-
-	if (task_queued(p))
-		dequeue_task(p);
 
 	__setscheduler(rq, p, &attr, false);
 
