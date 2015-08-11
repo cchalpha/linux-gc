@@ -130,6 +130,13 @@
 
 #define RESCHED_US	(100) /* Reschedule if less than this many μs left */
 
+/*
+ * rq->on_cpu states
+ */
+#define NOT_ON_CPU	0
+#define ON_CPU		1
+#define ON_CPU_RQ	2
+
 void print_scheduler_version(void)
 {
 	printk(KERN_INFO "BFS CPU scheduler v0.472 by Con Kolivas.\n");
@@ -307,7 +314,7 @@ static inline void update_rq_clock(struct rq *rq)
 
 static inline bool task_running(struct task_struct *p)
 {
-	return p->on_cpu;
+	return (ON_CPU == p->on_cpu);
 }
 
 /*
@@ -500,7 +507,7 @@ static inline void finish_lock_switch(struct rq *rq, struct task_struct *prev)
 	 * switch is completely finished.
 	 */
 	smp_wmb();
-	prev->on_cpu = 0;
+	prev->on_cpu = NOT_ON_CPU;
 #ifdef CONFIG_DEBUG_SPINLOCK
 	/* this is a valid case when another task releases the spinlock */
 	grq.lock.owner = current;
@@ -1300,7 +1307,7 @@ static inline void take_task(int cpu, struct task_struct *p)
 	 * SMP rebalancing from interrupt is the only thing that cares
 	 * here.
 	 */
-	p->on_cpu = 1;
+	p->on_cpu = ON_CPU;
 	dequeue_task(p);
 	clear_sticky(p);
 	dec_qnr();
@@ -1702,7 +1709,7 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 	trace_sched_waking(p);
 
 	success = 1;
-	if (task_queued(p) || task_running(p)) {
+	if (unlikely(p->on_cpu || task_queued(p))) {
 		ttwu_do_wakeup(rq, p, 0);
 		cpu = task_cpu(p);
 		ttwu_stat(p, cpu, wake_flags);
@@ -1868,7 +1875,7 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 	if (unlikely(sched_info_on()))
 		memset(&p->sched_info, 0, sizeof(p->sched_info));
 #endif
-	p->on_cpu = 0;
+	p->on_cpu = NOT_ON_CPU;
 	clear_sticky(p);
 	init_task_preempt_count(p);
 
@@ -3882,7 +3889,7 @@ do_switch:
 		/* Once next->on_cpu is set, task_access_lock...() can be locked on
 		 * task's runqueue, so set it before release grq.lock 
 		 */
-		next->on_cpu = true;
+		next->on_cpu = ON_CPU;
 		rq->curr = next;
 		++*switch_count;
 		rq->nr_switches++;
@@ -5703,7 +5710,7 @@ void init_idle(struct task_struct *idle, int cpu)
 	rcu_read_unlock();
 
 	rq->curr = rq->idle = idle;
-	idle->on_cpu = 1;
+	idle->on_cpu = ON_CPU;
 
 	_grq_unlock();
 	raw_spin_unlock(&rq->lock);
