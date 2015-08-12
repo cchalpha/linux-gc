@@ -1917,7 +1917,7 @@ static struct rq *finish_task_switch(struct task_struct *prev)
 	struct rq *rq = this_rq();
 	struct mm_struct *mm = rq->prev_mm;
 	long prev_state;
-	struct rq *prq, *w_prq, *us_prq;
+	struct rq *prq, *w_prq;
 
 	rq->prev_mm = NULL;
 
@@ -1952,14 +1952,6 @@ static struct rq *finish_task_switch(struct task_struct *prev)
 		rq->wakeup_worker = NULL;
 	} else
 		w_prq = NULL;
-	if (rq->unsticky_task) {
-		if (task_queued(rq->unsticky_task))
-			us_prq = task_best_idle_rq(rq->unsticky_task);
-		else
-			us_prq = NULL;
-		rq->unsticky_task = NULL;
-	} else
-		us_prq = NULL;
 
 	finish_lock_switch(rq, prev);
 	finish_arch_post_lock_switch();
@@ -1979,8 +1971,6 @@ static struct rq *finish_task_switch(struct task_struct *prev)
 	preempt_rq(prq);
 	if (w_prq != prq)
 		preempt_rq(w_prq);
-	if (us_prq != prq && us_prq != w_prq)
-		preempt_rq(us_prq);
 
 	return rq;
 }
@@ -7181,7 +7171,6 @@ void __init sched_init(void)
 		rq = cpu_rq(i);
 		rq->return_task = NULL;
 		rq->wakeup_worker = NULL;
-		rq->unsticky_task = NULL;
 		raw_spin_lock_init(&rq->lock);
 		rq->user_pc = rq->nice_pc = rq->softirq_pc = rq->system_pc =
 			      rq->iowait_pc = rq->idle_pc = 0;

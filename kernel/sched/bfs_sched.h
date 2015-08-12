@@ -13,7 +13,7 @@ struct rq {
 	raw_spinlock_t lock;
 
 	struct task_struct *curr, *idle, *stop;
-	struct task_struct *return_task, *wakeup_worker, *unsticky_task;
+	struct task_struct *return_task, *wakeup_worker;
 	struct mm_struct *prev_mm;
 
 	/* switch count */
