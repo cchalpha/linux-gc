@@ -1917,7 +1917,6 @@ static struct rq *finish_task_switch(struct task_struct *prev)
 	struct rq *rq = this_rq();
 	struct mm_struct *mm = rq->prev_mm;
 	long prev_state;
-	struct rq *prq, *w_prq;
 
 	rq->prev_mm = NULL;
 
@@ -1936,22 +1935,6 @@ static struct rq *finish_task_switch(struct task_struct *prev)
 	vtime_task_switch(prev);
 	finish_arch_switch(prev);
 	perf_event_task_sched_in(prev, current);
-	/*
-	 * Before unlock rq, record all rq need to be reschedule in the stack
-	 */
-	if (rq->return_task) {
-		prq = task_best_idle_rq(rq->return_task);
-		rq->return_task = NULL;
-	} else
-		prq = NULL;
-	if (rq->wakeup_worker) {
-		if (current != rq->wakeup_worker)
-			w_prq = task_best_idle_rq(rq->wakeup_worker);
-		else
-			w_prq = NULL;
-		rq->wakeup_worker = NULL;
-	} else
-		w_prq = NULL;
 
 	finish_lock_switch(rq, prev);
 	finish_arch_post_lock_switch();
@@ -1967,10 +1950,6 @@ static struct rq *finish_task_switch(struct task_struct *prev)
 		kprobe_flush_task(prev);
 		put_task_struct(prev);
 	}
-
-	preempt_rq(prq);
-	if (w_prq != prq)
-		preempt_rq(w_prq);
 
 	return rq;
 }
@@ -2001,6 +1980,7 @@ context_switch(struct rq *rq, struct task_struct *prev,
 	       struct task_struct *next)
 {
 	struct mm_struct *mm, *oldmm;
+	struct rq *prq;
 
 	update_rq_switch(rq, prev, next);
 	prepare_task_switch(rq, prev, next);
@@ -2040,7 +2020,24 @@ context_switch(struct rq *rq, struct task_struct *prev,
 
 	barrier();
 
-	return finish_task_switch(prev);
+	/*
+	 * Before unlock rq, record all rq need to be reschedule in the stack
+	 */
+	rq = this_rq();
+	if (rq->try_preempt_tsk) {
+		if (current != rq->try_preempt_tsk)
+			prq = task_best_idle_rq(rq->try_preempt_tsk);
+		else
+			prq = NULL;
+		rq->try_preempt_tsk = NULL;
+	} else
+		prq = NULL;
+
+	rq = finish_task_switch(prev);
+
+	preempt_rq(prq);
+
+	return rq;
 }
 
 /*
@@ -3492,7 +3489,7 @@ static void __sched __schedule(void)
 						_grq_lock();
 						try_to_wake_up_local(to_wakeup);
 						_grq_unlock();
-						rq->wakeup_worker = to_wakeup;
+						rq->try_preempt_tsk = to_wakeup;
 					}
 				}
 			}
@@ -3524,7 +3521,7 @@ static void __sched __schedule(void)
 			if (unlikely(needs_other_cpu(prev, cpu))) {
 				enqueue_task(prev, rq);
 				inc_qnr();
-				rq->return_task = prev;
+				rq->try_preempt_tsk = prev;
 				goto earliest_deadline_next;
 			} else {
 				if (queued_notrunning()) {
@@ -3539,7 +3536,7 @@ static void __sched __schedule(void)
 						if (!rt_task(next))
 							cache_task(prev);
 						else
-							rq->return_task = prev;
+							rq->try_preempt_tsk = prev;
 						goto do_switch;
 					}
 					goto unlock_out;
@@ -7169,8 +7166,7 @@ void __init sched_init(void)
 #endif
 	for_each_possible_cpu(i) {
 		rq = cpu_rq(i);
-		rq->return_task = NULL;
-		rq->wakeup_worker = NULL;
+		rq->try_preempt_tsk = NULL;
 		raw_spin_lock_init(&rq->lock);
 		rq->user_pc = rq->nice_pc = rq->softirq_pc = rq->system_pc =
 			      rq->iowait_pc = rq->idle_pc = 0;
