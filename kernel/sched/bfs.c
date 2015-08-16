@@ -1450,12 +1450,13 @@ static inline bool needs_other_cpu(struct task_struct *p, int cpu)
 	return false;
 }
 
-static void try_preempt(struct task_struct *p, struct rq *this_rq)
+static struct rq* task_preemptable_rq(struct task_struct *p)
 {
 	if (p->policy == SCHED_IDLEPRIO)
-		return;
+		return NULL;
 	if (can_preempt(p, grq.rq_priodls[0]))
-		resched_curr(uprq);
+		return uprq;
+	return NULL;
 }
 #endif /* CONFIG_SMP */
 
@@ -1742,7 +1743,10 @@ retry:
 
 	parent = p->parent;
 
+#ifdef CONFIG_SMP
 	set_task_cpu(p, rq->cpu);
+#endif
+
 	/*
 	 * Reinit new task deadline as its creator deadline could have changed
 	 * since call to dup_task_struct().
