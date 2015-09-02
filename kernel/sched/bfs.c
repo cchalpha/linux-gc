@@ -66,13 +66,13 @@
 #include <linux/delayacct.h>
 #include <linux/log2.h>
 #include <linux/bootmem.h>
+#include <linux/tick.h>
 #include <linux/ftrace.h>
 #include <linux/slab.h>
 #include <linux/init_task.h>
 #include <linux/binfmts.h>
 #include <linux/context_tracking.h>
 #include <linux/sched/prio.h>
-#include <linux/tick.h>
 
 #include <asm/irq_regs.h>
 #include <asm/switch_to.h>
@@ -1693,7 +1693,7 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 
 	INIT_LIST_HEAD(&p->run_list);
 #ifdef CONFIG_SCHED_INFO
-	if (unlikely(sched_info_on()))
+	if (likely(sched_info_on()))
 		memset(&p->sched_info, 0, sizeof(p->sched_info));
 #endif
 	p->on_cpu = false;
@@ -1837,7 +1837,7 @@ static __always_inline void fire_sched_in_preempt_notifiers(struct task_struct *
 
 static void
 __fire_sched_out_preempt_notifiers(struct task_struct *curr,
-				 struct task_struct *next)
+				   struct task_struct *next)
 {
 	struct preempt_notifier *notifier;
 
@@ -2006,6 +2006,7 @@ context_switch(struct rq *rq, struct task_struct *prev,
 	 * of the scheduler it's an obvious special-case), so we
 	 * do an early lockdep release here:
 	 */
+	lockdep_unpin_lock(&grq.lock);
 	spin_release(&grq.lock.dep_map, 1, _THIS_IP_);
 
 	/* Here we just switch the register state and the stack. */
@@ -2056,10 +2057,7 @@ static unsigned long nr_uninterruptible(void)
  */
 bool single_task_running(void)
 {
-	if (cpu_rq(smp_processor_id())->soft_affined == 1)
-		return true;
-	else
-		return false;
+	return (raw_rq()->soft_affined == 1);
 }
 EXPORT_SYMBOL(single_task_running);
 
@@ -3416,6 +3414,7 @@ static void __sched __schedule(void)
 	 */
 	smp_mb__before_spinlock();
 	grq_lock_irq();
+	lockdep_pin_lock(&grq.lock);
 
 	switch_count = &prev->nivcsw;
 	if (prev->state && !(preempt_count() & PREEMPT_ACTIVE)) {
@@ -3476,8 +3475,6 @@ static void __sched __schedule(void)
 					 * again.
 					 */
 					set_rq_task(rq, prev);
-					check_smt_siblings(cpu);
-					grq_unlock_irq();
 					goto rerun_prev_unlocked;
 				} else
 					swap_sticky(rq, cpu, prev);
@@ -3529,12 +3526,11 @@ static void __sched __schedule(void)
 		cpu = cpu_of(rq);
 		idle = rq->idle;
 	} else {
+rerun_prev_unlocked:
 		check_smt_siblings(cpu);
+		lockdep_unpin_lock(&grq.lock);
 		grq_unlock_irq();
 	}
-
-rerun_prev_unlocked:
-	return;
 }
 
 static inline void sched_submit_work(struct task_struct *tsk)
@@ -6996,6 +6992,9 @@ void __init sched_init_smp(void)
 
 	alloc_cpumask_var(&non_isolated_cpus, GFP_KERNEL);
 	alloc_cpumask_var(&fallback_doms, GFP_KERNEL);
+
+	/* nohz_full won't take effect without isolating the cpus. */
+	tick_nohz_full_add_cpus_to(cpu_isolated_map);
 
 	sched_init_numa();
 
