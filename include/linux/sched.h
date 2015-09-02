@@ -1822,10 +1822,6 @@ void cpu_nonscaling(int cpu);
 #define tsk_seruntime(t)		((t)->sched_time)
 #define tsk_rttimeout(t)		((t)->rt_timeout)
 
-static inline void tsk_cpus_current(struct task_struct *p)
-{
-}
-
 static inline int runqueue_is_locked(int cpu)
 {
 	return grunqueue_is_locked();
@@ -1833,10 +1829,9 @@ static inline int runqueue_is_locked(int cpu)
 
 void print_scheduler_version(void);
 
-static inline bool iso_task(struct task_struct *p)
-{
-	return (p->policy == SCHED_ISO);
-}
+#define is_iso_policy(policy)	((policy) == SCHED_ISO)
+#define iso_task(p)		unlikely(is_iso_policy((p)->policy))
+
 #else /* CFS */
 extern int runqueue_is_locked(int cpu);
 static inline void cpu_scaling(int cpu)
@@ -1849,26 +1844,13 @@ static inline void cpu_nonscaling(int cpu)
 #define tsk_seruntime(t)	((t)->se.sum_exec_runtime)
 #define tsk_rttimeout(t)	((t)->rt.timeout)
 
-static inline void tsk_cpus_current(struct task_struct *p)
-{
-	p->nr_cpus_allowed = current->nr_cpus_allowed;
-}
-
 static inline void print_scheduler_version(void)
 {
 	printk(KERN_INFO"CFS CPU scheduler.\n");
 }
 
-static inline bool iso_task(struct task_struct *p)
-{
-	return false;
-}
+#define iso_task(p)		(false)
 
-/* Anyone feel like implementing this? */
-static inline bool above_background_load(void)
-{
-	return false;
-}
 #endif /* CONFIG_SCHED_BFS */
 
 /* Future-safe accessor for struct task_struct's cpus_allowed. */
