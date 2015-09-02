@@ -105,8 +105,7 @@
 #define task_running_idle(p)	unlikely((p)->prio == IDLE_PRIO)
 #define idle_queue(rq)		(unlikely(is_idle_policy((rq)->rq_policy)))
 
-#define is_iso_policy(policy)	((policy) == SCHED_ISO)
-#define iso_task(p)		unlikely(is_iso_policy((p)->policy))
+/* is_iso_policy() and iso_task() are moved to include/linux/sched.h */
 #define iso_queue(rq)		unlikely(is_iso_policy((rq)->rq_policy))
 #define task_running_iso(p)	unlikely((p)->prio == ISO_PRIO)
 #define rq_running_iso(rq)	((rq)->rq_prio == ISO_PRIO)
