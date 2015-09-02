@@ -66,6 +66,7 @@
 #include <linux/delayacct.h>
 #include <linux/log2.h>
 #include <linux/bootmem.h>
+#include <linux/tick.h>
 #include <linux/ftrace.h>
 #include <linux/slab.h>
 #include <linux/init_task.h>
@@ -1036,7 +1037,7 @@ void set_task_cpu(struct task_struct *p, unsigned int cpu)
 	if (task_cpu(p) == cpu)
 		return;
 	trace_sched_migrate_task(p, cpu);
-	perf_sw_event_sched(PERF_COUNT_SW_CPU_MIGRATIONS, 1, 0);
+	perf_event_task_migrate(p);
 
 	/*
 	 * After ->cpu is set up to a new value, task_grq_lock(p, ...) can be
@@ -1722,8 +1723,8 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 	}
 
 	INIT_LIST_HEAD(&p->run_list);
-#if defined(CONFIG_SCHEDSTATS) || defined(CONFIG_TASK_DELAY_ACCT)
-	if (unlikely(sched_info_on()))
+#ifdef CONFIG_SCHED_INFO
+	if (likely(sched_info_on()))
 		memset(&p->sched_info, 0, sizeof(p->sched_info));
 #endif
 	p->on_cpu = false;
@@ -1832,6 +1833,9 @@ EXPORT_SYMBOL_GPL(preempt_notifier_dec);
  */
 void preempt_notifier_register(struct preempt_notifier *notifier)
 {
+	if (!static_key_false(&preempt_notifier_key))
+		WARN(1, "registering preempt_notifier while notifiers disabled\n");
+
 	hlist_add_head(&notifier->link, &current->preempt_notifiers);
 }
 EXPORT_SYMBOL_GPL(preempt_notifier_register);
@@ -1840,7 +1844,7 @@ EXPORT_SYMBOL_GPL(preempt_notifier_register);
  * preempt_notifier_unregister - no longer interested in preemption notifications
  * @notifier: notifier struct to unregister
  *
- * This is safe to call from within a preemption notifier.
+ * This is *not* safe to call from within a preemption notifier.
  */
 void preempt_notifier_unregister(struct preempt_notifier *notifier)
 {
@@ -1848,7 +1852,7 @@ void preempt_notifier_unregister(struct preempt_notifier *notifier)
 }
 EXPORT_SYMBOL_GPL(preempt_notifier_unregister);
 
-static void fire_sched_in_preempt_notifiers(struct task_struct *curr)
+static void __fire_sched_in_preempt_notifiers(struct task_struct *curr)
 {
 	struct preempt_notifier *notifier;
 
@@ -1856,9 +1860,15 @@ static void fire_sched_in_preempt_notifiers(struct task_struct *curr)
 		notifier->ops->sched_in(notifier, raw_smp_processor_id());
 }
 
+static __always_inline void fire_sched_in_preempt_notifiers(struct task_struct *curr)
+{
+	if (static_key_false(&preempt_notifier_key))
+		__fire_sched_in_preempt_notifiers(curr);
+}
+
 static void
-fire_sched_out_preempt_notifiers(struct task_struct *curr,
-				 struct task_struct *next)
+__fire_sched_out_preempt_notifiers(struct task_struct *curr,
+				   struct task_struct *next)
 {
 	struct preempt_notifier *notifier;
 
@@ -1866,13 +1876,22 @@ fire_sched_out_preempt_notifiers(struct task_struct *curr,
 		notifier->ops->sched_out(notifier, next);
 }
 
+
+static void
+fire_sched_out_preempt_notifiers(struct task_struct *curr,
+				 struct task_struct *next)
+{
+	if (static_key_false(&preempt_notifier_key))
+		__fire_sched_out_preempt_notifiers(curr, next);
+}
+
 #else /* !CONFIG_PREEMPT_NOTIFIERS */
 
-static void fire_sched_in_preempt_notifiers(struct task_struct *curr)
+static inline void fire_sched_in_preempt_notifiers(struct task_struct *curr)
 {
 }
 
-static void
+static inline void
 fire_sched_out_preempt_notifiers(struct task_struct *curr,
 				 struct task_struct *next)
 {
@@ -2020,6 +2039,7 @@ context_switch(struct rq *rq, struct task_struct *prev,
 	 * of the scheduler it's an obvious special-case), so we
 	 * do an early lockdep release here:
 	 */
+	lockdep_unpin_lock(&grq.lock);
 	spin_release(&grq.lock.dep_map, 1, _THIS_IP_);
 
 	/* Here we just switch the register state and the stack. */
@@ -2104,10 +2124,10 @@ unsigned long nr_active(void)
  * set to this cpu as being the CPU they're more likely to run on. */
 void get_iowait_load(unsigned long *nr_waiters, unsigned long *load)
 {
-	struct rq *this = this_rq();
+	struct rq *rq = this_rq();
 
-	*nr_waiters = atomic_read(&this->nr_iowait);
-	*load = this->soft_affined;
+	*nr_waiters = atomic_read(&rq->nr_iowait);
+	*load = rq->soft_affined;
 }
 
 /* Variables and functions for calc_load */
@@ -2685,11 +2705,14 @@ void account_idle_time(cputime_t cputime)
 {
 }
 
+#ifdef CONFIG_NO_HZ_COMMON
+
+#ifdef CONFIG_SMP
 void update_cpu_load_nohz(void)
 {
 }
+#endif
 
-#ifdef CONFIG_NO_HZ_COMMON
 void calc_load_enter_idle(void)
 {
 }
@@ -3412,9 +3435,7 @@ static void wake_smt_siblings(int __maybe_unused cpu) {}
  *          - return from syscall or exception to user-space
  *          - return from interrupt-handler to user-space
  *
- * WARNING: all callers must re-check need_resched() afterward and reschedule
- * accordingly in case an event triggered the need for rescheduling (such as
- * an interrupt waking up a task) while preemption was disabled in __schedule().
+ * WARNING: must be called with preemption disabled!
  */
 static void __sched __schedule(void)
 {
@@ -3424,7 +3445,6 @@ static void __sched __schedule(void)
 	struct rq *rq;
 	int cpu;
 
-	preempt_disable();
 	cpu = smp_processor_id();
 	rq = cpu_rq(cpu);
 	rcu_note_context_switch();
@@ -3439,6 +3459,7 @@ static void __sched __schedule(void)
 	 */
 	smp_mb__before_spinlock();
 	grq_lock_irq();
+	lockdep_pin_lock(&grq.lock);
 
 	switch_count = &prev->nivcsw;
 	if (prev->state && !(preempt_count() & PREEMPT_ACTIVE)) {
@@ -3499,8 +3520,6 @@ static void __sched __schedule(void)
 					 * again.
 					 */
 					set_rq_task(rq, prev);
-					check_smt_siblings(cpu);
-					grq_unlock_irq();
 					goto rerun_prev_unlocked;
 				} else
 					swap_sticky(rq, cpu, prev);
@@ -3552,12 +3571,11 @@ static void __sched __schedule(void)
 		cpu = cpu_of(rq);
 		idle = rq->idle;
 	} else {
+rerun_prev_unlocked:
 		check_smt_siblings(cpu);
+		lockdep_unpin_lock(&grq.lock);
 		grq_unlock_irq();
 	}
-
-rerun_prev_unlocked:
-	sched_preempt_enable_no_resched();
 }
 
 static inline void sched_submit_work(struct task_struct *tsk)
@@ -3578,7 +3596,9 @@ asmlinkage __visible void __sched schedule(void)
 
 	sched_submit_work(tsk);
 	do {
+		preempt_disable();
 		__schedule();
+		sched_preempt_enable_no_resched();
 	} while (need_resched());
 }
 
@@ -3618,15 +3638,14 @@ void __sched schedule_preempt_disabled(void)
 static void __sched notrace preempt_schedule_common(void)
 {
 	do {
-		__preempt_count_add(PREEMPT_ACTIVE);
+		preempt_active_enter();
 		__schedule();
-		__preempt_count_sub(PREEMPT_ACTIVE);
+		preempt_active_exit();
 
 		/*
 		 * Check again in case we missed a preemption opportunity
 		 * between schedule and now.
 		 */
-		barrier();
 	} while (need_resched());
 }
 
@@ -3712,17 +3731,11 @@ asmlinkage __visible void __sched preempt_schedule_irq(void)
 	prev_state = exception_enter();
 
 	do {
-		__preempt_count_add(PREEMPT_ACTIVE);
+		preempt_active_enter();
 		local_irq_enable();
-		schedule();
+		__schedule();
 		local_irq_disable();
-		__preempt_count_sub(PREEMPT_ACTIVE);
-
-		/*
-		 * Check again in case we missed a preemption opportunity
-		 * between schedule and now.
-		 */
-		barrier();
+		preempt_active_exit();
 	} while (need_resched());
 
 	exception_exit(prev_state);
@@ -6939,6 +6952,9 @@ void __init sched_init_smp(void)
 
 	alloc_cpumask_var(&non_isolated_cpus, GFP_KERNEL);
 	alloc_cpumask_var(&fallback_doms, GFP_KERNEL);
+
+	/* nohz_full won't take effect without isolating the cpus. */
+	tick_nohz_full_add_cpus_to(cpu_isolated_map);
 
 	sched_init_numa();
 
