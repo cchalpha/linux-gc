@@ -59,39 +59,34 @@
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include <linux/syscalls.h>
-#include <linux/sched/sysctl.h>
 #include <linux/times.h>
 #include <linux/tsacct_kern.h>
 #include <linux/kprobes.h>
 #include <linux/delayacct.h>
-#include <linux/log2.h>
-#include <linux/bootmem.h>
 #include <linux/tick.h>
 #include <linux/ftrace.h>
 #include <linux/slab.h>
 #include <linux/init_task.h>
 #include <linux/binfmts.h>
 #include <linux/context_tracking.h>
-#include <linux/sched/prio.h>
 #include <linux/stop_machine.h>
 
-#include <asm/irq_regs.h>
 #include <asm/switch_to.h>
 #include <asm/tlb.h>
-#include <asm/unistd.h>
+#include <asm/irq_regs.h>
 #include <asm/mutex.h>
 #ifdef CONFIG_PARAVIRT
 #include <asm/paravirt.h>
 #endif
 
-#include "cpupri.h"
+#include "bfs_sched.h"
 #include "../workqueue_internal.h"
 #include "../smpboot.h"
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/sched.h>
 
-#include "bfs_sched.h"
+#include "cpupri.h"
 
 #define rt_prio(prio)		unlikely((prio) < MAX_RT_PRIO)
 #define rt_task(p)		rt_prio((p)->prio)
