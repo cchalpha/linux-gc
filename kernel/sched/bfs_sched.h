@@ -44,7 +44,7 @@ struct rq {
 
 	/* rq cached counters */
 	unsigned long nr_running;
-	unsigned long nr_interruptible;
+	long nr_uninterruptible;
 
 #ifdef CONFIG_SMP
 	int cpu;		/* cpu of this runqueue */
