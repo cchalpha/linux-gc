@@ -1194,8 +1194,8 @@ static inline void deactivate_task(struct task_struct *p, struct rq *rq)
 {
 	if (task_contributes_to_load(p))
 		grq.nr_uninterruptible++;
-	grq.nr_uninterruptible -= rq->nr_interruptible;
-	rq->nr_interruptible = 0;
+	grq.nr_uninterruptible += rq->nr_uninterruptible;
+	rq->nr_uninterruptible = 0;
 	p->on_rq = 0;
 	grq.nr_running += rq->nr_running;
 	grq.nr_running--;
@@ -1690,7 +1690,7 @@ static inline void task_preempt_rq(struct task_struct *p, struct rq * rq)
 	}
 
 	if (task_contributes_to_load(p))
-		rq->nr_interruptible++;
+		rq->nr_uninterruptible--;
 	p->on_rq = 1;
 	rq->nr_running++;
 
@@ -7486,7 +7486,7 @@ void __init sched_init(void)
 		rq->user_pc = rq->nice_pc = rq->softirq_pc = rq->system_pc =
 			      rq->iowait_pc = rq->idle_pc = 0;
 		rq->dither = false;
-		rq->nr_running = rq->nr_interruptible = 0;
+		rq->nr_running = rq->nr_uninterruptible = 0;
 #ifdef CONFIG_SMP
 		rq->sd = NULL;
 		rq->rd = NULL;
