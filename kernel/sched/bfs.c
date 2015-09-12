@@ -69,6 +69,8 @@
 #include <linux/init_task.h>
 #include <linux/binfmts.h>
 #include <linux/context_tracking.h>
+/* employ by bfs/vrq */
+#include <linux/cacheinfo.h>
 
 #include <asm/switch_to.h>
 #include <asm/tlb.h>
@@ -1229,9 +1231,9 @@ void set_task_cpu(struct task_struct *p, unsigned int cpu)
 #endif
 
 /*
- * We set the cache count on a task that is descheduled involuntarily meaning
- * it is awaiting further CPU time. Before cache count running out, task will
- * stick to non_scaling cpu or its original cpu.
+ * cached in the task that is descheduled involuntarily meaning it is awaiting
+ * further CPU time. Before cached turning off, task will stick to non_scaling
+ * cpu or its original cpu.
  * Realtime tasks don't use cache count to minimise their latency at all times.
  */
 static inline void cache_task(struct task_struct *p)
@@ -1242,7 +1244,87 @@ static inline void cache_task(struct task_struct *p)
 
 static inline bool is_task_cache_cool(struct task_struct *p, struct rq *rq)
 {
-	return (rq->switch_cost - p->cache_scost > 36);
+	return (rq->switch_cost - p->cache_scost > rq->cache_scost_threshold);
+}
+
+static unsigned int setup_cache_scost_threshold;
+
+static int __init cache_scost_threshold_setup(char *str)
+{
+	get_option(&str, &setup_cache_scost_threshold);
+	return 0;
+}
+early_param("cache_scost_threshold", cache_scost_threshold_setup);
+
+#ifdef CONFIG_64BIT
+#define SCHED_CACHE_SCOST_THRESHOLD_PER_SIZE (3)
+#define SCHED_CACHE_SCOST_LLC_SIZE_SHIFT	(10 + 9) /* 512K */
+#else /* !CONFIG_64BIT */
+#define SCHED_CACHE_SCOST_THRESHOLD_PER_SIZE (2)
+#define SCHED_CACHE_SCOST_LLC_SIZE_SHIFT	(10 + 8) /* 256K */
+#endif /* CONFIG_64BIT */
+
+static inline unsigned int cache_scost_threshold(unsigned int size)
+{
+	return (size * SCHED_CACHE_SCOST_THRESHOLD_PER_SIZE);
+}
+
+static inline unsigned int sched_default_cache_scost_threshold(void)
+{
+	return cache_scost_threshold(1);
+}
+
+static inline unsigned int get_cpu_llc_size(int cpu)
+{
+	struct cpu_cacheinfo *ci = get_cpu_cacheinfo(cpu);
+	struct cacheinfo *leaf;
+	unsigned int num_leaves, i;
+	unsigned int last_level;
+	unsigned int size;
+
+	if (unlikely(NULL == ci))
+		return 0;
+
+	num_leaves = ci->num_leaves;
+	if (0 == num_leaves)
+		return 0;
+
+	last_level = 0;
+	size = 0;
+
+	for (i = 0; i < num_leaves; i++) {
+		leaf = ci->info_list + i;
+		printk(KERN_INFO "bfs/vrq: ci[%d,%d] = %d, %d\n", cpu, i, leaf->level, leaf->size);
+		if (leaf->level > last_level) {
+			last_level = leaf->level;
+			size = 0;
+		}
+		size += leaf->size;
+	}
+
+	return size;
+}
+
+void sched_cpu_cacheinfo_available(int cpu)
+{
+	unsigned long flags;
+	struct rq *rq = cpu_rq(cpu);
+	unsigned int llc_size;
+
+	raw_spin_lock_irqsave(&rq->lock, flags);
+
+	if (likely(0 == setup_cache_scost_threshold)) {
+		llc_size = get_cpu_llc_size(cpu) >> SCHED_CACHE_SCOST_LLC_SIZE_SHIFT;
+		if (0 == llc_size)
+			llc_size = 1;
+		rq->cache_scost_threshold = llc_size * SCHED_CACHE_SCOST_THRESHOLD_PER_SIZE;
+	} else
+		rq->cache_scost_threshold = setup_cache_scost_threshold;
+
+	printk(KERN_INFO "bfs/vrq: CACHE_SCOST_THRESHOLD(%d) = %d\n", cpu,
+		rq->cache_scost_threshold);
+
+	raw_spin_unlock_irqrestore(&rq->lock, flags);
 }
 
 /*
@@ -6082,6 +6164,7 @@ migration_call(struct notifier_block *nfb, unsigned long action, void *hcpu)
 		tasks_cpu_hotplug(cpu);
 		grq.noc = num_online_cpus();
 		cpumask_set_cpu(cpu, &grq.cpu_idle_map);
+
 		rq_grq_unlock_irqrestore(rq, &flags);
 		break;
 
@@ -7497,6 +7580,7 @@ void __init sched_init(void)
 		rq->nr_switches = 0ULL;
 		rq->switch_cost = 0ULL;
 		atomic_set(&rq->nr_iowait, 0);
+		rq->cache_scost_threshold = sched_default_cache_scost_threshold();
 	}
 
 #ifdef CONFIG_SMP

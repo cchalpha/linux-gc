@@ -24,6 +24,8 @@ struct rq {
 	u64 nr_switches;
 	/* switch cost */
 	u64 switch_cost;
+	/* cache switch cost threshold */
+	unsigned int cache_scost_threshold;
 
 	/* Stored data about rq->curr to work outside grq lock */
 	u64 rq_deadline;
