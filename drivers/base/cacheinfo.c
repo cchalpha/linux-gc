@@ -28,6 +28,10 @@
 #include <linux/smp.h>
 #include <linux/sysfs.h>
 
+#ifdef CONFIG_SCHED_BFS
+extern void sched_cpu_cacheinfo_available(int cpu);
+#endif
+
 /* pointer to per cpu cacheinfo */
 static DEFINE_PER_CPU(struct cpu_cacheinfo, ci_cpu_cacheinfo);
 #define ci_cacheinfo(cpu)	(&per_cpu(ci_cpu_cacheinfo, cpu))
@@ -518,6 +522,10 @@ static int cacheinfo_cpu_callback(struct notifier_block *nfb,
 		rc = detect_cache_attributes(cpu);
 		if (!rc)
 			rc = cache_add_dev(cpu);
+#ifdef CONFIG_SCHED_BFS
+		sched_cpu_cacheinfo_available(cpu);
+#endif
+
 		break;
 	case CPU_DEAD:
 		cache_remove_dev(cpu);
@@ -543,6 +551,9 @@ static int __init cacheinfo_sysfs_init(void)
 			pr_err("error populating cacheinfo..cpu%d\n", cpu);
 			goto out;
 		}
+#ifdef CONFIG_SCHED_BFS
+		sched_cpu_cacheinfo_available(cpu);
+#endif
 	}
 	__hotcpu_notifier(cacheinfo_cpu_callback, 0);
 
