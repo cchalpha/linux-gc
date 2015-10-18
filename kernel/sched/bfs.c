@@ -997,7 +997,7 @@ static inline struct rq *task_best_idle_rq(struct task_struct *p)
 {
 	cpumask_t check;
 
-	if (cpumask_and(&check, &p->cpus_allowed, &grq.cpu_idle_map) &&
+	if (cpumask_and(&check, tsk_cpus_allowed(p), &grq.cpu_idle_map) &&
 		cpumask_and(&check, &check, &grq.cpu_preemptable_mask)) {
 		int best_cpu;
 
@@ -1191,15 +1191,15 @@ static inline void
 set_cpus_allowed_common(struct task_struct *p, const struct cpumask *new_mask)
 {
 	cpumask_copy(&p->cpus_allowed_master, new_mask);
-	if (likely(cpumask_and(&p->cpus_allowed,
+	if (likely(cpumask_and(tsk_cpus_allowed(p),
 			       &p->cpus_allowed_master, cpu_online_mask))) {
 		p->nr_cpus_allowed = cpumask_weight(&p->cpus_allowed);
 		return;
 	}
 
-	cpumask_copy(&p->cpus_allowed, new_mask);
+	cpumask_set_cpu(0, tsk_cpus_allowed(p));
 	cpumask_set_cpu(0, &p->cpus_allowed);
-	p->nr_cpus_allowed = cpumask_weight(&p->cpus_allowed);
+	p->nr_cpus_allowed = cpumask_weight(tsk_cpus_allowed(p));
 }
 
 void do_set_cpus_allowed(struct task_struct *p, const struct cpumask *new_mask)
@@ -1495,7 +1495,7 @@ can_preempt(struct task_struct *p, u64 priodl)
  */
 static inline bool needs_other_cpu(struct task_struct *p, int cpu)
 {
-	return !cpumask_test_cpu(cpu, &p->cpus_allowed);
+	return !cpumask_test_cpu(cpu, tsk_cpus_allowed(p));
 }
 
 /*
@@ -1519,7 +1519,7 @@ task_preemptable_rq(struct task_struct *p, int only_preempt_idle)
 	/* check whether any preemptable rq */
 	if (unlikely(!cpumask_and(&check,
 				 &grq.cpu_preemptable_mask,
-				 &p->cpus_allowed)))
+				 tsk_cpus_allowed(p))))
 		return NULL;
 
 	/* check idle rq */
