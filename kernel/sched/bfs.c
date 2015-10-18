@@ -1010,7 +1010,7 @@ static inline struct rq *task_best_idle_rq(struct task_struct *p)
 {
 	cpumask_t check;
 
-	if (cpumask_and(&check, &p->cpus_allowed, &grq.cpu_idle_map) &&
+	if (cpumask_and(&check, tsk_cpus_allowed(p), &grq.cpu_idle_map) &&
 		cpumask_and(&check, &check, &grq.cpu_preemptable_mask)) {
 		int best_cpu;
 
@@ -1198,13 +1198,13 @@ static inline void
 set_cpus_allowed_common(struct task_struct *p, const struct cpumask *new_mask)
 {
 	cpumask_copy(&p->cpus_allowed_master, new_mask);
-	if (likely(cpumask_and(&p->cpus_allowed,
+	if (likely(cpumask_and(tsk_cpus_allowed(p),
 			       &p->cpus_allowed_master, cpu_active_mask))) {
 		p->nr_cpus_allowed = cpumask_weight(new_mask);
 		return;
 	}
 
-	cpumask_set_cpu(0, &p->cpus_allowed);
+	cpumask_set_cpu(0, tsk_cpus_allowed(p));
 	p->nr_cpus_allowed = 1;
 }
 
@@ -1472,7 +1472,7 @@ can_preempt(struct task_struct *p, u64 priodl)
  */
 static inline bool needs_other_cpu(struct task_struct *p, int cpu)
 {
-	return !cpumask_test_cpu(cpu, &p->cpus_allowed);
+	return !cpumask_test_cpu(cpu, tsk_cpus_allowed(p));
 }
 
 /*
@@ -1489,7 +1489,7 @@ task_preemptable_rq(struct task_struct *p, int only_preempt_idle)
 	/* check whether any preemptable rq */
 	if (unlikely(!cpumask_and(&check,
 				 &grq.cpu_preemptable_mask,
-				 &p->cpus_allowed)))
+				 tsk_cpus_allowed(p))))
 		return NULL;
 
 	/* check idle rq */
@@ -6083,8 +6083,10 @@ static void set_rq_offline(struct rq *rq)
 	}
 }
 
-/* Run through task list and find tasks affined to the dead cpu, then remove
- * that cpu from the list, enable cpu0 and set the zerobound flag. */
+/*
+ * Run through task list and find tasks affined to the hotplugged/removed cpu,
+ * renew their cpus_allowed mask.
+ */
 static void tasks_cpu_hotplug(int cpu)
 {
 	struct task_struct *p, *t;
@@ -6096,11 +6098,12 @@ static void tasks_cpu_hotplug(int cpu)
 	do_each_thread(t, p) {
 		if (cpumask_test_cpu(cpu, &p->cpus_allowed_master)) {
 			count++;
-			if (likely(cpumask_and(tsk_cpus_allowed(p),
-					   &p->cpus_allowed_master,
-					   cpu_active_mask)))
-				continue;
-			cpumask_set_cpu(0, tsk_cpus_allowed(p));
+			if (unlikely(!cpumask_and(tsk_cpus_allowed(p),
+						  &p->cpus_allowed_master,
+						  cpu_active_mask)))
+				cpumask_set_cpu(0, tsk_cpus_allowed(p));
+			p->nr_cpus_allowed =
+				cpumask_weight(tsk_cpus_allowed(p));
 		}
 	} while_each_thread(t, p);
 
