@@ -2057,10 +2057,7 @@ static unsigned long nr_uninterruptible(void)
  */
 bool single_task_running(void)
 {
-	if (cpu_rq(smp_processor_id())->soft_affined == 1)
-		return true;
-	else
-		return false;
+	return (raw_rq()->soft_affined == 1);
 }
 EXPORT_SYMBOL(single_task_running);
 
