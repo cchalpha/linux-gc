@@ -5235,6 +5235,21 @@ SYSCALL_DEFINE3(sched_getaffinity, pid_t, pid, unsigned int, len,
 	return ret;
 }
 
+/*
+ * this_rq_lock - lock this runqueue and disable interrupts.
+ */
+static struct rq *this_rq_lock(void)
+	__acquires(rq->lock)
+{
+	struct rq *rq;
+
+	local_irq_disable();
+	rq = this_rq();
+	raw_spin_lock(&rq->lock);
+
+	return rq;
+}
+
 /**
  * sys_sched_yield - yield the current processor to other threads.
  *
@@ -5246,10 +5261,8 @@ SYSCALL_DEFINE3(sched_getaffinity, pid_t, pid, unsigned int, len,
  */
 SYSCALL_DEFINE0(sched_yield)
 {
-	struct rq *rq;
+	struct rq *rq = this_rq_lock();
 
-	rq = this_rq();
-	raw_spin_lock_irq(&rq->lock);
 	schedstat_inc(rq, yld_count);
 	requeue_task(rq->curr);
 
