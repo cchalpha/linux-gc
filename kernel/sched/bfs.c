@@ -224,6 +224,9 @@ static struct root_domain def_root_domain;
 
 #endif /* CONFIG_SMP */
 
+/* cpus with isolated domains */
+cpumask_var_t cpu_isolated_map;
+
 /* There can be only one */
 static struct global_rq grq;
 
@@ -1052,6 +1055,18 @@ void set_task_cpu(struct task_struct *p, unsigned int cpu)
 	task_thread_info(p)->cpu = cpu;
 }
 
+static inline void
+set_cpus_allowed_common(struct task_struct *p, const struct cpumask *new_mask)
+{
+	cpumask_copy(tsk_cpus_allowed(p), new_mask);
+	p->nr_cpus_allowed = cpumask_weight(new_mask);
+}
+
+void do_set_cpus_allowed(struct task_struct *p, const struct cpumask *new_mask)
+{
+	set_cpus_allowed_common(p, new_mask);
+}
+
 static inline void clear_sticky(struct task_struct *p)
 {
 	p->sticky = false;
@@ -1538,8 +1553,8 @@ static inline void ttwu_activate(struct task_struct *p, struct rq *rq,
 static inline void ttwu_post_activation(struct task_struct *p, struct rq *rq,
 					bool success)
 {
-	trace_sched_wakeup(p, success);
 	p->state = TASK_RUNNING;
+	trace_sched_wakeup(p);
 
 	/*
 	 * if a worker is waking up, notify workqueue. Note that on BFS, we
@@ -1601,6 +1616,8 @@ static bool try_to_wake_up(struct task_struct *p, unsigned int state,
 	if (!((unsigned int)p->state & state))
 		goto out_unlock;
 
+	trace_sched_waking(p);
+
 	if (task_queued(p) || task_running(p))
 		goto out_running;
 
@@ -1636,6 +1653,8 @@ static void try_to_wake_up_local(struct task_struct *p)
 
 	if (!(p->state & TASK_NORMAL))
 		return;
+
+	trace_sched_waking(p);
 
 	if (!task_queued(p)) {
 		if (likely(!task_running(p))) {
@@ -1768,7 +1787,7 @@ void wake_up_new_task(struct task_struct *p)
 	p->prio = rq->curr->normal_prio;
 
 	activate_task(p, rq);
-	trace_sched_wakeup_new(p, 1);
+	trace_sched_wakeup_new(p);
 	if (unlikely(p->policy == SCHED_FIFO))
 		goto after_ts_init;
 
@@ -1965,7 +1984,6 @@ static struct rq *finish_task_switch(struct task_struct *prev)
 	 */
 	prev_state = prev->state;
 	vtime_task_switch(prev);
-	finish_arch_switch(prev);
 	perf_event_task_sched_in(prev, current);
 	finish_lock_switch(rq, prev);
 	finish_arch_post_lock_switch();
@@ -3982,6 +4000,88 @@ static inline struct task_struct *find_process_by_pid(pid_t pid)
 	return pid ? find_task_by_vpid(pid) : current;
 }
 
+#ifdef CONFIG_SMP
+/*
+ * Change a given task's CPU affinity. Migrate the thread to a
+ * proper CPU and schedule it away if the CPU it's executing on
+ * is removed from the allowed bitmask.
+ *
+ * NOTE: the caller must have a valid reference to the task, the
+ * task must not exit() & deallocate itself prematurely. The
+ * call is not atomic; no spinlocks may be held.
+ */
+static int __set_cpus_allowed_ptr(struct task_struct *p,
+				  const struct cpumask *new_mask, bool check)
+{
+	bool running_wrong = false;
+	bool queued = false;
+	unsigned long flags;
+	struct rq *rq;
+	int ret = 0;
+
+	rq = task_grq_lock(p, &flags);
+
+	/*
+	 * Must re-check here, to close a race against __kthread_bind(),
+	 * sched_setaffinity() is not guaranteed to observe the flag.
+	 */
+	if (check && (p->flags & PF_NO_SETAFFINITY)) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	if (cpumask_equal(tsk_cpus_allowed(p), new_mask))
+		goto out;
+
+	if (!cpumask_intersects(new_mask, cpu_active_mask)) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	queued = task_queued(p);
+
+	do_set_cpus_allowed(p, new_mask);
+
+	/* Can the task run on the task's current CPU? If so, we're done */
+	if (cpumask_test_cpu(task_cpu(p), new_mask))
+		goto out;
+
+	if (task_running(p)) {
+		/* Task is running on the wrong cpu now, reschedule it. */
+		if (rq == this_rq()) {
+			set_tsk_need_resched(p);
+			running_wrong = true;
+		} else
+			resched_task(p);
+	} else
+		set_task_cpu(p, cpumask_any_and(cpu_active_mask, new_mask));
+
+out:
+	if (queued)
+		try_preempt(p, rq);
+	task_grq_unlock(&flags);
+
+	if (running_wrong)
+		preempt_schedule_common();
+
+	return ret;
+}
+
+int set_cpus_allowed_ptr(struct task_struct *p, const struct cpumask *new_mask)
+{
+	return __set_cpus_allowed_ptr(p, new_mask, false);
+}
+EXPORT_SYMBOL_GPL(set_cpus_allowed_ptr);
+
+#else
+static inline int
+__set_cpus_allowed_ptr(struct task_struct *p,
+		       const struct cpumask *new_mask, bool check)
+{
+	return set_cpus_allowed_ptr(p, new_mask);
+}
+#endif
+
 /* Actually do priority change: must hold grq lock. */
 static void __setscheduler(struct task_struct *p, struct rq *rq, int policy,
 			   int prio, bool keep_boost)
@@ -4607,7 +4707,7 @@ long sched_setaffinity(pid_t pid, const struct cpumask *in_mask)
 	cpuset_cpus_allowed(p, cpus_allowed);
 	cpumask_and(new_mask, in_mask, cpus_allowed);
 again:
-	retval = set_cpus_allowed_ptr(p, new_mask);
+	retval = __set_cpus_allowed_ptr(p, new_mask, true);
 
 	if (!retval) {
 		cpuset_cpus_allowed(p, cpus_allowed);
@@ -5097,13 +5197,6 @@ void dump_cpu_task(int cpu)
 	sched_show_task(cpu_curr(cpu));
 }
 
-#ifdef CONFIG_SMP
-void do_set_cpus_allowed(struct task_struct *p, const struct cpumask *new_mask)
-{
-	cpumask_copy(tsk_cpus_allowed(p), new_mask);
-}
-#endif
-
 /**
  * init_idle - set up an idle thread for a given CPU
  * @idle: task in question
@@ -5117,7 +5210,10 @@ void init_idle(struct task_struct *idle, int cpu)
 	struct rq *rq = cpu_rq(cpu);
 	unsigned long flags;
 
-	time_grq_lock(rq, &flags);
+	raw_spin_lock_irqsave(&idle->pi_lock, flags);
+	grq_lock();
+	update_clocks(rq);
+
 	idle->last_ran = rq->clock_task;
 	idle->state = TASK_RUNNING;
 	/* Setting prio to illegal value shouldn't matter when never queued */
@@ -5126,20 +5222,29 @@ void init_idle(struct task_struct *idle, int cpu)
 	idle->smt_bias = 0;
 #endif
 	set_rq_task(rq, idle);
-	do_set_cpus_allowed(idle, get_cpu_mask(cpu));
+#ifdef CONFIG_SMP
+	/*
+	 * Its possible that init_idle() gets called multiple times on a task,
+	 * in that case do_set_cpus_allowed() will not do the right thing.
+	 *
+	 * And since this is boot we can forgo the serialization.
+	 */
+	set_cpus_allowed_common(idle, get_cpu_mask(cpu));
+#endif
 	/* Silence PROVE_RCU */
 	rcu_read_lock();
 	set_task_cpu(idle, cpu);
 	rcu_read_unlock();
 	rq->curr = rq->idle = idle;
 	idle->on_cpu = 1;
-	grq_unlock_irqrestore(&flags);
+	grq_unlock();
+	raw_spin_unlock_irqrestore(&idle->pi_lock, flags);
 
 	/* Set the preempt count _outside_ the spinlocks! */
 	init_idle_preempt_count(idle, cpu);
 
 	ftrace_graph_init_idle_task(idle, cpu);
-#if defined(CONFIG_SMP)
+#ifdef CONFIG_SMP
 	sprintf(idle->comm, "%s/%d", INIT_TASK_COMM, cpu);
 #endif
 }
@@ -5240,18 +5345,21 @@ int get_nohz_timer_target(void)
 	int i, cpu = smp_processor_id();
 	struct sched_domain *sd;
 
-	if (!idle_cpu(cpu))
+	if (!idle_cpu(cpu) && is_housekeeping_cpu(cpu))
 		return cpu;
 
 	rcu_read_lock();
 	for_each_domain(cpu, sd) {
 		for_each_cpu(i, sched_domain_span(sd)) {
-			if (!idle_cpu(i)) {
+			if (!idle_cpu(i) && is_housekeeping_cpu(cpu)) {
 				cpu = i;
 				goto unlock;
 			}
 		}
 	}
+
+	if (!is_housekeeping_cpu(cpu))
+		cpu = housekeeping_any_cpu();
 unlock:
 	rcu_read_unlock();
 	return cpu;
@@ -5282,78 +5390,19 @@ void wake_up_nohz_cpu(int cpu)
 }
 #endif /* CONFIG_NO_HZ_COMMON */
 
-/*
- * Change a given task's CPU affinity. Migrate the thread to a
- * proper CPU and schedule it away if the CPU it's executing on
- * is removed from the allowed bitmask.
- *
- * NOTE: the caller must have a valid reference to the task, the
- * task must not exit() & deallocate itself prematurely. The
- * call is not atomic; no spinlocks may be held.
- */
-int set_cpus_allowed_ptr(struct task_struct *p, const struct cpumask *new_mask)
-{
-	bool running_wrong = false;
-	bool queued = false;
-	unsigned long flags;
-	struct rq *rq;
-	int ret = 0;
-
-	rq = task_grq_lock(p, &flags);
-
-	if (cpumask_equal(tsk_cpus_allowed(p), new_mask))
-		goto out;
-
-	if (!cpumask_intersects(new_mask, cpu_active_mask)) {
-		ret = -EINVAL;
-		goto out;
-	}
-
-	queued = task_queued(p);
-
-	do_set_cpus_allowed(p, new_mask);
-
-	/* Can the task run on the task's current CPU? If so, we're done */
-	if (cpumask_test_cpu(task_cpu(p), new_mask))
-		goto out;
-
-	if (task_running(p)) {
-		/* Task is running on the wrong cpu now, reschedule it. */
-		if (rq == this_rq()) {
-			set_tsk_need_resched(p);
-			running_wrong = true;
-		} else
-			resched_task(p);
-	} else
-		set_task_cpu(p, cpumask_any_and(cpu_active_mask, new_mask));
-
-out:
-	if (queued)
-		try_preempt(p, rq);
-	task_grq_unlock(&flags);
-
-	if (running_wrong)
-		preempt_schedule_common();
-
-	return ret;
-}
-EXPORT_SYMBOL_GPL(set_cpus_allowed_ptr);
-
 #ifdef CONFIG_HOTPLUG_CPU
-extern struct task_struct *cpu_stopper_task;
 /* Run through task list and find tasks affined to the dead cpu, then remove
  * that cpu from the list, enable cpu0 and set the zerobound flag. */
 static void bind_zero(int src_cpu)
 {
-	struct task_struct *p, *t, *stopper;
+	struct task_struct *p, *t;
 	int bound = 0;
 
 	if (src_cpu == 0)
 		return;
 
-	stopper = per_cpu(cpu_stopper_task, src_cpu);
 	do_each_thread(t, p) {
-		if (p != stopper && cpumask_test_cpu(src_cpu, tsk_cpus_allowed(p))) {
+		if (cpumask_test_cpu(src_cpu, tsk_cpus_allowed(p))) {
 			cpumask_clear_cpu(src_cpu, tsk_cpus_allowed(p));
 			cpumask_set_cpu(0, tsk_cpus_allowed(p));
 			p->zerobound = true;
@@ -5607,8 +5656,7 @@ static void register_sched_domain_sysctl(void)
 /* may be called multiple times per register */
 static void unregister_sched_domain_sysctl(void)
 {
-	if (sd_sysctl_header)
-		unregister_sysctl_table(sd_sysctl_header);
+	unregister_sysctl_table(sd_sysctl_header);
 	sd_sysctl_header = NULL;
 	if (sd_ctl_dir[0].child)
 		sd_free_ctl_entry(&sd_ctl_dir[0].child);
@@ -6033,9 +6081,6 @@ cpu_attach_domain(struct sched_domain *sd, struct root_domain *rd, int cpu)
 	rcu_assign_pointer(rq->sd, sd);
 	destroy_sched_domains(tmp, cpu);
 }
-
-/* cpus with isolated domains */
-cpumask_var_t cpu_isolated_map;
 
 /* Setup the mask of cpus configured for isolated domains */
 static int __init isolated_cpu_setup(char *str)
@@ -6969,9 +7014,6 @@ void __init sched_init_smp(void)
 	alloc_cpumask_var(&non_isolated_cpus, GFP_KERNEL);
 	alloc_cpumask_var(&fallback_doms, GFP_KERNEL);
 
-	/* nohz_full won't take effect without isolating the cpus. */
-	tick_nohz_full_add_cpus_to(cpu_isolated_map);
-
 	sched_init_numa();
 
 	/*
@@ -7398,58 +7440,89 @@ drop_precision:
 }
 
 /*
- * Adjust tick based cputime random precision against scheduler
- * runtime accounting.
+ * Tick based cputime accounting depend on random scheduling timeslices of a
+ * task to be interrupted or not by the timer.  Depending on these
+ * circumstances, the number of these interrupts may be over or
+ * under-optimistic, matching the real user and system cputime with a variable
+ * precision.
+ *
+ * Fix this by scaling these tick based values against the total runtime
+ * accounted by the CFS scheduler.
+ *
+ * This code provides the following guarantees:
+ *
+ *   stime + utime == rtime
+ *   stime_i+1 >= stime_i, utime_i+1 >= utime_i
+ *
+ * Assuming that rtime_i+1 >= rtime_i.
  */
 static void cputime_adjust(struct task_cputime *curr,
-			   struct cputime *prev,
+			   struct prev_cputime *prev,
 			   cputime_t *ut, cputime_t *st)
 {
-	cputime_t rtime, stime, utime, total;
+	cputime_t rtime, stime, utime;
+	unsigned long flags;
 
-	stime = curr->stime;
-	total = stime + curr->utime;
-
-	/*
-	 * Tick based cputime accounting depend on random scheduling
-	 * timeslices of a task to be interrupted or not by the timer.
-	 * Depending on these circumstances, the number of these interrupts
-	 * may be over or under-optimistic, matching the real user and system
-	 * cputime with a variable precision.
-	 *
-	 * Fix this by scaling these tick based values against the total
-	 * runtime accounted by the CFS scheduler.
-	 */
+	/* Serialize concurrent callers such that we can honour our guarantees */
+	raw_spin_lock_irqsave(&prev->lock, flags);
 	rtime = nsecs_to_cputime(curr->sum_exec_runtime);
 
 	/*
-	 * Update userspace visible utime/stime values only if actual execution
-	 * time is bigger than already exported. Note that can happen, that we
-	 * provided bigger values due to scaling inaccuracy on big numbers.
+	 * This is possible under two circumstances:
+	 *  - rtime isn't monotonic after all (a bug);
+	 *  - we got reordered by the lock.
+	 *
+	 * In both cases this acts as a filter such that the rest of the code
+	 * can assume it is monotonic regardless of anything else.
 	 */
 	if (prev->stime + prev->utime >= rtime)
 		goto out;
 
-	if (total) {
-		stime = scale_stime((__force u64)stime,
-				    (__force u64)rtime, (__force u64)total);
-		utime = rtime - stime;
-	} else {
+	stime = curr->stime;
+	utime = curr->utime;
+
+	if (utime == 0) {
 		stime = rtime;
-		utime = 0;
+		goto update;
 	}
 
-	/*
-	 * If the tick based count grows faster than the scheduler one,
-	 * the result of the scaling may go backward.
-	 * Let's enforce monotonicity.
-	 */
-	prev->stime = max(prev->stime, stime);
-	prev->utime = max(prev->utime, utime);
+	if (stime == 0) {
+		utime = rtime;
+		goto update;
+	}
 
+	stime = scale_stime((__force u64)stime, (__force u64)rtime,
+			    (__force u64)(stime + utime));
+
+	/*
+	 * Make sure stime doesn't go backwards; this preserves monotonicity
+	 * for utime because rtime is monotonic.
+	 *
+	 *  utime_i+1 = rtime_i+1 - stime_i
+	 *            = rtime_i+1 - (rtime_i - utime_i)
+	 *            = (rtime_i+1 - rtime_i) + utime_i
+	 *            >= utime_i
+	 */
+	if (stime < prev->stime)
+		stime = prev->stime;
+	utime = rtime - stime;
+
+	/*
+	 * Make sure utime doesn't go backwards; this still preserves
+	 * monotonicity for stime, analogous argument to above.
+	 */
+	if (utime < prev->utime) {
+		utime = prev->utime;
+		stime = rtime - utime;
+	}
+
+update:
+	prev->stime = stime;
+	prev->utime = utime;
 out:
 	*ut = prev->utime;
 	*st = prev->stime;
+	raw_spin_unlock_irqrestore(&prev->lock, flags);
 }
 
 void task_cputime_adjusted(struct task_struct *p, cputime_t *ut, cputime_t *st)
