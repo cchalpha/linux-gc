@@ -1408,6 +1408,7 @@ struct task_struct {
 #endif
 	u64 cached;		/* task cached indicator */
 	u64 cache_scost;/* last switch cost when schedul off a rq */
+	u64 policy_cached_timeout;
 	unsigned long rt_timeout;
 #else /* CONFIG_SCHED_BFS */
 	const struct sched_class *sched_class;

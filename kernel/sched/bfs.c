@@ -142,12 +142,39 @@ void print_scheduler_version(void)
 	printk(KERN_INFO "BFS enhancement patchset v4.3_0465_3 by Alfred Chen.\n");
 }
 
+/* BFS default rr interval in ms */
+#define DEFAULT_RR_INTERVAL (6)
+
 /*
  * This is the time all tasks within the same priority round robin.
  * Value is in ms and set to a minimum of 6ms. Scales with number of cpus.
  * Tunable via /proc interface.
  */
-int rr_interval __read_mostly = 6;
+int rr_interval __read_mostly = DEFAULT_RR_INTERVAL;
+
+/* Unlimited cached task wait time in ms */
+#define UNLIMITED_CACHED_WAITTIME (1000)
+
+/*
+ * Normal policy task cached wait time, based on Preemption Model Kernel config
+ */
+#ifdef CONFIG_PREEMPT_NONE
+#define NORMAL_POLICY_CACHED_WAITTIME UNLIMITED_CACHED_WAITTIME
+#else
+#define NORMAL_POLICY_CACHED_WAITTIME DEFAULT_RR_INTERVAL
+#endif
+
+/*
+ * task policy cached timeout (in ns)
+ */
+static unsigned long policy_cached_timeout[] = {
+	MS_TO_NS(NORMAL_POLICY_CACHED_WAITTIME),	/* NORMAL */
+	MS_TO_NS(DEFAULT_RR_INTERVAL),			/* FIFO */
+	MS_TO_NS(DEFAULT_RR_INTERVAL),			/* RR */
+	MS_TO_NS(UNLIMITED_CACHED_WAITTIME),		/* BATCH */
+	MS_TO_NS(DEFAULT_RR_INTERVAL),			/* ISO */
+	MS_TO_NS(UNLIMITED_CACHED_WAITTIME)		/* IDLE */
+};
 
 /*
  * sched_iso_cpu - sysctl which determines the cpu percentage SCHED_ISO tasks
@@ -1221,13 +1248,29 @@ void do_set_cpus_allowed(struct task_struct *p, const struct cpumask *new_mask)
  */
 static inline void cache_task(struct task_struct *p)
 {
-	if(!rt_task(p))
+	if(!rt_task(p)) {
 		p->cached = 1ULL;
+		p->policy_cached_timeout = p->last_ran +
+			policy_cached_timeout[p->policy];
+	}
 }
 
 static inline bool is_task_cache_cool(struct task_struct *p, struct rq *rq)
 {
 	return (rq->switch_cost - p->cache_scost > rq->cache_scost_threshold);
+}
+
+static inline bool
+is_task_policy_cached_timeout(struct task_struct *p, struct rq *rq)
+{
+	return (rq->clock_task > p->policy_cached_timeout);
+}
+
+static inline bool
+is_task_should_cached_off(struct task_struct *p, struct rq *rq)
+{
+	return is_task_cache_cool(p, rq) ||
+	       is_task_policy_cached_timeout(p, rq);
 }
 
 static unsigned int setup_cache_scost_threshold;
@@ -3541,9 +3584,9 @@ task_struct *earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *
 			 * against its deadline when not, based on cpu cache
 			 * locality.
 			 */
-			if (p->cached) {
-				if (is_task_cache_cool(p, task_rq(p)))
-					p->cached = 0ULL;
+			if (p->cached == 1ULL) {
+				if (is_task_should_cached_off(p, task_rq(p)))
+					p->cached = 2ULL;
 				if (scaling_rq(rq) && task_cpu(p) != cpu)
 					continue;
 				dl = p->deadline << locality_diff(p, rq);
