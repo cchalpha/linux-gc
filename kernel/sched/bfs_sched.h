@@ -22,7 +22,6 @@ struct rq {
 	raw_spinlock_t lock;
 
 	struct task_struct *curr, *idle, *stop;
-	struct task_struct *try_preempt_tsk;
 	struct task_struct *preempt_task;
 	struct mm_struct *prev_mm;
 
