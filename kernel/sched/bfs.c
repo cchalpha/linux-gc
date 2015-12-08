@@ -2205,7 +2205,6 @@ context_switch(struct rq *rq, struct task_struct *prev,
 	       struct task_struct *next)
 {
 	struct mm_struct *mm, *oldmm;
-	struct rq *prq;
 
 	prepare_task_switch(rq, prev, next);
 
@@ -2244,22 +2243,7 @@ context_switch(struct rq *rq, struct task_struct *prev,
 	switch_to(prev, next, prev);
 	barrier();
 
-	/*
-	 * Before unlock rq, record all rq need to be reschedule in the stack
-	 */
-	rq = this_rq();
-	if (rq->try_preempt_tsk) {
-		if (current != rq->try_preempt_tsk)
-			prq = task_best_idle_rq(rq->try_preempt_tsk);
-		else
-			prq = NULL;
-		rq->try_preempt_tsk = NULL;
-	} else
-		prq = NULL;
-
 	rq = finish_task_switch(prev);
-
-	preempt_rq(prq);
 
 	return rq;
 }
@@ -3773,7 +3757,6 @@ __need_other_cpu_choose_task##subfix(struct rq *rq,\
 \
 	enqueue_task(prev, rq);\
 	inc_qnr();\
-	rq->try_preempt_tsk = prev;\
 \
 	return pick_next_task##subfix(rq, cpu);\
 }
@@ -3808,8 +3791,6 @@ activate_choose_task##subfix(struct rq *rq, int cpu,\
 		inc_qnr();\
 		if (!rt_task(next))\
 			cache_task(prev);\
-		else\
-			rq->try_preempt_tsk = prev;\
 \
 		return next;\
 	}\
@@ -3820,16 +3801,9 @@ activate_choose_task##subfix(struct rq *rq, int cpu,\
 		enqueue_task(prev, rq);\
 		inc_qnr();\
 		next = earliest_deadline_task(rq, cpu, rq->idle);\
-		if (likely(prev != next)) {\
-			/*\
-			 * Don't stick tasks when a real time task is going\
-			 * to run as they may literally get stuck.\
-			 */\
+		if (likely(prev != next))\
 			if (!rt_task(next))\
 				cache_task(prev);\
-			else\
-				rq->try_preempt_tsk = prev;\
-		}\
 	} else {\
 		/*\
 		 * We now know prev is the only thing that is\
@@ -3877,7 +3851,6 @@ is_task_deactivate_sched(struct rq *rq, int cpu, struct task_struct *prev,
 						_grq_lock();
 						try_to_wake_up_local(to_wakeup);
 						_grq_unlock();
-						rq->try_preempt_tsk = to_wakeup;
 					}
 				}
 			}
@@ -7697,7 +7670,6 @@ void __init sched_init(void)
 #endif
 	for_each_possible_cpu(i) {
 		rq = cpu_rq(i);
-		rq->try_preempt_tsk = NULL;
 		raw_spin_lock_init(&rq->lock);
 		rq->schedulable = 1;
 		rq->choose_task_func = idle_choose_task;
