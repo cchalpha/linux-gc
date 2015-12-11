@@ -1227,13 +1227,11 @@ void do_set_cpus_allowed(struct task_struct *p, const struct cpumask *new_mask)
  * stick to non_scaling cpu or its original cpu.
  * Realtime tasks don't use cache count to minimise their latency at all times.
  */
-static inline void cache_task(struct task_struct *p)
+static inline void cache_task(struct task_struct *p, unsigned long state)
 {
-	if(!rt_task(p)) {
-		p->cached = 1ULL;
-		p->policy_cached_timeout = p->last_ran +
-			policy_cached_timeout[p->policy];
-	}
+	p->cached = state;
+	p->policy_cached_timeout = p->last_ran +
+		policy_cached_timeout[p->policy];
 }
 
 static inline bool
@@ -1242,10 +1240,15 @@ is_task_policy_cached_timeout(struct task_struct *p, struct rq *rq)
 	return (rq->clock_task > p->policy_cached_timeout);
 }
 
+/* return task cache state */
 static inline bool
-is_task_should_cached_off(struct task_struct *p, struct rq *rq)
+check_task_cached_off(struct task_struct *p, struct rq *rq)
 {
-	return is_task_policy_cached_timeout(p, rq);
+	if (unlikely(is_task_policy_cached_timeout(p, rq))) {
+		p->cached = 4ULL;
+		return false;
+	}
+	return true;
 }
 
 /*
@@ -1819,9 +1822,8 @@ static void try_to_wake_up_local(struct task_struct *p)
 
 	trace_sched_waking(p);
 
-	if (!task_queued(p)) {
+	if (!task_queued(p))
 		ttwu_activate(p, rq);
-	}
 	ttwu_do_wakeup(rq, p, 0);
 	ttwu_stat(p, smp_processor_id(), 0);
 }
@@ -1878,7 +1880,7 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 	p->stime_pc =
 	p->utime_pc = 0;
 
-	p->cached = 0ULL;
+	cache_task(p, 1ULL);
 
 	/*
 	 * Revert to default priority/policy on fork if requested.
@@ -3445,13 +3447,19 @@ task_struct *earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *
 			 */
 			tcpu = task_cpu(p);
 
-			if (p->cached) {
-				if (is_task_should_cached_off(p, task_rq(p)))
-					p->cached = 0ULL;
-				else if (tcpu != cpu && scaling_rq(rq))
+			if (likely(3ULL == p->cached)) {
+				if(unlikely(tcpu != cpu && scaling_rq(rq))) {
+					check_task_cached_off(p, task_rq(p));
 					continue;
+				}
+				dl = p->deadline << locality_diff(tcpu, rq);
+			} else if (likely(1ULL == p->cached &&
+					  check_task_cached_off(p, task_rq(p))))
+				{
+				dl = p->deadline << locality_diff(tcpu, rq);
+			} else {
+				dl = p->deadline;
 			}
-			dl = p->deadline << locality_diff(tcpu, rq);
 
 			if (deadline_before(dl, earliest_deadline)) {
 				earliest_deadline = dl;
@@ -3739,6 +3747,7 @@ deactivate_choose_task##subfix(struct rq *rq,\
 	next = pick_next_task##subfix(rq, cpu);\
 	_grq_unlock();\
 	rq->grq_locked = false;\
+	cache_task(prev, 3ULL);\
 \
 	return next;\
 }
@@ -3790,8 +3799,7 @@ activate_choose_task##subfix(struct rq *rq, int cpu,\
 		/* put prev back to grq */\
 		enqueue_task(prev, rq);\
 		inc_qnr();\
-		if (!rt_task(next))\
-			cache_task(prev);\
+		cache_task(prev, 3ULL);\
 \
 		return next;\
 	}\
@@ -3803,10 +3811,10 @@ activate_choose_task##subfix(struct rq *rq, int cpu,\
 		rq->grq_locked = true;\
 		enqueue_task(prev, rq);\
 		inc_qnr();\
+		cache_task(prev, 3ULL);\
 		next = earliest_deadline_task(rq, cpu, rq->idle);\
-		if (likely(prev != next))\
-			if (!rt_task(next))\
-				cache_task(prev);\
+		if (likely(next == prev))\
+			prev->cached = 0ULL;\
 	} else {\
 		/*\
 		 * We now know prev is the only thing that is\
@@ -6233,6 +6241,8 @@ static void tasks_cpu_hotplug(int cpu)
 				cpumask_set_cpu(0, tsk_cpus_allowed(p));
 			p->nr_cpus_allowed =
 				cpumask_weight(tsk_cpus_allowed(p));
+			if (p->cached == 1ULL && task_cpu(p) == cpu)
+				p->cached = 4ULL;
 		}
 	} while_each_thread(t, p);
 
