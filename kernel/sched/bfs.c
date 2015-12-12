@@ -135,7 +135,7 @@
 
 void print_scheduler_version(void)
 {
-	printk(KERN_INFO "BFS CPU scheduler v0.465 by Con Kolivas.\n");
+	printk(KERN_INFO "BFS CPU scheduler v0.466 by Con Kolivas.\n");
 }
 
 /*
@@ -861,9 +861,9 @@ static inline bool scaling_rq(struct rq *rq)
 	return rq->scaling;
 }
 
-static inline int locality_diff(struct task_struct *p, struct rq *rq)
+static inline int locality_diff(int cpu, struct rq *rq)
 {
-	return rq->cpu_locality[task_cpu(p)];
+	return rq->cpu_locality[cpu];
 }
 #else /* CONFIG_SMP */
 static inline void set_cpuidle_map(int cpu)
@@ -2680,20 +2680,6 @@ void account_idle_time(cputime_t cputime)
 {
 }
 
-void update_cpu_load_nohz(void)
-{
-}
-
-#ifdef CONFIG_NO_HZ_COMMON
-void calc_load_enter_idle(void)
-{
-}
-
-void calc_load_exit_idle(void)
-{
-}
-#endif /* CONFIG_NO_HZ_COMMON */
-
 /*
  * Account guest cpu time to a process.
  * @p: the process that the cpu time gets accounted to
@@ -3202,6 +3188,7 @@ task_struct *earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *
 		 */
 		earliest_deadline = ~0ULL;
 		list_for_each_entry(p, queue, run_list) {
+			int tcpu;
 			u64 dl;
 
 			/* Make sure cpu affinity is ok */
@@ -3219,12 +3206,10 @@ task_struct *earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *
 			 * against its deadline when not, based on cpu cache
 			 * locality.
 			 */
-			if (task_sticky(p) && task_rq(p) != rq) {
-				if (scaling_rq(rq))
-					continue;
-				dl = p->deadline << locality_diff(p, rq);
-			} else
-				dl = p->deadline;
+			tcpu = task_cpu(p);
+			if (tcpu != cpu && task_sticky(p) && scaling_rq(rq))
+				continue;
+			dl = p->deadline << locality_diff(tcpu, rq);
 
 			if (deadline_before(dl, earliest_deadline)) {
 				earliest_deadline = dl;
