@@ -3759,7 +3759,7 @@ static inline bool is_no_dedicated_task(int cpu)
 
 #define PICK_NEXT_TASKK_NO_DEDICATED_TASK_HANDLE
 #define PICK_NEXT_TASKK_NO_DEDICATED_TASK_HANDLE_ns \
-	if (likely(rq->schedulable == 0 && is_no_dedicated_task(cpu))) {\
+	if (likely(is_no_dedicated_task(cpu))) {\
 		schedstat_inc(rq, sched_goidle);\
 \
 		return rq->idle;\
@@ -3793,7 +3793,7 @@ PICK_NEXT_TASK_FUNC_DEFINE(_ns);
 
 #define IDLE_NO_DEDICATED_TASK_HANDLE
 #define IDLE_NO_DEDICATED_TASK_HANDLE_ns \
-	if (likely(rq->schedulable == 0 && is_no_dedicated_task(cpu))) {\
+	if (likely(is_no_dedicated_task(cpu))) {\
 		schedstat_inc(rq, sched_goidle);\
 \
 		return prev;\
@@ -3875,7 +3875,7 @@ __NEED_OTHER_CPU_CHOOSE_TASK_FUNC_DEFINE(_ns);
 #define ACTIVATE_NO_DEDICATED_TASK_HANDLE
 #define ACTIVATE_NO_DEDICATED_TASK_HANDLE_ns \
 	/* continue run on prev if rq is schedulable off */\
-	if (likely(rq->schedulable == 0 && is_no_dedicated_task(cpu))) {\
+	if (likely(is_no_dedicated_task(cpu))) {\
 		rq->grq_locked = false;\
 		next = prev;\
 		set_rq_task(rq, prev);\
