@@ -3448,10 +3448,9 @@ task_struct *earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *
 			tcpu = task_cpu(p);
 
 			if (likely(3ULL == p->cached)) {
-				if(unlikely(tcpu != cpu && scaling_rq(rq))) {
-					check_task_cached_off(p, task_rq(p));
+				if(unlikely(tcpu != cpu && scaling_rq(rq)))
 					continue;
-				}
+				check_task_cached_off(p, task_rq(p));
 				dl = p->deadline << locality_diff(tcpu, rq);
 			} else if (likely(1ULL == p->cached &&
 					  check_task_cached_off(p, task_rq(p))))
