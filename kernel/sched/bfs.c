@@ -73,6 +73,7 @@
 #include <linux/binfmts.h>
 #include <linux/context_tracking.h>
 #include <linux/sched/prio.h>
+#include <linux/stop_machine.h>
 
 #include <asm/irq_regs.h>
 #include <asm/switch_to.h>
@@ -1692,7 +1693,6 @@ static void try_to_wake_up_local(struct task_struct *p)
  */
 int wake_up_process(struct task_struct *p)
 {
-	WARN_ON(task_is_stopped_or_traced(p));
 	return try_to_wake_up(p, TASK_NORMAL, 0);
 }
 EXPORT_SYMBOL(wake_up_process);
@@ -1948,7 +1948,6 @@ prepare_task_switch(struct rq *rq, struct task_struct *prev,
 	fire_sched_out_preempt_notifiers(prev, next);
 	prepare_lock_switch(rq, next);
 	prepare_arch_switch(next);
-	trace_sched_switch(prev, next);
 }
 
 /**
@@ -1977,6 +1976,22 @@ static struct rq *finish_task_switch(struct task_struct *prev)
 	struct rq *rq = this_rq();
 	struct mm_struct *mm = rq->prev_mm;
 	long prev_state;
+
+	/*
+	 * The previous task will have left us with a preempt_count of 2
+	 * because it left us after:
+	 *
+	 *	schedule()
+	 *	  preempt_disable();			// 1
+	 *	  __schedule()
+	 *	    raw_spin_lock_irq(&rq->lock)	// 2
+	 *
+	 * Also, see FORK_PREEMPT_COUNT.
+	 */
+	if (WARN_ONCE(preempt_count() != 2*PREEMPT_DISABLE_OFFSET,
+		      "corrupted preempt_count: %s/%d/0x%x\n",
+		      current->comm, current->pid, preempt_count()))
+		preempt_count_set(FORK_PREEMPT_COUNT);
 
 	rq->prev_mm = NULL;
 
@@ -2020,8 +2035,15 @@ asmlinkage __visible void schedule_tail(struct task_struct *prev)
 {
 	struct rq *rq;
 
-	/* finish_task_switch() drops rq->lock and enables preemption */
-	preempt_disable();
+	/*
+	 * New tasks start with FORK_PREEMPT_COUNT, see there and
+	 * finish_task_switch() for details.
+	 *
+	 * finish_task_switch() will drop rq->lock() and lower preempt_count
+	 * and the preempt_enable() will end up enabling preemption (on
+	 * PREEMPT_COUNT kernels).
+	 */
+
 	rq = finish_task_switch(prev);
 	preempt_enable();
 
@@ -3300,15 +3322,12 @@ static noinline void __schedule_bug(struct task_struct *prev)
 static inline void schedule_debug(struct task_struct *prev)
 {
 #ifdef CONFIG_SCHED_STACK_END_CHECK
-	BUG_ON(unlikely(task_stack_end_corrupted(prev)));
+	BUG_ON(task_stack_end_corrupted(prev));
 #endif
-	/*
-	 * Test if we are atomic. Since do_exit() needs to call into
-	 * schedule() atomically, we ignore that path. Otherwise whine
-	 * if we are scheduling when we should not.
-	 */
-	if (unlikely(in_atomic_preempt_off() && prev->state != TASK_DEAD))
+	if (unlikely(in_atomic_preempt_off())) {
 		__schedule_bug(prev);
+		preempt_count_set(PREEMPT_DISABLED);
+	}
 	rcu_sleep_check();
 
 	profile_hit(SCHED_PROFILING, __builtin_return_address(0));
@@ -3438,7 +3457,7 @@ static void wake_smt_siblings(int __maybe_unused cpu) {}
  *
  * WARNING: must be called with preemption disabled!
  */
-static void __sched __schedule(void)
+static void notrace __sched __schedule(bool preempt)
 {
 	struct task_struct *prev, *next, *idle;
 	unsigned long *switch_count;
@@ -3450,6 +3469,17 @@ static void __sched __schedule(void)
 	rq = cpu_rq(cpu);
 	rcu_note_context_switch();
 	prev = rq->curr;
+
+	/*
+	 * do_exit() calls schedule() with preemption disabled as an exception;
+	 * however we must fix that up, otherwise the next task will see an
+	 * inconsistent (higher) preempt count.
+	 *
+	 * It also avoids the below schedule_debug() test from complaining
+	 * about this.
+	 */
+	if (unlikely(prev->state == TASK_DEAD))
+		preempt_enable_no_resched_notrace();
 
 	schedule_debug(prev);
 
@@ -3463,7 +3493,7 @@ static void __sched __schedule(void)
 	lockdep_pin_lock(&grq.lock);
 
 	switch_count = &prev->nivcsw;
-	if (prev->state && !(preempt_count() & PREEMPT_ACTIVE)) {
+	if (!preempt && prev->state) {
 		if (unlikely(signal_pending_state(prev->state, prev))) {
 			prev->state = TASK_RUNNING;
 		} else {
@@ -3568,6 +3598,7 @@ static void __sched __schedule(void)
 		rq->curr = next;
 		++*switch_count;
 
+		trace_sched_switch(preempt, prev, next);
 		rq = context_switch(rq, prev, next); /* unlocks the grq */
 		cpu = cpu_of(rq);
 		idle = rq->idle;
@@ -3582,7 +3613,6 @@ rerun_prev_unlocked:
 static inline void sched_submit_work(struct task_struct *tsk)
 {
 	if (!tsk->state || tsk_is_pi_blocked(tsk) ||
-	    (preempt_count() & PREEMPT_ACTIVE) ||
 	    signal_pending_state(tsk->state, tsk))
 		return;
 
@@ -3601,7 +3631,7 @@ asmlinkage __visible void __sched schedule(void)
 	sched_submit_work(tsk);
 	do {
 		preempt_disable();
-		__schedule();
+		__schedule(false);
 		sched_preempt_enable_no_resched();
 	} while (need_resched());
 }
@@ -3642,9 +3672,9 @@ void __sched schedule_preempt_disabled(void)
 static void __sched notrace preempt_schedule_common(void)
 {
 	do {
-		preempt_active_enter();
-		__schedule();
-		preempt_active_exit();
+		preempt_disable_notrace();
+		__schedule(true);
+		preempt_enable_no_resched_notrace();
 
 		/*
 		 * Check again in case we missed a preemption opportunity
@@ -3695,24 +3725,17 @@ asmlinkage __visible void __sched notrace preempt_schedule_notrace(void)
 		return;
 
 	do {
-		/*
-		 * Use raw __prempt_count() ops that don't call function.
-		 * We can't call functions before disabling preemption which
-		 * disarm preemption tracing recursions.
-		 */
-		__preempt_count_add(PREEMPT_ACTIVE + PREEMPT_DISABLE_OFFSET);
-		barrier();
+		preempt_disable_notrace();
 		/*
 		 * Needs preempt disabled in case user_exit() is traced
 		 * and the tracer calls preempt_enable_notrace() causing
 		 * an infinite recursion.
 		 */
 		prev_ctx = exception_enter();
-		__schedule();
+		__schedule(true);
 		exception_exit(prev_ctx);
 
-		barrier();
-		__preempt_count_sub(PREEMPT_ACTIVE + PREEMPT_DISABLE_OFFSET);
+		preempt_enable_no_resched_notrace();
 	} while (need_resched());
 }
 EXPORT_SYMBOL_GPL(preempt_schedule_notrace);
@@ -3735,11 +3758,11 @@ asmlinkage __visible void __sched preempt_schedule_irq(void)
 	prev_state = exception_enter();
 
 	do {
-		preempt_active_enter();
+		preempt_disable();
 		local_irq_enable();
-		__schedule();
+		__schedule(true);
 		local_irq_disable();
-		preempt_active_exit();
+		sched_preempt_enable_no_resched();
 	} while (need_resched());
 
 	exception_exit(prev_state);
@@ -4398,6 +4421,7 @@ int sched_setscheduler_nocheck(struct task_struct *p, int policy,
 {
 	return _sched_setscheduler(p, policy, param, false);
 }
+EXPORT_SYMBOL_GPL(sched_setscheduler_nocheck);
 
 static int
 do_sched_setscheduler(pid_t pid, int policy, struct sched_param __user *param)
@@ -5852,20 +5876,26 @@ static struct notifier_block  migration_notifier = {
 static int sched_cpu_active(struct notifier_block *nfb,
 				      unsigned long action, void *hcpu)
 {
+	int cpu = (long)hcpu;
+
 	switch (action & ~CPU_TASKS_FROZEN) {
 	case CPU_STARTING:
 		return NOTIFY_OK;
+
 	case CPU_ONLINE:
 		/*
 		 * At this point a starting CPU has marked itself as online via
 		 * set_cpu_online(). But it might not yet have marked itself
 		 * as active, which is essential from here on.
-		 *
-		 * Thus, fall-through and help the starting CPU along.
 		 */
-	case CPU_DOWN_FAILED:
-		set_cpu_active((long)hcpu, true);
+		set_cpu_active(cpu, true);
+		stop_machine_unpark(cpu);
 		return NOTIFY_OK;
+
+	case CPU_DOWN_FAILED:
+		set_cpu_active(cpu, true);
+		return NOTIFY_OK;
+
 	default:
 		return NOTIFY_DONE;
 	}
@@ -6068,11 +6098,11 @@ static int init_rootdomain(struct root_domain *rd)
 {
 	memset(rd, 0, sizeof(*rd));
 
-	if (!alloc_cpumask_var(&rd->span, GFP_KERNEL))
+	if (!zalloc_cpumask_var(&rd->span, GFP_KERNEL))
 		goto out;
-	if (!alloc_cpumask_var(&rd->online, GFP_KERNEL))
+	if (!zalloc_cpumask_var(&rd->online, GFP_KERNEL))
 		goto free_span;
-	if (!alloc_cpumask_var(&rd->rto_mask, GFP_KERNEL))
+	if (!zalloc_cpumask_var(&rd->rto_mask, GFP_KERNEL))
 		goto free_online;
 
 	if (cpupri_init(&rd->cpupri) != 0)
@@ -6423,7 +6453,8 @@ static struct sched_domain_topology_level default_topology[] = {
 	{ NULL, },
 };
 
-struct sched_domain_topology_level *sched_domain_topology = default_topology;
+static struct sched_domain_topology_level *sched_domain_topology =
+	default_topology;
 
 #define for_each_sd_topology(tl)			\
 	for (tl = sched_domain_topology; tl->mask; tl++)
@@ -7312,7 +7343,7 @@ void __init sched_init(void)
 #ifdef CONFIG_DEBUG_ATOMIC_SLEEP
 static inline int preempt_count_equals(int preempt_offset)
 {
-	int nested = (preempt_count() & ~PREEMPT_ACTIVE) + rcu_preempt_depth();
+	int nested = preempt_count() + rcu_preempt_depth();
 
 	return (nested == preempt_offset);
 }
@@ -7463,6 +7494,7 @@ void task_cputime_adjusted(struct task_struct *p, cputime_t *ut, cputime_t *st)
 	*ut = p->utime;
 	*st = p->stime;
 }
+EXPORT_SYMBOL_GPL(task_cputime_adjusted);
 
 void thread_group_cputime_adjusted(struct task_struct *p, cputime_t *ut, cputime_t *st)
 {
@@ -7638,6 +7670,7 @@ void task_cputime_adjusted(struct task_struct *p, cputime_t *ut, cputime_t *st)
 	task_cputime(p, &cputime.utime, &cputime.stime);
 	cputime_adjust(&cputime, &p->prev_cputime, ut, st);
 }
+EXPORT_SYMBOL_GPL(task_cputime_adjusted);
 
 /*
  * Must be called with siglock held.
