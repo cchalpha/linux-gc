@@ -2102,14 +2102,13 @@ context_switch(struct rq *rq, struct task_struct *prev,
 	barrier();
 
 	/*
-	 * Before unlock rq, record all rq need to be reschedule in the stack
+	 * Before unlock rq, record rq which need to be rescheduled in the stack
 	 */
 	rq = this_rq();
 	if (rq->try_preempt_tsk) {
-		if (current != rq->try_preempt_tsk)
-			prq = task_best_idle_rq(rq->try_preempt_tsk);
-		else
-			prq = NULL;
+		prq = (current == rq->try_preempt_tsk)?
+			NULL:
+			task_best_idle_rq(rq->try_preempt_tsk);
 		rq->try_preempt_tsk = NULL;
 	} else
 		prq = NULL;
