@@ -810,8 +810,6 @@ static inline bool suitable_idle_cpus(struct task_struct *p)
 	return (cpumask_intersects(tsk_cpus_allowed(p), &grq.cpu_idle_map));
 }
 
-static inline bool scaling_rq(struct rq *rq);
-
 /*
  * The best idle cpu is first-matched by the following cpumask list
  *
@@ -1049,19 +1047,12 @@ static inline struct rq *task_best_idle_rq(struct task_struct *p)
  */
 void cpu_scaling(int cpu)
 {
-	cpu_rq(cpu)->scaling = true;
 	cpumask_clear_cpu(cpu, &grq.non_scaled_cpumask);
 }
 
 void cpu_nonscaling(int cpu)
 {
-	cpu_rq(cpu)->scaling = false;
 	cpumask_set_cpu(cpu, &grq.non_scaled_cpumask);
-}
-
-static inline bool scaling_rq(struct rq *rq)
-{
-	return rq->scaling;
 }
 
 static inline int locality_diff(int cpu, struct rq *rq)
@@ -1093,15 +1084,6 @@ void cpu_scaling(int __unused)
 
 void cpu_nonscaling(int __unused)
 {
-}
-
-/*
- * Although CPUs can scale in UP, there is nowhere else for tasks to go so this
- * always returns 0.
- */
-static inline bool scaling_rq(struct rq *rq)
-{
-	return false;
 }
 
 static inline int locality_diff(int cpu, struct rq *rq)
