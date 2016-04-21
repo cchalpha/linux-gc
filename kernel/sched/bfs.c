@@ -1237,7 +1237,6 @@ static inline bool cache_task(struct task_struct *p, struct rq *rq,
 {
 	if(p->mm && !rt_task(p)) {
 		p->cached = state;
-		p->policy_stick_timeout = rq->clock_task + (1ULL << 13);
 		p->policy_cached_timeout = rq->clock_task +
 			policy_cached_timeout[p->policy];
 		return true;
@@ -1249,14 +1248,6 @@ static inline bool
 is_task_policy_cached_timeout(struct task_struct *p, struct rq *rq)
 {
 	return (rq->clock_task > p->policy_cached_timeout);
-}
-
-static inline void
-check_task_stick_off(struct task_struct *p, struct rq *rq)
-{
-	if (unlikely(rq->clock_task > p->policy_stick_timeout)) {
-		p->cached = 1ULL;
-	}
 }
 
 /* return task cache state */
@@ -3505,12 +3496,7 @@ earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *prefer)
 			 */
 			tcpu = task_cpu(p);
 
-			if (likely(3ULL == p->cached)) {
-				check_task_stick_off(p, task_rq(p));
-				if(unlikely(tcpu != cpu && scaling_rq(rq)))
-					continue;
-				dl = p->deadline << locality_diff(tcpu, rq);
-			} else if (likely(1ULL == p->cached &&
+			if (likely(1ULL == p->cached &&
 					  check_task_cached_off(p, task_rq(p))))
 				{
 				dl = p->deadline << locality_diff(tcpu, rq);
@@ -3590,12 +3576,7 @@ earliest_deadline_task_idle(struct rq *rq, int cpu)
 			 */
 			tcpu = task_cpu(p);
 
-			if (likely(3ULL == p->cached)) {
-				check_task_stick_off(p, task_rq(p));
-				if(unlikely(tcpu != cpu && scaling_rq(rq)))
-					continue;
-				dl = p->deadline << locality_diff(tcpu, rq);
-			} else if (likely(1ULL == p->cached &&
+			if (likely(1ULL == p->cached &&
 					  check_task_cached_off(p, task_rq(p))))
 				{
 				dl = p->deadline << locality_diff(tcpu, rq);
@@ -6379,7 +6360,7 @@ static void tasks_cpu_hotplug(int cpu)
 		return;
 
 	do_each_thread(t, p) {
-		if ((p->cached == 1ULL || p->cached == 3ULL) && task_cpu(p) == cpu)
+		if ((p->cached == 1ULL) && task_cpu(p) == cpu)
 			p->cached = 4ULL;
 		if (cpumask_test_cpu(cpu, &p->cpus_allowed_master)) {
 			count++;
