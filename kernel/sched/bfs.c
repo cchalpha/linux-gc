@@ -534,7 +534,7 @@ static inline void __finish_lock_switch(struct rq *rq, struct task_struct *prev)
 	 * switch is completely finished.
 	 */
 	smp_wmb();
-	prev->on_cpu = NOT_ON_CPU;
+	prev->on_cpu = (prev == rq->preempt_task)? ON_CPU_RQ:NOT_ON_CPU;
 #ifdef CONFIG_DEBUG_SPINLOCK
 	/* this is a valid case when another task releases the spinlock */
 	rq->lock.owner = current;
@@ -557,7 +557,7 @@ static inline void finish_lock_switch(struct rq *rq, struct task_struct *prev)
 	 * switch is completely finished.
 	 */
 	smp_wmb();
-	prev->on_cpu = NOT_ON_CPU;
+	prev->on_cpu = (prev == rq->preempt_task)? ON_CPU_RQ:NOT_ON_CPU;
 #ifdef CONFIG_DEBUG_SPINLOCK
 	/* this is a valid case when another task releases the spinlock */
 	grq.lock.owner = current;
