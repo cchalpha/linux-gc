@@ -1486,7 +1486,6 @@ struct task_struct {
 #ifdef CONFIG_SMT_NICE
 	int smt_bias; /* Policy/nice level bias across smt siblings */
 #endif
-	u64 cached;		/* task cached indicator */
 	u64 policy_stick_timeout;
 	u64 policy_cached_timeout;
 	unsigned long rt_timeout;
