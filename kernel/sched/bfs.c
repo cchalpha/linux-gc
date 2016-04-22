@@ -1238,17 +1238,19 @@ void do_set_cpus_allowed(struct task_struct *p, const struct cpumask *new_mask)
  * non_scaling cpu or its original cpu.
  * Realtime tasks don't use cache count to minimise their latency at all times.
  */
-static inline bool cache_task(struct task_struct *p, struct rq *rq,
+static inline void __cache_task(struct task_struct *p, struct rq *rq,
+				unsigned long state)
+{
+	p->cached = state;
+	p->policy_cached_timeout = rq->clock_task +
+				   policy_cached_timeout[p->policy];
+}
+
+static inline void cache_task(struct task_struct *p, struct rq *rq,
 			      unsigned long state)
 {
-	if(p->mm && !rt_task(p)) {
-		p->cached = state;
-		p->policy_stick_timeout = rq->clock_task + (1ULL << 13);
-		p->policy_cached_timeout = rq->clock_task +
-			policy_cached_timeout[p->policy];
-		return true;
-	}
-	return false;
+	if(p->mm && !rt_task(p))
+		__cache_task(p, rq, state);
 }
 
 static inline bool
@@ -3504,20 +3506,25 @@ found_middle:
  * Finally if no SCHED_NORMAL tasks are found, SCHED_IDLEPRIO tasks are
  * selected by the earliest deadline.
  */
+
+/*
+ * prefer: can *never* be a rq->idle task
+ */
 static inline struct task_struct *
-earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *idle)
+earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *prefer)
 {
 	struct task_struct *edt = NULL;
 	unsigned long idx = -1;
+	unsigned long prefer_prio = prefer->prio;
+	u64 earliest_deadline;
 
 	do {
 		struct list_head *queue;
 		struct task_struct *p;
-		u64 earliest_deadline;
 
 		idx = next_sched_bit(grq.prio_bitmap, ++idx);
-		if (idx >= PRIO_LIMIT)
-			return idle;
+		if (idx > prefer_prio)
+			return prefer;
 		queue = grq.queue + idx;
 
 		if (idx < MAX_RT_PRIO) {
@@ -3526,8 +3533,8 @@ earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *idle)
 				/* Make sure cpu affinity is ok */
 				if (needs_other_cpu(p, cpu))
 					continue;
-				edt = p;
-				goto out_take;
+				take_task(cpu, p);
+				return p;
 			}
 			/*
 			 * None of the RT tasks at this priority can run on
@@ -3561,13 +3568,8 @@ earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *idle)
 			 */
 			tcpu = task_cpu(p);
 
-			if (likely(3ULL == p->cached)) {
-				check_task_stick_off(p, task_rq(p));
-				if(unlikely(tcpu != cpu && scaling_rq(rq)))
-					continue;
-				dl = p->deadline << locality_diff(tcpu, rq);
-			} else if (likely(1ULL == p->cached &&
-					  check_task_cached_off(p, task_rq(p))))
+			if (likely((1ULL | p->cached) &&
+					check_task_cached_off(p, task_rq(p))))
 				{
 				dl = p->deadline << locality_diff(tcpu, rq);
 			} else {
@@ -3581,9 +3583,11 @@ earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *idle)
 		}
 	} while (!edt);
 
-out_take:
-	take_task(cpu, edt);
-	return edt;
+	if (idx < prefer_prio || earliest_deadline < prefer->deadline) {
+		take_task(cpu, edt);
+		return edt;
+	} else
+		return prefer;
 }
 
 static inline struct task_struct *
@@ -3988,13 +3992,28 @@ activate_choose_task##subfix(struct rq *rq, int cpu,\
 	if (next) {\
 		take_preempt_task(rq, next);\
 \
-		_grq_lock();\
-		rq->grq_locked = true;\
-		/* put prev back to grq */\
-		enqueue_task(prev, rq);\
-		inc_qnr();\
-		if (!cache_task(prev, rq, 3ULL))\
-		    rq->try_preempt_tsk = prev;\
+		if (likely(next->priodl < prev->priodl)) {\
+			if (likely(prev->mm && !rt_task(prev))) {\
+				rq->grq_locked = false;\
+				/* set prev as preempt_task */\
+				rq->preempt_task = prev;\
+				__cache_task(prev, rq, 3ULL);\
+			} else {\
+				_grq_lock();\
+				rq->grq_locked = true;\
+				/* put prev back to grq */\
+				enqueue_task(prev, rq);\
+				inc_qnr();\
+				rq->try_preempt_tsk = prev;\
+			}\
+		} else {\
+			_grq_lock();\
+			rq->grq_locked = true;\
+			/* put preemt task(now the next) back to grq */\
+			enqueue_task(next, rq);\
+			inc_qnr();\
+			next = prev;\
+		}\
 \
 		return next;\
 	}\
@@ -4004,14 +4023,18 @@ activate_choose_task##subfix(struct rq *rq, int cpu,\
 	if (queued_notrunning()) {\
 		_grq_lock();\
 		rq->grq_locked = true;\
-		enqueue_task(prev, rq);\
-		inc_qnr();\
-		if (!cache_task(prev, rq, 3ULL))\
-			rq->try_preempt_tsk = prev;\
-		next = earliest_deadline_task(rq, cpu, rq->idle);\
-		if (likely(next == prev)) {\
-			prev->cached = 0ULL;\
-			rq->try_preempt_tsk = NULL;\
+		next = earliest_deadline_task(rq, cpu, prev);\
+		if (next !=  prev) {\
+			if (likely(prev->mm && !rt_task(prev))) {\
+				/* set prev as preempt_task */\
+				rq->preempt_task = prev;\
+				__cache_task(prev, rq, 3ULL);\
+			} else {\
+				/* put prev back to grq */\
+				enqueue_task(prev, rq);\
+				inc_qnr();\
+				rq->try_preempt_tsk = prev;\
+			}\
 		}\
 	} else {\
 		/*\
