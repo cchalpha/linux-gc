@@ -3927,13 +3927,19 @@ activate_choose_task##subfix(struct rq *rq, int cpu,\
 	if (next) {\
 		take_preempt_task(rq, next);\
 \
-		_grq_lock();\
-		rq->grq_locked = true;\
-		/* put prev back to grq */\
-		enqueue_task(prev, rq);\
-		inc_qnr();\
-		if (!cache_task(prev, rq, 3ULL))\
-		    rq->try_preempt_tsk = prev;\
+		if (likely(prev->mm && !rt_task(prev))) {\
+			rq->grq_locked = false;\
+			/* set prev as preempt_task */\
+			rq->preempt_task = prev;\
+			cpumask_clear_cpu(cpu, &grq.cpu_preemptable_mask);\
+		} else {\
+			_grq_lock();\
+			rq->grq_locked = true;\
+			/* put prev back to grq */\
+			enqueue_task(prev, rq);\
+			inc_qnr();\
+			rq->try_preempt_tsk = prev;\
+		}\
 \
 		return next;\
 	}\
