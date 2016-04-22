@@ -3443,11 +3443,16 @@ found_middle:
  * Finally if no SCHED_NORMAL tasks are found, SCHED_IDLEPRIO tasks are
  * selected by the earliest deadline.
  */
+
+/*
+ * prefer: can *never* be a rq->idle task
+ */
 static inline struct task_struct *
-earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *idle)
+earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *prefer)
 {
 	struct task_struct *edt = NULL;
 	unsigned long idx = -1;
+	unsigned long prefer_prio = prefer->prio;
 
 	do {
 		struct list_head *queue;
@@ -3455,8 +3460,8 @@ earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *idle)
 		u64 earliest_deadline;
 
 		idx = next_sched_bit(grq.prio_bitmap, ++idx);
-		if (idx >= PRIO_LIMIT)
-			return idle;
+		if (idx > prefer_prio)
+			return prefer;
 		queue = grq.queue + idx;
 
 		if (idx < MAX_RT_PRIO) {
@@ -3521,8 +3526,11 @@ earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *idle)
 	} while (!edt);
 
 out_take:
-	take_task(cpu, edt);
-	return edt;
+	if (edt->priodl < prefer->priodl) {
+		take_task(cpu, edt);
+		return edt;
+	} else
+		return prefer;
 }
 
 static inline struct task_struct *
@@ -3949,14 +3957,11 @@ activate_choose_task##subfix(struct rq *rq, int cpu,\
 	if (queued_notrunning()) {\
 		_grq_lock();\
 		rq->grq_locked = true;\
-		enqueue_task(prev, rq);\
-		inc_qnr();\
-		if (!cache_task(prev, rq, 3ULL))\
-			rq->try_preempt_tsk = prev;\
-		next = earliest_deadline_task(rq, cpu, rq->idle);\
-		if (likely(next == prev)) {\
-			prev->cached = 0ULL;\
-			rq->try_preempt_tsk = NULL;\
+		next = earliest_deadline_task(rq, cpu, prev);\
+		if (next !=  prev) {\
+			/* set prev as preempt_task */\
+			rq->preempt_task = prev;\
+			cpumask_clear_cpu(cpu, &grq.cpu_preemptable_mask);\
 		}\
 	} else {\
 		/*\
