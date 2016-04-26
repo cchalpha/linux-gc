@@ -3543,8 +3543,8 @@ found_middle:
  * Finally if no SCHED_NORMAL tasks are found, SCHED_IDLEPRIO tasks are
  * selected by the earliest deadline.
  */
-static inline struct
-task_struct *earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *idle)
+static inline struct task_struct *
+earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *idle)
 {
 	struct task_struct *edt = NULL;
 	unsigned long idx = -1;
@@ -3557,6 +3557,88 @@ task_struct *earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *
 		idx = next_sched_bit(grq.prio_bitmap, ++idx);
 		if (idx >= PRIO_LIMIT)
 			return idle;
+		queue = grq.queue + idx;
+
+		if (idx < MAX_RT_PRIO) {
+			/* We found an rt task */
+			list_for_each_entry(p, queue, run_list) {
+				/* Make sure cpu affinity is ok */
+				if (needs_other_cpu(p, cpu))
+					continue;
+				edt = p;
+				goto out_take;
+			}
+			/*
+			 * None of the RT tasks at this priority can run on
+			 * this cpu
+			 */
+			continue;
+		}
+
+		/*
+		 * No rt tasks. Find the earliest deadline task. Now we're in
+		 * O(n) territory.
+		 */
+		earliest_deadline = ~0ULL;
+		list_for_each_entry(p, queue, run_list) {
+			u64 dl;
+			int tcpu;
+
+			/* Make sure cpu affinity is ok */
+			if (needs_other_cpu(p, cpu))
+				continue;
+
+#ifdef CONFIG_SMT_NICE
+			if (!smt_should_schedule(p, cpu))
+				continue;
+#endif
+			/*
+			 * Soft affinity happens here by not scheduling a cache
+			 * task to a different CPU that the task is last ran on,
+			 * or by greatly biasing against its deadline based on
+			 * cpu cache locality.
+			 */
+			tcpu = task_cpu(p);
+
+			if (likely(3ULL == p->cached)) {
+				check_task_stick_off(p, task_rq(p));
+				if(unlikely(tcpu != cpu && scaling_rq(rq)))
+					continue;
+				dl = p->deadline << locality_diff(tcpu, rq);
+			} else if (likely(1ULL == p->cached &&
+					  check_task_cached_off(p, task_rq(p))))
+				{
+				dl = p->deadline << locality_diff(tcpu, rq);
+			} else {
+				dl = p->deadline;
+			}
+
+			if (deadline_before(dl, earliest_deadline)) {
+				earliest_deadline = dl;
+				edt = p;
+			}
+		}
+	} while (!edt);
+
+out_take:
+	take_task(cpu, edt);
+	return edt;
+}
+
+static inline struct task_struct *
+earliest_deadline_task_idle(struct rq *rq, int cpu)
+{
+	struct task_struct *edt = NULL;
+	unsigned long idx = -1;
+
+	do {
+		struct list_head *queue;
+		struct task_struct *p;
+		u64 earliest_deadline;
+
+		idx = next_sched_bit(grq.prio_bitmap, ++idx);
+		if (idx >= PRIO_LIMIT)
+			return rq->idle;
 		queue = grq.queue + idx;
 
 		if (idx < MAX_RT_PRIO) {
@@ -3830,7 +3912,7 @@ pick_next_task##subfix(struct rq *rq, int cpu)\
 	PICK_NEXT_TASKK_NO_DEDICATED_TASK_HANDLE##subfix;\
 \
 	if (likely(queued_notrunning()))\
-		return earliest_deadline_task(rq, cpu, rq->idle);\
+		return earliest_deadline_task_idle(rq, cpu);\
 	else {\
 		/*\
 		 * This CPU is now truly idle as opposed to when idle is\
@@ -3874,7 +3956,7 @@ idle_choose_task##subfix(struct rq *rq, struct task_struct *prev,\
 \
 	if (likely(queued_notrunning())) {\
 		_grq_lock();\
-		next = earliest_deadline_task(rq, cpu, rq->idle);\
+		next = earliest_deadline_task_idle(rq, cpu);\
 		_grq_unlock();\
 	} else {\
 		next = prev;\
