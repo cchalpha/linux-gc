@@ -3922,9 +3922,16 @@ activate_choose_task##subfix(struct rq *rq, int cpu,\
 		rq->grq_locked = true;\
 		next = earliest_deadline_task(rq, cpu, prev);\
 		if (next !=  prev) {\
-			/* set prev as preempt_task */\
-			rq->preempt_task = prev;\
-			cpumask_clear_cpu(cpu, &grq.cpu_preemptable_mask);\
+			if (likely(prev->mm && !rt_task(prev))) {\
+				/* set prev as preempt_task */\
+				rq->preempt_task = prev;\
+				cpumask_clear_cpu(cpu, &grq.cpu_preemptable_mask);\
+			} else {\
+				/* put prev back to grq */\
+				enqueue_task(prev, rq);\
+				inc_qnr();\
+				rq->try_preempt_tsk = prev;\
+			}\
 		}\
 	} else {\
 		/*\
