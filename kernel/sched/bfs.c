@@ -1214,16 +1214,19 @@ void do_set_cpus_allowed(struct task_struct *p, const struct cpumask *new_mask)
  * non_scaling cpu or its original cpu.
  * Realtime tasks don't use cache count to minimise their latency at all times.
  */
-static inline bool cache_task(struct task_struct *p, struct rq *rq,
+static inline void __cache_task(struct task_struct *p, struct rq *rq,
+				unsigned long state)
+{
+	p->cached = state;
+	p->policy_cached_timeout = rq->clock_task +
+				   policy_cached_timeout[p->policy];
+}
+
+static inline void cache_task(struct task_struct *p, struct rq *rq,
 			      unsigned long state)
 {
-	if(p->mm && !rt_task(p)) {
-		p->cached = state;
-		p->policy_cached_timeout = rq->clock_task +
-			policy_cached_timeout[p->policy];
-		return true;
-	}
-	return false;
+	if(p->mm && !rt_task(p))
+		__cache_task(p, rq, state);
 }
 
 static inline bool
@@ -3478,8 +3481,8 @@ earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *prefer)
 			 */
 			tcpu = task_cpu(p);
 
-			if (likely(1ULL == p->cached &&
-					  check_task_cached_off(p, task_rq(p))))
+			if (likely((1ULL | p->cached) &&
+					check_task_cached_off(p, task_rq(p))))
 				{
 				dl = p->deadline << locality_diff(tcpu, rq);
 			} else {
@@ -3898,18 +3901,27 @@ activate_choose_task##subfix(struct rq *rq, int cpu,\
 	if (next) {\
 		take_preempt_task(rq, next);\
 \
-		if (likely(prev->mm && !rt_task(prev))) {\
-			rq->grq_locked = false;\
-			/* set prev as preempt_task */\
-			rq->preempt_task = prev;\
-			cpumask_clear_cpu(cpu, &grq.cpu_preemptable_mask);\
+		if (likely(next->priodl < prev->priodl)) {\
+			if (likely(prev->mm && !rt_task(prev))) {\
+				rq->grq_locked = false;\
+				/* set prev as preempt_task */\
+				rq->preempt_task = prev;\
+				__cache_task(prev, rq, 3ULL);\
+			} else {\
+				_grq_lock();\
+				rq->grq_locked = true;\
+				/* put prev back to grq */\
+				enqueue_task(prev, rq);\
+				inc_qnr();\
+				rq->try_preempt_tsk = prev;\
+			}\
 		} else {\
 			_grq_lock();\
 			rq->grq_locked = true;\
-			/* put prev back to grq */\
-			enqueue_task(prev, rq);\
+			/* put preemt task(now the next) back to grq */\
+			enqueue_task(next, rq);\
 			inc_qnr();\
-			rq->try_preempt_tsk = prev;\
+			next = prev;\
 		}\
 \
 		return next;\
@@ -3925,7 +3937,7 @@ activate_choose_task##subfix(struct rq *rq, int cpu,\
 			if (likely(prev->mm && !rt_task(prev))) {\
 				/* set prev as preempt_task */\
 				rq->preempt_task = prev;\
-				cpumask_clear_cpu(cpu, &grq.cpu_preemptable_mask);\
+				__cache_task(prev, rq, 3ULL);\
 			} else {\
 				/* put prev back to grq */\
 				enqueue_task(prev, rq);\
