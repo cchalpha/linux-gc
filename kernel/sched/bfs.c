@@ -71,9 +71,9 @@
 #include <linux/ftrace.h>
 #include <linux/slab.h>
 #include <linux/init_task.h>
-#include <linux/binfmts.h>
 #include <linux/context_tracking.h>
 #include <linux/sched/prio.h>
+#include <linux/frame.h>
 
 #include <asm/irq_regs.h>
 #include <asm/switch_to.h>
@@ -614,15 +614,19 @@ static inline int task_timeslice(struct task_struct *p)
 /*
  * cmpxchg based fetch_or, macro so it works for different integer types
  */
-#define fetch_or(ptr, val)						\
-({	typeof(*(ptr)) __old, __val = *(ptr);				\
- 	for (;;) {							\
- 		__old = cmpxchg((ptr), __val, __val | (val));		\
- 		if (__old == __val)					\
- 			break;						\
- 		__val = __old;						\
- 	}								\
- 	__old;								\
+#define fetch_or(ptr, mask)						\
+	({								\
+		typeof(ptr) _ptr = (ptr);				\
+		typeof(mask) _mask = (mask);				\
+		typeof(*_ptr) _old, _val = *_ptr;			\
+									\
+		for (;;) {						\
+			_old = cmpxchg(_ptr, _val, _val | _mask);	\
+			if (_old == _val)				\
+				break;					\
+			_val = _old;					\
+		}							\
+	_old;								\
 })
 
 #if defined(CONFIG_SMP) && defined(TIF_POLLING_NRFLAG)
@@ -1668,7 +1672,8 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 	ttwu_activate(p, rq, wake_flags & WF_SYNC);
 out_wakeup:
 	ttwu_do_wakeup(rq, p, 0);
-	ttwu_stat(p, cpu, wake_flags);
+	if (schedstat_enabled())
+		ttwu_stat(p, cpu, wake_flags);
 out_unlock:
 	task_grq_unlock(&flags);
 
@@ -1703,7 +1708,8 @@ static void try_to_wake_up_local(struct task_struct *p)
 			ttwu_stat(p, smp_processor_id(), 0);
 	}
 	ttwu_do_wakeup(rq, p, 0);
-	ttwu_stat(p, smp_processor_id(), 0);
+	if (schedstat_enabled())
+		ttwu_stat(p, smp_processor_id(), 0);
 }
 
 /**
@@ -3734,6 +3740,7 @@ rerun_prev_unlocked:
 		grq_unlock_irq();
 	}
 }
+STACK_FRAME_NON_STANDARD(__schedule); /* switch_to() */
 
 static inline void sched_submit_work(struct task_struct *tsk)
 {
@@ -5809,177 +5816,6 @@ void sched_set_stop_task(int cpu, struct task_struct *stop)
 	}
 }
 
-#if defined(CONFIG_SCHED_DEBUG) && defined(CONFIG_SYSCTL)
-
-static struct ctl_table sd_ctl_dir[] = {
-	{
-		.procname	= "sched_domain",
-		.mode		= 0555,
-	},
-	{}
-};
-
-static struct ctl_table sd_ctl_root[] = {
-	{
-		.procname	= "kernel",
-		.mode		= 0555,
-		.child		= sd_ctl_dir,
-	},
-	{}
-};
-
-static struct ctl_table *sd_alloc_ctl_entry(int n)
-{
-	struct ctl_table *entry =
-		kcalloc(n, sizeof(struct ctl_table), GFP_KERNEL);
-
-	return entry;
-}
-
-static void sd_free_ctl_entry(struct ctl_table **tablep)
-{
-	struct ctl_table *entry;
-
-	/*
-	 * In the intermediate directories, both the child directory and
-	 * procname are dynamically allocated and could fail but the mode
-	 * will always be set. In the lowest directory the names are
-	 * static strings and all have proc handlers.
-	 */
-	for (entry = *tablep; entry->mode; entry++) {
-		if (entry->child)
-			sd_free_ctl_entry(&entry->child);
-		if (entry->proc_handler == NULL)
-			kfree(entry->procname);
-	}
-
-	kfree(*tablep);
-	*tablep = NULL;
-}
-
-#define CPU_LOAD_IDX_MAX 5
-static int min_load_idx = 0;
-static int max_load_idx = CPU_LOAD_IDX_MAX-1;
-
-static void
-set_table_entry(struct ctl_table *entry,
-		const char *procname, void *data, int maxlen,
-		umode_t mode, proc_handler *proc_handler,
-		bool load_idx)
-{
-	entry->procname = procname;
-	entry->data = data;
-	entry->maxlen = maxlen;
-	entry->mode = mode;
-	entry->proc_handler = proc_handler;
-
-	if (load_idx) {
-		entry->extra1 = &min_load_idx;
-		entry->extra2 = &max_load_idx;
-	}
-}
-
-static struct ctl_table *
-sd_alloc_ctl_domain_table(struct sched_domain *sd)
-{
-	struct ctl_table *table = sd_alloc_ctl_entry(14);
-
-	if (table == NULL)
-		return NULL;
-
-	set_table_entry(&table[0], "min_interval", &sd->min_interval,
-		sizeof(long), 0644, proc_doulongvec_minmax, false);
-	set_table_entry(&table[1], "max_interval", &sd->max_interval,
-		sizeof(long), 0644, proc_doulongvec_minmax, false);
-	set_table_entry(&table[2], "busy_idx", &sd->busy_idx,
-		sizeof(int), 0644, proc_dointvec_minmax, true);
-	set_table_entry(&table[3], "idle_idx", &sd->idle_idx,
-		sizeof(int), 0644, proc_dointvec_minmax, true);
-	set_table_entry(&table[4], "newidle_idx", &sd->newidle_idx,
-		sizeof(int), 0644, proc_dointvec_minmax, true);
-	set_table_entry(&table[5], "wake_idx", &sd->wake_idx,
-		sizeof(int), 0644, proc_dointvec_minmax, true);
-	set_table_entry(&table[6], "forkexec_idx", &sd->forkexec_idx,
-		sizeof(int), 0644, proc_dointvec_minmax, true);
-	set_table_entry(&table[7], "busy_factor", &sd->busy_factor,
-		sizeof(int), 0644, proc_dointvec_minmax, false);
-	set_table_entry(&table[8], "imbalance_pct", &sd->imbalance_pct,
-		sizeof(int), 0644, proc_dointvec_minmax, false);
-	set_table_entry(&table[9], "cache_nice_tries",
-		&sd->cache_nice_tries,
-		sizeof(int), 0644, proc_dointvec_minmax, false);
-	set_table_entry(&table[10], "flags", &sd->flags,
-		sizeof(int), 0644, proc_dointvec_minmax, false);
-	set_table_entry(&table[11], "max_newidle_lb_cost",
-		&sd->max_newidle_lb_cost,
-		sizeof(long), 0644, proc_doulongvec_minmax, false);
-	set_table_entry(&table[12], "name", sd->name,
-		CORENAME_MAX_SIZE, 0444, proc_dostring, false);
-	/* &table[13] is terminator */
-
-	return table;
-}
-
-static struct ctl_table *sd_alloc_ctl_cpu_table(int cpu)
-{
-	struct ctl_table *entry, *table;
-	struct sched_domain *sd;
-	int domain_num = 0, i;
-	char buf[32];
-
-	for_each_domain(cpu, sd)
-		domain_num++;
-	entry = table = sd_alloc_ctl_entry(domain_num + 1);
-	if (table == NULL)
-		return NULL;
-
-	i = 0;
-	for_each_domain(cpu, sd) {
-		snprintf(buf, 32, "domain%d", i);
-		entry->procname = kstrdup(buf, GFP_KERNEL);
-		entry->mode = 0555;
-		entry->child = sd_alloc_ctl_domain_table(sd);
-		entry++;
-		i++;
-	}
-	return table;
-}
-
-static struct ctl_table_header *sd_sysctl_header;
-void register_sched_domain_sysctl(void)
-{
-	int i, cpu_num = num_possible_cpus();
-	struct ctl_table *entry = sd_alloc_ctl_entry(cpu_num + 1);
-	char buf[32];
-
-	WARN_ON(sd_ctl_dir[0].child);
-	sd_ctl_dir[0].child = entry;
-
-	if (entry == NULL)
-		return;
-
-	for_each_possible_cpu(i) {
-		snprintf(buf, 32, "cpu%d", i);
-		entry->procname = kstrdup(buf, GFP_KERNEL);
-		entry->mode = 0555;
-		entry->child = sd_alloc_ctl_cpu_table(i);
-		entry++;
-	}
-
-	WARN_ON(sd_sysctl_header);
-	sd_sysctl_header = register_sysctl_table(sd_ctl_root);
-}
-
-/* may be called multiple times per register */
-void unregister_sched_domain_sysctl(void)
-{
-	unregister_sysctl_table(sd_sysctl_header);
-	sd_sysctl_header = NULL;
-	if (sd_ctl_dir[0].child)
-		sd_free_ctl_entry(&sd_ctl_dir[0].child);
-}
-#endif /* CONFIG_SYSCTL */
-
 static void set_rq_online(struct rq *rq)
 {
 	if (!rq->online) {
@@ -6285,7 +6121,6 @@ static int __init isolated_cpu_setup(char *str)
 	}
 	return 1;
 }
-
 __setup("isolcpus=", isolated_cpu_setup);
 
 struct s_data {
@@ -7114,6 +6949,13 @@ static int cpuset_cpu_inactive(unsigned int cpu)
 	return 0;
 }
 
+static void sched_rq_cpu_starting(unsigned int cpu)
+{
+	struct rq *rq = cpu_rq(cpu);
+
+	account_reset_rq(rq);
+}
+
 int sched_cpu_activate(unsigned int cpu)
 {
 	struct rq *rq = cpu_rq(cpu);
@@ -7181,6 +7023,10 @@ int sched_cpu_deactivate(unsigned int cpu)
 
 int sched_cpu_starting(unsigned int __maybe_unused cpu)
 {
+	/*
+	 * BFS doesn't have rq start time record
+	 */
+	sched_rq_cpu_starting(cpu);
 	return 0;
 }
 
