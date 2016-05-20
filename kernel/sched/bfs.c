@@ -3348,7 +3348,7 @@ static void time_slice_expired(struct task_struct *p, struct rq *rq)
  */
 static inline void check_deadline(struct task_struct *p, struct rq *rq)
 {
-	if (p->time_slice < RESCHED_US || batch_task(p))
+	if (p->time_slice < RESCHED_US)
 		time_slice_expired(p, rq);
 }
 
@@ -3482,8 +3482,7 @@ earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *prefer)
 			tcpu = task_cpu(p);
 
 			if (likely((1ULL | p->cached) &&
-					check_task_cached_off(p, task_rq(p))))
-				{
+				   check_task_cached_off(p, task_rq(p)))) {
 				dl = p->deadline << locality_diff(tcpu, rq);
 			} else {
 				dl = p->deadline;
@@ -3561,9 +3560,8 @@ earliest_deadline_task_idle(struct rq *rq, int cpu)
 			 */
 			tcpu = task_cpu(p);
 
-			if (likely(1ULL == p->cached &&
-					  check_task_cached_off(p, task_rq(p))))
-				{
+			if (likely((1ULL | p->cached) &&
+				   check_task_cached_off(p, task_rq(p)))) {
 				dl = p->deadline << locality_diff(tcpu, rq);
 			} else {
 				dl = p->deadline;
@@ -3901,7 +3899,7 @@ activate_choose_task##subfix(struct rq *rq, int cpu,\
 	if (next) {\
 		take_preempt_task(rq, next);\
 \
-		if (likely(next->priodl < prev->priodl)) {\
+		if (likely(3ULL != next->cached)) {\
 			if (likely(prev->mm && !rt_task(prev))) {\
 				rq->grq_locked = false;\
 				/* set prev as preempt_task */\
@@ -3915,23 +3913,24 @@ activate_choose_task##subfix(struct rq *rq, int cpu,\
 				inc_qnr();\
 				rq->try_preempt_tsk = prev;\
 			}\
-		} else {\
-			_grq_lock();\
-			rq->grq_locked = true;\
-			/* put preemt task(now the next) back to grq */\
-			enqueue_task(next, rq);\
-			inc_qnr();\
-			next = prev;\
+			return next;\
 		}\
-\
-		return next;\
-	}\
+		_grq_lock();\
+		rq->grq_locked = true;\
+		/* put preemt task(now the next) back to grq */\
+		enqueue_task(next, rq);\
+		inc_qnr();\
+		next->on_cpu = NOT_ON_CPU;\
+	} else\
+		rq->grq_locked = false;\
 \
 	ACTIVATE_NO_DEDICATED_TASK_HANDLE##subfix;\
 \
 	if (queued_notrunning()) {\
-		_grq_lock();\
-		rq->grq_locked = true;\
+		if (!rq->grq_locked) {\
+			_grq_lock();\
+			rq->grq_locked = true;\
+		}\
 		next = earliest_deadline_task(rq, cpu, prev);\
 		if (next !=  prev) {\
 			if (likely(prev->mm && !rt_task(prev))) {\
@@ -3952,7 +3951,10 @@ activate_choose_task##subfix(struct rq *rq, int cpu,\
 		 * the earliest deadline task and just run it\
 		 * again.\
 		 */\
-		rq->grq_locked = false;\
+		if (rq->grq_locked) {\
+			_grq_unlock();\
+			rq->grq_locked = false;\
+		}\
 		next = prev;\
 		set_rq_task(rq, prev);\
 	}\
@@ -6361,7 +6363,7 @@ static void tasks_cpu_hotplug(int cpu)
 		return;
 
 	do_each_thread(t, p) {
-		if ((p->cached == 1ULL) && task_cpu(p) == cpu)
+		if ((p->cached | 1ULL) && task_cpu(p) == cpu)
 			p->cached = 4ULL;
 		if (cpumask_test_cpu(cpu, &p->cpus_allowed_master)) {
 			count++;
