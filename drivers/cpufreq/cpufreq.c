@@ -25,6 +25,7 @@
 #include <linux/kernel_stat.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/suspend.h>
 #include <linux/syscore_ops.h>
@@ -1825,8 +1826,11 @@ int __cpufreq_driver_target(struct cpufreq_policy *policy,
 		return -ENODEV;
 
 	/* Make sure that target_freq is within supported range */
-	if (target_freq > policy->max)
+	if (target_freq >= policy->max) {
 		target_freq = policy->max;
+		cpu_nonscaling(policy->cpu);
+	} else
+		cpu_scaling(policy->cpu);
 	if (target_freq < policy->min)
 		target_freq = policy->min;
 
