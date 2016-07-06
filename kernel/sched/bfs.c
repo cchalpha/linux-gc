@@ -3928,13 +3928,13 @@ idle_choose_task##subfix(struct rq *rq, struct task_struct *prev,\
 		_grq_lock();\
 		next = earliest_deadline_task(rq, cpu, rq->idle);\
 		_grq_unlock();\
-		if (next != prev)\
-			return next;\
+		if (next == prev)\
+			schedstat_inc(rq, sched_goidle);\
+	} else {\
+		next = prev;\
+		schedstat_inc(rq, sched_goidle);\
 	}\
 \
-	next = pick_other_cpu_stick_task(cpu, rq);\
-	if (next == prev)\
-		schedstat_inc(rq, sched_goidle);\
 	return next;\
 }
 IDLE_CHOOSE_TASK_FUNC_DEFINE();
