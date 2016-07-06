@@ -3901,11 +3901,8 @@ pick_other_cpu_stick_task(int cpu, struct rq *rq)
 
 #define IDLE_NO_DEDICATED_TASK_HANDLE
 #define IDLE_NO_DEDICATED_TASK_HANDLE_ns \
-	if (likely(is_no_dedicated_task(cpu))) {\
-		schedstat_inc(rq, sched_goidle);\
-\
-		return prev;\
-	}
+	if (likely(is_no_dedicated_task(cpu)))\
+		return prev;
 
 #define IDLE_CHOOSE_TASK_FUNC_DEFINE(subfix) \
 static struct task_struct *\
@@ -3932,14 +3929,10 @@ idle_choose_task##subfix(struct rq *rq, struct task_struct *prev,\
 		_grq_lock();\
 		next = earliest_deadline_task_idle(rq, cpu);\
 		_grq_unlock();\
-		if (next == prev)\
-			schedstat_inc(rq, sched_goidle);\
-	} else {\
-		next = prev;\
-		schedstat_inc(rq, sched_goidle);\
-	}\
 \
-	return next;\
+		return next;\
+	}\
+	return prev;\
 }
 IDLE_CHOOSE_TASK_FUNC_DEFINE();
 IDLE_CHOOSE_TASK_FUNC_DEFINE(_ns);
@@ -3947,8 +3940,6 @@ IDLE_CHOOSE_TASK_FUNC_DEFINE(_ns);
 #define DEACTIVATE_NO_DEDICATED_TASK_HANDLE
 #define DEACTIVATE_NO_DEDICATED_TASK_HANDLE_ns \
 	if (likely(is_no_dedicated_task(cpu))) {\
-		schedstat_inc(rq, sched_goidle);\
-\
 		next = rq->idle;\
 		goto unlock_out;\
 	}
@@ -3977,14 +3968,9 @@ deactivate_choose_task##subfix(struct rq *rq,\
 \
 	if (likely(queued_notrunning()))\
 		next = earliest_deadline_task_idle(rq, cpu);\
-	else {\
-		/*\
-		 * This CPU is now truly idle as opposed to when idle is\
-		 * scheduled as a high priority task in its own right.\
-		 */\
-		schedstat_inc(rq, sched_goidle);\
+	else\
 		next = rq->idle;\
-	}\
+\
 unlock_out:\
 	_grq_unlock();\
 	rq->grq_locked = false;\
@@ -3999,11 +3985,8 @@ DEACTIVATE_CHOOSE_TASK_FUNC_DEFINE(_ns);
 
 #define NEED_OTHER_CPU_NO_DEDICATED_TASK_HANDLE
 #define NEED_OTHER_CPU_NO_DEDICATED_TASK_HANDLE_ns \
-	if (likely(is_no_dedicated_task(cpu))) {\
-		schedstat_inc(rq, sched_goidle);\
-\
+	if (likely(is_no_dedicated_task(cpu)))\
 		return rq->idle;\
-	}
 
 /* Task changed affinity off this CPU */
 #define __NEED_OTHER_CPU_CHOOSE_TASK_FUNC_DEFINE(subfix) \
@@ -4030,11 +4013,6 @@ __need_other_cpu_choose_task##subfix(struct rq *rq,\
 \
 	if (likely(queued_notrunning()))\
 		return earliest_deadline_task_idle(rq, cpu);\
-	/*\
-	 * This CPU is now truly idle as opposed to when idle is\
-	 * scheduled as a high priority task in its own right.\
-	 */\
-	schedstat_inc(rq, sched_goidle);\
 	return rq->idle;\
 }
 __NEED_OTHER_CPU_CHOOSE_TASK_FUNC_DEFINE();
@@ -4278,6 +4256,8 @@ static void __sched notrace __schedule(bool preempt)
 			set_cpuidle_map(cpu);
 			rq->choose_task_func = RQ_CHOOSE_TASK_FUNC(rq, idle);
 			wake_smt_siblings(cpu);
+
+			schedstat_inc(rq, sched_goidle);
 		}
 		set_rq_task(rq, next);
 
