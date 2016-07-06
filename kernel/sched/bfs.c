@@ -4091,6 +4091,7 @@ is_task_deactivate_sched(struct rq *rq, int cpu, struct task_struct *prev,
 
 				to_wakeup = wq_worker_sleeping(prev);
 				if (to_wakeup) {
+					WARN_ON_ONCE(to_wakeup == prev);
 					/* This shouldn't happen, but does */
 					if (unlikely(to_wakeup == prev)) {
 						deactivate = false;
