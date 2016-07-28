@@ -4217,7 +4217,7 @@ static int __set_cpus_allowed_ptr(struct task_struct *p,
 	if (cpumask_equal(tsk_cpus_allowed(p), new_mask))
 		goto out;
 
-	if (!cpumask_intersects(new_mask, cpu_active_mask)) {
+	if (!cpumask_intersects(new_mask, cpu_valid_mask)) {
 		ret = -EINVAL;
 		goto out;
 	}
@@ -4233,7 +4233,7 @@ static int __set_cpus_allowed_ptr(struct task_struct *p,
 		 */
 		WARN_ON(cpumask_intersects(new_mask, cpu_online_mask) &&
 			!cpumask_intersects(new_mask, cpu_active_mask) &&
-			tsk_nr_cpus_allowed(p) != 1);
+			p->nr_cpus_allowed != 1);
 	}
 
 	/* Can the task run on the task's current CPU? If so, we're done */
@@ -4248,7 +4248,7 @@ static int __set_cpus_allowed_ptr(struct task_struct *p,
 		} else
 			resched_curr(rq);
 	} else
-		set_task_cpu(p, cpumask_any_and(cpu_active_mask, new_mask));
+		set_task_cpu(p, cpumask_any_and(cpu_valid_mask, new_mask));
 
 out:
 	if (queued)
@@ -7026,10 +7026,11 @@ int sched_cpu_deactivate(unsigned int cpu)
 	return 0;
 }
 
-int sched_cpu_starting(unsigned int __maybe_unused cpu)
+int sched_cpu_starting(unsigned int cpu)
 {
 	/*
 	 * BFS doesn't have rq start time record
+	 * set_cpu_rq_start_time(cpu);
 	 */
 	sched_rq_cpu_starting(cpu);
 	return 0;
@@ -7048,6 +7049,11 @@ int sched_cpu_dying(unsigned int cpu)
 	}
 	bind_zero(cpu);
 	grq.noc = num_online_cpus();
+	/*
+	 * BFS/VRQ: TODO debug load to test still need set rq to idle?
+	 */
+	set_rq_task(rq, rq->idle);
+	update_clocks(rq);
 	grq_unlock_irqrestore(&flags);
 
 	return 0;
