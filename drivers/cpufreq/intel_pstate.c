@@ -1324,8 +1324,13 @@ static u64 atom_get_val(struct cpudata *cpudata, int pstate)
 	vid_fp = clamp_t(int32_t, vid_fp, cpudata->vid.min, cpudata->vid.max);
 	vid = ceiling_fp(vid_fp);
 
-	if (pstate > cpudata->pstate.max_pstate)
-		vid = cpudata->vid.turbo;
+	if (pstate < cpudata->pstate.max_pstate)
+		cpu_scaling(cpudata->cpu);
+	else {
+		if (pstate > cpudata->pstate.max_pstate)
+			vid = cpudata->vid.turbo;
+		cpu_nonscaling(cpudata->cpu);
+	}
 
 	return val | vid;
 }

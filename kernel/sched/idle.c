@@ -16,7 +16,11 @@
 
 #include <trace/events/power.h>
 
+#ifdef CONFIG_SCHED_BFS
+#include "bfs_sched.h"
+#else
 #include "sched.h"
+#endif
 
 /* Linker adds these: start and end of __cpuidle functions */
 extern char __cpuidle_text_start[], __cpuidle_text_end[];
