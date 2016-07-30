@@ -1405,8 +1405,8 @@ static void try_preempt(struct task_struct *p, struct rq *this_rq)
 	}
 
 	if (likely(highest_prio_rq)) {
-#ifdef CONFIG_SMT_NICE
 		cpu = cpu_of(highest_prio_rq);
+#ifdef CONFIG_SMT_NICE
 		if (!smt_should_schedule(p, cpu))
 			return;
 #endif
