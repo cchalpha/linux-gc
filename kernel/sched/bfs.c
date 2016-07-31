@@ -35,7 +35,7 @@
 #include <linux/init.h>
 #include <asm/uaccess.h>
 #include <linux/highmem.h>
-#include <asm/mmu_context.h>
+#include <linux/mmu_context.h>
 #include <linux/interrupt.h>
 #include <linux/capability.h>
 #include <linux/completion.h>
@@ -5489,6 +5489,12 @@ void show_state_filter(unsigned long state_filter)
 			sched_show_task(p);
 	}
 
+#ifdef CONFIG_SCHED_DEBUG
+	/* BFS/VRQ TODO: should support this
+	if (!state_filter)
+		sysrq_sched_debug_show();
+	*/
+#endif
 	rcu_read_unlock();
 	/*
 	 * Only show locks if all tasks are dumped:
@@ -5715,7 +5721,6 @@ int get_nohz_timer_target(void)
 				continue;
 
 			if (!idle_cpu(i) && is_housekeeping_cpu(i)) {
- 				cpu = i;
 				cpu = i;
 				goto unlock;
 			}
@@ -6599,7 +6604,7 @@ static void sched_init_numa(void)
 	sched_domains_numa_levels = level;
 }
 
-static void sched_domains_numa_masks_set(int cpu)
+static void sched_domains_numa_masks_set(unsigned int cpu)
 {
 	int node = cpu_to_node(cpu);
 	int i, j;
@@ -6612,7 +6617,7 @@ static void sched_domains_numa_masks_set(int cpu)
 	}
 }
 
-static void sched_domains_numa_masks_clear(int cpu)
+static void sched_domains_numa_masks_clear(unsigned int cpu)
 {
 	int i, j;
 
