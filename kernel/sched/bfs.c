@@ -1742,6 +1742,8 @@ static inline void task_preempt_rq(struct task_struct *p, struct rq * rq)
 		wq_worker_waking_up(p, cpu);
 
 	ttwu_do_wakeup(rq, p, 0);
+	cpufreq_trigger(rq->clock, rq->rq_running +
+			(queued_notrunning() + grq.nr_uninterruptible) / grq.noc);
 }
 
 /*
