@@ -1564,14 +1564,6 @@ task_preemptable_rq(struct task_struct *p, int only_preempt_idle)
 			if (!smt_should_schedule(p, cpu))
 				return NULL;
 #endif
-			/*
-			 * If we have decided this task should preempt this CPU,
-			 * set the task's CPU to match so there is no discrepancy
-			 * in earliest_deadline_task which biases away tasks with
-			 * a different CPU set. This means waking tasks are
-			 * treated differently to rescheduling tasks.
-			 */
-			set_task_cpu(p, cpu);
 			return cpu_rq(cpu);
 		}
 		cpu = cpumask_next(cpu, &check);
