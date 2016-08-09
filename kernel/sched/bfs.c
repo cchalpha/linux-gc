@@ -7410,18 +7410,13 @@ static void tasks_cpu_hotplug(int cpu)
 
 	do_each_thread(t, p) {
 		clear_sticky(p);
+
 		if (cpumask_test_cpu(cpu, &p->cpus_allowed_master)) {
 			count++;
-			if (likely(cpumask_and(tsk_cpus_allowed(p),
-					   &p->cpus_allowed_master,
-					   cpu_online_mask))) {
-				p->nr_cpus_allowed =
-					cpumask_weight(tsk_cpus_allowed(p));
-				continue;
-			}
-			cpumask_copy(tsk_cpus_allowed(p),
-				     &p->cpus_allowed_master);
-			cpumask_set_cpu(0, tsk_cpus_allowed(p));
+			if (unlikely(!cpumask_and(tsk_cpus_allowed(p),
+						  &p->cpus_allowed_master,
+						  cpu_online_mask)))
+				cpumask_set_cpu(0, tsk_cpus_allowed(p));
 			p->nr_cpus_allowed = cpumask_weight(tsk_cpus_allowed(p));
 		}
 	} while_each_thread(t, p);
