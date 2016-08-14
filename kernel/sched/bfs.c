@@ -214,6 +214,15 @@ struct global_rq {
 	cpumask_t cpu_idle_map;
 	cpumask_t non_scaled_cpumask;
 	cpumask_t cpu_preemptable_mask;
+#ifdef CONFIG_SCHED_SMT
+	cpumask_t cpu_sibling_nonitself_mask[NR_CPUS];
+#endif
+#ifdef CONFIG_SCHED_MC
+	cpumask_t cpu_coregroup_nonsibling_mask[NR_CPUS];
+#endif
+	cpumask_t cpu_core_noncoregroup_mask[NR_CPUS];
+	cpumask_t cpu_other_noncore_mask[NR_CPUS];
+
 #ifndef CONFIG_64BIT
 	raw_spinlock_t priodl_lock;
 #endif
@@ -3854,25 +3863,12 @@ static inline bool is_no_dedicated_task(int cpu)
 	return (grq.nr_cpu_dedicated_task[cpu] == 0);
 }
 
-/*
- * pick_other_cpu_stick_task()
- * This function should just be called to pick the preempt stick task in
- * other cpu/rq, and it *must not* hold the grq.lock or dead lock will
- * occur. It requires to acquire two rq locks.
- */
 static inline struct task_struct *
-pick_other_cpu_stick_task(int cpu, struct rq *rq)
+take_stick_task_cpumask(int cpu, struct cpumask *chkp)
 {
 	int tcpu;
-	struct cpumask other_preemptable_mask;
 
-	if (!cpumask_test_cpu(cpu, &grq.non_scaled_cpumask))
-		return rq->idle;
-
-	cpumask_copy(&other_preemptable_mask, &grq.cpu_preemptable_mask);
-	cpumask_clear_cpu(cpu, &other_preemptable_mask);
-
-	for_each_cpu(tcpu, &other_preemptable_mask) {
+	for_each_cpu(tcpu, chkp) {
 		struct rq *trq;
 		struct task_struct *p;
 
@@ -3884,7 +3880,7 @@ pick_other_cpu_stick_task(int cpu, struct rq *rq)
 
 		raw_spin_lock_nested(&trq->lock, SINGLE_DEPTH_NESTING);
 		if (unlikely(trq->preempt_task != p ||
-			     needs_other_cpu(p, cpu))) {
+					 needs_other_cpu(p, cpu))) {
 			raw_spin_unlock(&trq->lock);
 			continue;
 		}
@@ -3895,7 +3891,65 @@ pick_other_cpu_stick_task(int cpu, struct rq *rq)
 
 		return p;
 	}
+	return NULL;
+}
 
+/*
+ * pick_other_cpu_stick_task()
+ * This function should just be called to pick the preempt stick task in
+ * other cpu/rq, and it *must not* hold the grq.lock or dead lock will
+ * occur. It requires to acquire two rq locks.
+ */
+static inline struct task_struct *
+pick_other_cpu_stick_task(int cpu, struct rq *rq)
+{
+#ifdef CONFIG_SMP
+	struct task_struct *p = NULL;
+	struct cpumask check;
+	int num_preemptible_cpus;
+
+	if (!cpumask_test_cpu(cpu, &grq.non_scaled_cpumask))
+		return rq->idle;
+
+	num_preemptible_cpus = cpumask_weight(&grq.cpu_preemptable_mask);
+	if (0 == num_preemptible_cpus)
+		return rq->idle;
+	if (1 == num_preemptible_cpus) {
+		p = take_stick_task_cpumask(cpu, &grq.cpu_preemptable_mask);
+		if (p)
+			return p;
+		return rq->idle;
+	}
+
+#ifdef CONFIG_SCHED_SMT
+	if (cpumask_and(&check, &grq.cpu_preemptable_mask,
+			&grq.cpu_sibling_nonitself_mask[cpu])) {
+		p = take_stick_task_cpumask(cpu, &check);
+		if (p)
+			return p;
+	}
+#endif
+#ifdef CONFIG_SCHED_MC
+	if (cpumask_and(&check, &grq.cpu_preemptable_mask,
+			&grq.cpu_coregroup_nonsibling_mask[cpu])) {
+		p = take_stick_task_cpumask(cpu, &check);
+		if (p)
+			return p;
+	}
+#endif
+	if (cpumask_and(&check, &grq.cpu_preemptable_mask,
+			&grq.cpu_core_noncoregroup_mask[cpu])) {
+		p = take_stick_task_cpumask(cpu, &check);
+		if (p)
+			return p;
+	}
+	if (cpumask_and(&check, &grq.cpu_preemptable_mask,
+			&grq.cpu_other_noncore_mask[cpu])) {
+		p = take_stick_task_cpumask(cpu, &check);
+		if (p)
+			return p;
+	}
+#endif
 	return rq->idle;
 }
 
@@ -5929,6 +5983,7 @@ SYSCALL_DEFINE1(sched_get_priority_min, int, policy)
 
 /**
  * sys_sched_rr_get_interval - return the default timeslice of a process.
+ *
  * @pid: pid of the process.
  * @interval: userspace pointer to the timeslice value.
  *
@@ -7661,6 +7716,39 @@ static const cpumask_t *thread_cpumask(int cpu)
 }
 #endif
 
+static void sched_init_cpu_topology_cpumask(void)
+{
+#ifdef CONFIG_SMP
+	int cpu;
+
+	for_each_online_cpu(cpu) {
+#ifdef CONFIG_SCHED_SMT
+		cpumask_copy(&grq.cpu_sibling_nonitself_mask[cpu],
+			     topology_sibling_cpumask(cpu));
+		cpumask_clear_cpu(cpu, &grq.cpu_sibling_nonitself_mask[cpu]);
+#endif
+#ifdef CONFIG_SCHED_MC
+		cpumask_complement(&grq.cpu_coregroup_nonsibling_mask[cpu],
+				   topology_sibling_cpumask(cpu));
+		cpumask_and(&grq.cpu_coregroup_nonsibling_mask[cpu],
+			    &grq.cpu_coregroup_nonsibling_mask[cpu],
+			    cpu_coregroup_mask(cpu));
+#endif
+		cpumask_complement(&grq.cpu_core_noncoregroup_mask[cpu],
+				   cpu_coregroup_mask(cpu));
+		cpumask_and(&grq.cpu_core_noncoregroup_mask[cpu],
+			    &grq.cpu_core_noncoregroup_mask[cpu],
+			    topology_core_cpumask(cpu));
+
+		cpumask_complement(&grq.cpu_other_noncore_mask[cpu],
+				   topology_core_cpumask(cpu));
+		cpumask_and(&grq.cpu_other_noncore_mask[cpu],
+			    &grq.cpu_other_noncore_mask[cpu],
+			    cpu_possible_mask);
+	}
+#endif
+}
+
 enum sched_domain_level {
 	SD_LV_NONE = 0,
 	SD_LV_SIBLING,
@@ -7751,6 +7839,7 @@ void __init sched_init_smp(void)
 			printk(KERN_DEBUG "BFS LOCALITY CPU %d to %d: %d\n", cpu, other_cpu, rq->cpu_locality[other_cpu]);
 		}
 	}
+	sched_init_cpu_topology_cpumask();
 	sched_smp_initialized = true;
 }
 #else
