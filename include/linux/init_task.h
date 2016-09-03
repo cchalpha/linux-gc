@@ -246,7 +246,8 @@ extern struct cred init_cred;
 	.restart_block = {						\
 		.fn = do_no_restart_syscall,				\
 	},								\
-	.run_list	= LIST_HEAD_INIT(tsk.run_list),			\
+	.sl_level	= 0,						\
+	.sl_node	= SKIPLIST_NODE_INIT(tsk.sl_node),		\
 	.time_slice	= HZ,					\
 	.tasks		= LIST_HEAD_INIT(tsk.tasks),			\
 	INIT_PUSHABLE_TASKS(tsk)					\

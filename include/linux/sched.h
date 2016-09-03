@@ -26,6 +26,7 @@
 #include <linux/signal_types.h>
 #include <linux/mm_types_task.h>
 #include <linux/task_io_accounting.h>
+#include <linux/skip_list.h>
 
 /* task_struct member predeclarations (sorted alphabetically): */
 struct audit_context;
@@ -541,6 +542,10 @@ struct task_struct {
 #ifdef CONFIG_SCHED_BFS
 	int				time_slice;
 	u64				deadline;
+	/* skip list level */
+	int				sl_level;
+	/* skip list node */
+	struct skiplist_node		sl_node;
 	struct list_head		run_list;
 	u64				last_ran;
 	/* sched_clock time spent running */

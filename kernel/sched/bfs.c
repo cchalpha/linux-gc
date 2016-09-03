@@ -74,6 +74,7 @@
 #include <linux/context_tracking.h>
 #include <linux/sched/prio.h>
 #include <linux/tick.h>
+#include <linux/skip_list.h>
 
 #include <asm/irq_regs.h>
 #include <asm/switch_to.h>
@@ -182,8 +183,6 @@ struct global_rq {
 	unsigned long nr_running;
 	unsigned long nr_uninterruptible;
 	unsigned long long nr_switches;
-	struct list_head queue[PRIO_LIMIT];
-	DECLARE_BITMAP(prio_bitmap, PRIO_LIMIT + 1);
 	unsigned long qnr; /* queued not running */
 #ifdef CONFIG_SMP
 	cpumask_t cpu_idle_map;
@@ -196,6 +195,8 @@ struct global_rq {
 	raw_spinlock_t iso_lock;
 	int iso_ticks;
 	bool iso_refractory;
+
+	struct skiplist_node sl_header;
 };
 
 #ifdef CONFIG_SMP
@@ -534,24 +535,29 @@ static inline bool deadline_after(u64 deadline, u64 time)
 }
 
 /*
- * A task that is queued but not running will be on the grq run list.
- * A task that is not running or queued will not be on the grq run list.
- * A task that is currently running will have ->on_cpu set but not on the
- * grq run list.
+ * A task that is not running or queued will have an empty skip list node.
+ * A task that is queued but not running will be on the grq skip list.
+ * A task that is currently running will have ->on_cpu set but has an empty skip
+ * list.
+ *
+ * A task that is not running or queued will not have a node set.
+ * A task that is queued but not running will have a node set.
+ * A task that is currently running will have ->on_cpu set but no node set.
  */
 static inline bool task_queued(struct task_struct *p)
 {
-	return (!list_empty(&p->run_list));
+	return !skiplist_empty(&p->sl_node);
 }
 
 /*
- * Removing from the global runqueue. Enter with grq locked.
+ * Removing from the global runqueue. Enter with grq locked. Deleting a task
+ * from the skip list is done via the stored node reference in the task struct
+ * and does not require a full look up. Thus it occurs in O(k) time where k
+ * is the "level" of the list the task was stored at - usually < 4, max 16.
  */
 static void dequeue_task(struct task_struct *p)
 {
-	list_del_init(&p->run_list);
-	if (list_empty(grq.queue + p->prio))
-		__clear_bit(p->prio, grq.prio_bitmap);
+	skiplist_del_init(&grq.sl_header, &p->sl_node);
 	sched_info_dequeued(task_rq(p), p);
 }
 
@@ -575,10 +581,62 @@ static bool isoprio_suitable(void)
 }
 
 /*
+ * bfs_skiplist_random_level -- Returns a pseudo-random level number for skip
+ * list node which is used in BFS run queue.
+ *
+ * In current implementation, based on testing, the first 8 bits in microseconds
+ * of niffies are suitable for random level population.
+ * find_first_bit() is used to satisfy p = 0.5 between each levels, and there
+ * should be platform hardware supported instruction(known as ctz/clz) to speed
+ * up this function.
+ * The skiplist level for a task is populated when task is created and doesn't
+ * change in task's life time. When task is being inserted into run queue, this
+ * skiplist level is set to task's sl_node->level, the skiplist insert function
+ * may change it based on current level of the skip lsit.
+ */
+static inline int bfs_skiplist_random_level(void)
+{
+	int level;
+	/*
+	 * Some architectures don't have better than microsecond resolution
+	 * so mask out ~microseconds as the random seed for skiplist insertion.
+	 */
+	long unsigned int randseed = grq.niffies >> 10;
+
+	level = find_first_bit(&randseed, sizeof(randseed));
+	if (unlikely(level >= NUM_SKIPLIST_LEVEL))
+		level = NUM_SKIPLIST_LEVEL - 1;
+	return level;
+}
+
+/**
+ * bfs_skiplist_task_search -- search function used in BFS run queue skip list
+ * node insert operation.
+ * @it: iterator pointer to the node in the skip list
+ * @node: pointer to the skiplist_node to be inserted
+ *
+ * Returns true if key of @it is less or equal to key value of @node, otherwise
+ * false.
+ */
+static inline bool
+bfs_skiplist_task_search(struct skiplist_node *it, struct skiplist_node *node)
+{
+	return (skiplist_entry(it, struct task_struct, sl_node)->sl_node.key <=
+		skiplist_entry(node, struct task_struct, sl_node)->sl_node.key);
+}
+
+/*
+ * Define the skip list insert function for BFS
+ */
+DEFINE_SKIPLIST_INSERT_FUNC(bfs_skiplist_insert, bfs_skiplist_task_search);
+
+/*
  * Adding to the global runqueue. Enter with grq locked.
  */
 static void enqueue_task(struct task_struct *p, struct rq *rq)
 {
+	u64 sl_id;
+
 	if (!rt_task(p)) {
 		/* Check it hasn't gotten rt from PI */
 		if ((idleprio_task(p) && idleprio_suitable(p)) ||
@@ -587,8 +645,30 @@ static void enqueue_task(struct task_struct *p, struct rq *rq)
 		else
 			p->prio = NORMAL_PRIO;
 	}
-	__set_bit(p->prio, grq.prio_bitmap);
-	list_add_tail(&p->run_list, grq.queue + p->prio);
+	/*
+	 * The sl_id key passed to the skiplist generates a sorted list.
+	 * Realtime and sched iso tasks run FIFO so they only need be sorted
+	 * according to priority. The skiplist will put tasks of the same
+	 * key inserted later in FIFO order. Tasks of sched normal, batch
+	 * and idleprio are sorted according to their deadlines. Idleprio
+	 * tasks are offset by an impossibly large deadline value ensuring
+	 * they get sorted into last positions, but still according to their
+	 * own deadlines. This creates a "landscape" of skiplists running
+	 * from priority 0 realtime in first place to the lowest priority
+	 * idleprio tasks last. Skiplist insertion is an O(log n) process.
+	 */
+	if (p->prio <= ISO_PRIO)
+		sl_id = p->prio;
+	else {
+		sl_id = p->deadline;
+		if (p->prio == IDLE_PRIO)
+			sl_id |= 0xF000000000000000;
+	}
+
+	p->sl_node.key = sl_id;
+	p->sl_node.level = p->sl_level;
+	bfs_skiplist_insert(&grq.sl_header, &p->sl_node);
+
 	sched_info_queued(rq, p);
 }
 
@@ -1719,7 +1799,8 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 		p->sched_reset_on_fork = 0;
 	}
 
-	INIT_LIST_HEAD(&p->run_list);
+	p->sl_level = bfs_skiplist_random_level();
+	INIT_SKIPLIST_NODE(&p->sl_node);
 #ifdef CONFIG_SCHED_INFO
 	if (unlikely(sched_info_on()))
 		memset(&p->sched_info, 0, sizeof(p->sched_info));
@@ -3276,100 +3357,72 @@ found_middle:
 }
 
 /*
- * O(n) lookup of all tasks in the global runqueue. The real brainfuck
- * of lock contention and O(n). It's not really O(n) as only the queued,
- * but not running tasks are scanned, and is O(n) queued in the worst case
- * scenario only because the right task can be found before scanning all of
- * them.
- * Tasks are selected in this order:
- * Real time tasks are selected purely by their static priority and in the
- * order they were queued, so the lowest value idx, and the first queued task
- * of that priority value is chosen.
- * If no real time tasks are found, the SCHED_ISO priority is checked, and
- * all SCHED_ISO tasks have the same priority value, so they're selected by
- * the earliest deadline value.
- * If no SCHED_ISO tasks are found, SCHED_NORMAL tasks are selected by the
- * earliest deadline.
- * Finally if no SCHED_NORMAL tasks are found, SCHED_IDLEPRIO tasks are
- * selected by the earliest deadline.
+ * Task selection with skiplists is a simple matter of picking off the first
+ * task in the sorted list, an O(1) operation. The only time it takes longer
+ * is if tasks do not have suitable affinity and then we iterate over entries
+ * till we find the first that does. Worst case here is no tasks with suitable
+ * affinity and taking O(n).
  */
 static inline struct
 task_struct *earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *idle)
 {
-	struct task_struct *edt = NULL;
-	unsigned long idx = -1;
+	struct task_struct *edt = idle;
+	struct skiplist_node *node = &grq.sl_header;
+	u64 earliest_deadline = ~0ULL;
 
-	do {
-		struct list_head *queue;
-		struct task_struct *p;
-		u64 earliest_deadline;
+	while ((node = node->next[0]) != &grq.sl_header) {
+		struct task_struct *p = skiplist_entry(node, struct task_struct,
+						       sl_node);
+		int tcpu;
 
-		idx = next_sched_bit(grq.prio_bitmap, ++idx);
-		if (idx >= PRIO_LIMIT)
-			return idle;
-		queue = grq.queue + idx;
-
-		if (idx < MAX_RT_PRIO) {
-			/* We found an rt task */
-			list_for_each_entry(p, queue, run_list) {
-				/* Make sure cpu affinity is ok */
-				if (needs_other_cpu(p, cpu))
-					continue;
-				edt = p;
-				goto out_take;
-			}
-			/*
-			 * None of the RT tasks at this priority can run on
-			 * this cpu
-			 */
+		/* Make sure affinity is ok */
+		if (needs_other_cpu(p, cpu))
 			continue;
+
+#ifdef CONFIG_SMT_NICE
+		if (!smt_should_schedule(p, cpu))
+			continue;
+#endif
+
+		/*
+		 * First matched RT task has the highest priority
+		 */
+		if (p->prio < MAX_RT_PRIO) {
+			edt = p;
+			break;
 		}
 
 		/*
-		 * No rt tasks. Find the earliest deadline task. Now we're in
-		 * O(n) territory.
+		 * Just search tasks with same priority of current candidate
 		 */
-		earliest_deadline = ~0ULL;
-		list_for_each_entry(p, queue, run_list) {
+		if (unlikely(p->prio > edt->prio))
+			break;
+
+		if (!sched_interactive && (tcpu = task_cpu(p)) != cpu) {
 			u64 dl;
 
-			/* Make sure cpu affinity is ok */
-			if (needs_other_cpu(p, cpu))
+			if (task_sticky(p) && scaling_rq(rq))
 				continue;
-
-#ifdef CONFIG_SMT_NICE
-			if (!smt_should_schedule(p, cpu))
+			dl = p->deadline << locality_diff(tcpu, rq);
+			if (unlikely(!deadline_before(dl, earliest_deadline)))
 				continue;
-#endif
-			/*
-			 * Soft affinity happens here by not scheduling a task
-			 * with its sticky flag set that ran on a different CPU
-			 * last when the CPU is scaling, or by greatly biasing
-			 * against its deadline when not, based on cpu cache
-			 * locality.
-			 */
-			if (sched_interactive)
-				dl = p->deadline;
-			else {
-				int tcpu = task_cpu(p);
-
-				if (tcpu != cpu && task_sticky(p) && scaling_rq(rq))
-					continue;
-				dl = p->deadline << locality_diff(tcpu, rq);
-			}
-
-			if (deadline_before(dl, earliest_deadline)) {
-				earliest_deadline = dl;
-				edt = p;
-			}
+			earliest_deadline = dl;
+			edt = p;
+			/* We continue even though we've found the earliest
+			 * deadline task as the locality offset means there
+			 * may be a better candidate after it. */
+			continue;
 		}
-	} while (!edt);
-
-out_take:
-	take_task(cpu, edt);
+		/* This wouldn't happen if we encountered a better deadline from
+		 * another CPU and have already set edt. */
+		if (likely(p->deadline < earliest_deadline))
+			edt = p;
+		break;
+	}
+	if (likely(edt != idle))
+		take_task(cpu, edt);
 	return edt;
 }
-
 
 /*
  * Print scheduling while atomic bug:
@@ -7261,6 +7314,8 @@ void __init sched_init(void)
 	grq.iso_ticks = 0;
 	grq.iso_refractory = false;
 	grq.noc = 1;
+	FULL_INIT_SKIPLIST_NODE(&grq.sl_header);
+
 #ifdef CONFIG_SMP
 	init_defrootdomain();
 	grq.qnr = grq.idle_cpus = 0;
@@ -7311,11 +7366,6 @@ void __init sched_init(void)
 		}
 	}
 #endif
-
-	for (i = 0; i < PRIO_LIMIT; i++)
-		INIT_LIST_HEAD(grq.queue + i);
-	/* delimiter for bitsearch */
-	__set_bit(PRIO_LIMIT, grq.prio_bitmap);
 
 #ifdef CONFIG_PREEMPT_NOTIFIERS
 	INIT_HLIST_HEAD(&init_task.preempt_notifiers);
