@@ -59,6 +59,7 @@ struct sched_param {
 #include <linux/gfp.h>
 #include <linux/magic.h>
 #include <linux/cgroup-defs.h>
+#include <linux/skip_lists.h>
 
 #include <asm/processor.h>
 
@@ -1477,7 +1478,7 @@ struct task_struct {
 #ifdef CONFIG_SCHED_BFS
 	int time_slice;
 	u64 deadline;
-	struct list_head run_list;
+	skiplist_node *node; /* Skip list node id */
 	u64 last_ran;
 	u64 sched_time; /* sched_clock time spent running */
 #ifdef CONFIG_SMT_NICE
