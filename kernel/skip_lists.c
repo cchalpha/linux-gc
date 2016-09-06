@@ -17,7 +17,7 @@ generated that is more than the current maximum level, the
 current maximum level plus one is used instead.
 
 Levels start at zero and go up to MaxLevel (which is equal to
-	(MaxNumberOfLevels-1).
+MaxNumberOfLevels-1).
 
 The routines defined in this file are:
 
@@ -51,7 +51,7 @@ aid of prev<->next pointer manipulation and no searching.
 #include <linux/slab.h>
 #include <linux/skip_lists.h>
 
-#define MaxNumberOfLevels 16 /* Fit within a uint8_t */
+#define MaxNumberOfLevels 16
 #define MaxLevel (MaxNumberOfLevels - 1)
 #define newNode kmalloc(sizeof(skiplist_node), GFP_ATOMIC)
 
@@ -74,6 +74,7 @@ skiplist *new_skiplist(skiplist_node *slnode)
 	skiplist *l = kmalloc(sizeof(skiplist), GFP_ATOMIC);
 
 	BUG_ON(!l);
+	l->entries = 0;
 	l->level = 0;
 	l->header = slnode;
 	return l;
@@ -93,12 +94,39 @@ void free_skiplist(skiplist_node *slnode, skiplist *l)
 	kfree(l);
 }
 
-static inline uint8_t randomLevel(u64 randseed)
+/*
+ * Returns a pseudo-random number based on the randseed value by masking out
+ * 0-15. As many levels are not required when only few values are on the list,
+ * we limit the height of the levels according to how many list entries there
+ * are in a cheap manner. The height of the levels may have been higher while
+ * there were more entries queued previously but as this code is used only by
+ * the scheduler, entries are short lived and will be torn down regularly.
+ *
+ * 00-03 entries - 1 level
+ * 04-07 entries - 2 levels
+ * 08-15 entries - 4 levels
+ * 15-31 entries - 7 levels
+ *  32+  entries - max(16) levels
+ */
+static inline unsigned int randomLevel(int entries, unsigned int randseed)
 {
-	return randseed & 0xF;
+	unsigned int mask;
+
+	if (entries > 31)
+		mask = 0xF;
+	else if (entries > 15)
+		mask = 0x7;
+	else if (entries > 7)
+		mask = 0x3;
+	else if (entries > 3)
+		mask = 0x1;
+	else
+		return 0;
+
+	return randseed & mask;
 }
 
-skiplist_node *skiplist_insert(skiplist_node *slnode, skiplist *l, keyType key, valueType value, u64 randseed)
+skiplist_node *skiplist_insert(skiplist_node *slnode, skiplist *l, keyType key, valueType value, unsigned int randseed)
 {
 	skiplist_node *update[MaxNumberOfLevels];
 	skiplist_node *p, *q;
@@ -111,7 +139,7 @@ skiplist_node *skiplist_insert(skiplist_node *slnode, skiplist *l, keyType key, 
 		update[k] = p;
 	} while (--k >= 0);
 
-	k = randomLevel(randseed);
+	k = randomLevel(++l->entries, randseed);
 	if (k > l->level) {
 		k = ++l->level;
 		update[k] = slnode;
@@ -145,4 +173,5 @@ void skiplist_delnode(skiplist_node *slnode, skiplist *l, skiplist_node *node)
 			m--;
 		l->level = m;
 	}
+	l->entries--;
 }

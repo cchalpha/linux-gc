@@ -6,7 +6,7 @@ typedef void *valueType;
 typedef struct nodeStructure skiplist_node;
 
 struct nodeStructure {
-	uint8_t level;	/* Levels in this structure */
+	int level;	/* Levels in this structure */
 	keyType key;
 	valueType value;
 	skiplist_node *next[16];
@@ -14,13 +14,14 @@ struct nodeStructure {
 };
 
 typedef struct listStructure {
-	uint8_t level;	/* Maximum level of the list
+	int entries;
+	int level;	/* Maximum level of the list
 			(1 more than the number of levels in the list) */
 	skiplist_node *header; /* pointer to header */
 } skiplist;
 
 skiplist_node *skiplist_init(void);
 skiplist *new_skiplist(skiplist_node *slnode);
-skiplist_node *skiplist_insert(skiplist_node *slnode, skiplist *l, keyType key, valueType value, u64 randseed);
+skiplist_node *skiplist_insert(skiplist_node *slnode, skiplist *l, keyType key, valueType value, unsigned int randseed);
 void skiplist_delnode(skiplist_node *slnode, skiplist *l, skiplist_node *node);
 #endif /* _LINUX_SKIP_LISTS_H */
