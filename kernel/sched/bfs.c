@@ -578,6 +578,7 @@ static bool isoprio_suitable(void)
  */
 static void enqueue_task(struct task_struct *p, struct rq *rq)
 {
+	unsigned int randseed;
 	u64 sl_id;
 
 	if (!rt_task(p)) {
@@ -607,7 +608,12 @@ static void enqueue_task(struct task_struct *p, struct rq *rq)
 		if (p->prio == IDLE_PRIO)
 			sl_id |= 0xF000000000000000;
 	}
-	p->node = skiplist_insert(grq.node, grq.sl, sl_id, p, grq.niffies);
+	/*
+	 * Some architectures don't have better than microsecond resolution
+	 * so mask out ~microseconds as the random seed for skiplist insertion.
+	 */
+	randseed = (grq.niffies >> 10) & 0xFFFFFFFF;
+	p->node = skiplist_insert(grq.node, grq.sl, sl_id, p, randseed);
 	sched_info_queued(rq, p);
 }
 
