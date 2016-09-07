@@ -3327,6 +3327,14 @@ task_struct *earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *
 			continue;
 #endif
 
+		/*
+		 * First matched RT task has the highest priority
+		 */
+		if (p->prio < MAX_RT_PRIO) {
+			edt = p;
+			break;
+		}
+
 		if (!sched_interactive && (tcpu = task_cpu(p)) != cpu) {
 			u64 dl;
 
