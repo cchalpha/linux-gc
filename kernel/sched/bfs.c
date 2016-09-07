@@ -3335,6 +3335,12 @@ task_struct *earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *
 			break;
 		}
 
+		/*
+		 * Just search tasks with same priority of current candidate
+		 */
+		if (unlikely(p->prio > edt->prio))
+			break;
+
 		if (!sched_interactive && (tcpu = task_cpu(p)) != cpu) {
 			u64 dl;
 
