@@ -196,8 +196,7 @@ struct global_rq {
 	int iso_ticks;
 	bool iso_refractory;
 
-	skiplist_node *node;
-	skiplist *sl;
+	struct skiplist_node sl_header;
 };
 
 #ifdef CONFIG_SMP
@@ -532,13 +531,18 @@ static inline bool deadline_after(u64 deadline, u64 time)
 }
 
 /*
+ * A task that is not running or queued will have an empty skip list node.
+ * A task that is queued but not running will be on the grq skip list.
+ * A task that is currently running will have ->on_cpu set but has an empty skip
+ * list.
+ *
  * A task that is not running or queued will not have a node set.
  * A task that is queued but not running will have a node set.
  * A task that is currently running will have ->on_cpu set but no node set.
  */
 static inline bool task_queued(struct task_struct *p)
 {
-	return p->node;
+	return !skiplist_empty(&p->sl_node);
 }
 
 /*
@@ -549,8 +553,7 @@ static inline bool task_queued(struct task_struct *p)
  */
 static void dequeue_task(struct task_struct *p)
 {
-	skiplist_delnode(grq.node, grq.sl, p->node);
-	p->node = NULL;
+	skiplist_del_init(&grq.sl_header, &p->sl_node);
 	sched_info_dequeued(task_rq(p), p);
 }
 
@@ -573,6 +576,37 @@ static bool isoprio_suitable(void)
 	return !grq.iso_refractory;
 }
 
+/*
+ * Returns a pseudo-random number based on the randseed value by masking out
+ * 0-15. As many levels are not required when only few values are on the list,
+ * we limit the height of the levels according to how many list entries there
+ * are in a cheap manner. The height of the levels may have been higher while
+ * there were more entries queued previously but as this code is used only by
+ * the scheduler, entries are short lived and will be torn down regularly.
+ *
+ * 00-03 entries - 1 level
+ * 04-07 entries - 2 levels
+ * 08-15 entries - 4 levels
+ * 15-31 entries - 7 levels
+ *  32+  entries - max(16) levels
+ */
+static inline unsigned int bfs_skiplist_random_level(int entries, unsigned int randseed)
+{
+	unsigned int mask;
+
+	if (entries > 31)
+		mask = 0xF;
+	else if (entries > 15)
+		mask = 0x7;
+	else if (entries > 7)
+		mask = 0x3;
+	else if (entries > 3)
+		mask = 0x1;
+	else
+		return 0;
+
+	return randseed & mask;
+}
 /*
  * Adding to the global runqueue. Enter with grq locked.
  */
@@ -613,7 +647,11 @@ static void enqueue_task(struct task_struct *p, struct rq *rq)
 	 * so mask out ~microseconds as the random seed for skiplist insertion.
 	 */
 	randseed = (grq.niffies >> 10) & 0xFFFFFFFF;
-	p->node = skiplist_insert(grq.node, grq.sl, sl_id, p, randseed);
+
+	p->sl_node.key = sl_id;
+	p->sl_node.level = bfs_skiplist_random_level(grq.qnr + 1, randseed);
+	skiplist_insert(&grq.sl_header, &p->sl_node);
+
 	sched_info_queued(rq, p);
 }
 
@@ -1744,7 +1782,7 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 		p->sched_reset_on_fork = 0;
 	}
 
-	p->node = NULL;
+	INIT_SKIPLIST_NODE(&p->sl_node);
 #ifdef CONFIG_SCHED_INFO
 	if (unlikely(sched_info_on()))
 		memset(&p->sched_info, 0, sizeof(p->sched_info));
@@ -3311,11 +3349,12 @@ static inline struct
 task_struct *earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *idle)
 {
 	struct task_struct *edt = idle;
-	skiplist_node *node = grq.node;
+	struct skiplist_node *node = &grq.sl_header;
 	u64 earliest_deadline = ~0ULL;
 
-	while ((node = node->next[0]) != grq.node) {
-		struct task_struct *p = node->value;
+	while ((node = node->next[0]) != &grq.sl_header) {
+		struct task_struct *p = skiplist_entry(node, struct task_struct,
+						       sl_node);
 		int tcpu;
 
 		/* Make sure affinity is ok */
@@ -7257,8 +7296,7 @@ void __init sched_init(void)
 	grq.iso_ticks = 0;
 	grq.iso_refractory = false;
 	grq.noc = 1;
-	grq.node = skiplist_init();
-	grq.sl = new_skiplist(grq.node);
+	INIT_SKIPLIST_NODE(&grq.sl_header);
 
 #ifdef CONFIG_SMP
 	init_defrootdomain();
