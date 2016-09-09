@@ -74,7 +74,7 @@
 #include <linux/context_tracking.h>
 #include <linux/sched/prio.h>
 #include <linux/tick.h>
-#include <linux/skip_lists.h>
+#include <linux/skip_list.h>
 
 #include <asm/irq_regs.h>
 #include <asm/switch_to.h>
@@ -577,42 +577,60 @@ static bool isoprio_suitable(void)
 }
 
 /*
- * Returns a pseudo-random number based on the randseed value by masking out
- * 0-15. As many levels are not required when only few values are on the list,
- * we limit the height of the levels according to how many list entries there
- * are in a cheap manner. The height of the levels may have been higher while
- * there were more entries queued previously but as this code is used only by
- * the scheduler, entries are short lived and will be torn down regularly.
+ * bfs_skiplist_random_level -- Returns a pseudo-random level number for skip
+ * list node which is used in BFS run queue.
  *
- * 00-03 entries - 1 level
- * 04-07 entries - 2 levels
- * 08-15 entries - 4 levels
- * 15-31 entries - 7 levels
- *  32+  entries - max(16) levels
+ * In current implementation, based on testing, the first 8 bits in microseconds
+ * of niffies are suitable for random level population.
+ * find_first_bit() is used to satisfy p = 0.5 between each levels, and there
+ * should be platform hardware supported instruction(known as ctz/clz) to speed
+ * up this function.
+ * The skiplist level for a task is populated when task is created and doesn't
+ * change in task's life time. When task is being inserted into run queue, this
+ * skiplist level is set to task's sl_node->level, the skiplist insert function
+ * may change it based on current level of the skip lsit.
  */
-static inline unsigned int bfs_skiplist_random_level(int entries, unsigned int randseed)
+static inline int bfs_skiplist_random_level(void)
 {
-	unsigned int mask;
+	int level;
+	/*
+	 * Some architectures don't have better than microsecond resolution
+	 * so mask out ~microseconds as the random seed for skiplist insertion.
+	 */
+	long unsigned int randseed = grq.niffies >> 10;
 
-	if (entries > 31)
-		mask = 0xF;
-	else if (entries > 15)
-		mask = 0x7;
-	else if (entries > 7)
-		mask = 0x3;
-	else if (entries > 3)
-		mask = 0x1;
-	else
-		return 0;
-
-	return randseed & mask;
+	level = find_first_bit(&randseed, sizeof(randseed));
+	if (unlikely(level >= NUM_SKIPLIST_LEVEL))
+		level = NUM_SKIPLIST_LEVEL - 1;
+	return level;
 }
+
+/**
+ * bfs_skiplist_task_search -- search function used in BFS run queue skip list
+ * node insert operation.
+ * @it: iterator pointer to the node in the skip list
+ * @node: pointer to the skiplist_node to be inserted
+ *
+ * Returns true if key of @it is less or equal to key value of @node, otherwise
+ * false.
+ */
+static inline bool
+bfs_skiplist_task_search(struct skiplist_node *it, struct skiplist_node *node)
+{
+	return (skiplist_entry(it, struct task_struct, sl_node)->sl_node.key <=
+		skiplist_entry(node, struct task_struct, sl_node)->sl_node.key);
+}
+
+/*
+ * Define the skip list insert function for BFS
+ */
+DEFINE_SKIPLIST_INSERT_FUNC(bfs_skiplist_insert, bfs_skiplist_task_search);
+
 /*
  * Adding to the global runqueue. Enter with grq locked.
  */
 static void enqueue_task(struct task_struct *p, struct rq *rq)
 {
-	unsigned int randseed;
 	u64 sl_id;
 
 	if (!rt_task(p)) {
@@ -642,15 +660,10 @@ static void enqueue_task(struct task_struct *p, struct rq *rq)
 		if (p->prio == IDLE_PRIO)
 			sl_id |= 0xF000000000000000;
 	}
-	/*
-	 * Some architectures don't have better than microsecond resolution
-	 * so mask out ~microseconds as the random seed for skiplist insertion.
-	 */
-	randseed = (grq.niffies >> 10) & 0xFFFFFFFF;
 
 	p->sl_node.key = sl_id;
-	p->sl_node.level = bfs_skiplist_random_level(grq.qnr + 1, randseed);
-	skiplist_insert(&grq.sl_header, &p->sl_node);
+	p->sl_node.level = p->sl_level;
+	bfs_skiplist_insert(&grq.sl_header, &p->sl_node);
 
 	sched_info_queued(rq, p);
 }
@@ -1782,6 +1795,7 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 		p->sched_reset_on_fork = 0;
 	}
 
+	p->sl_level = bfs_skiplist_random_level();
 	INIT_SKIPLIST_NODE(&p->sl_node);
 #ifdef CONFIG_SCHED_INFO
 	if (unlikely(sched_info_on()))
@@ -7296,7 +7310,7 @@ void __init sched_init(void)
 	grq.iso_ticks = 0;
 	grq.iso_refractory = false;
 	grq.noc = 1;
-	INIT_SKIPLIST_NODE(&grq.sl_header);
+	FULL_INIT_SKIPLIST_NODE(&grq.sl_header);
 
 #ifdef CONFIG_SMP
 	init_defrootdomain();
