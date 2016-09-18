@@ -4360,9 +4360,6 @@ static void __setscheduler_params(struct task_struct *p,
 static void __setscheduler(struct rq *rq, struct task_struct *p,
 			   const struct sched_attr *attr, bool keep_boost)
 {
-	int oldrtprio = p->rt_priority;
-	int oldprio = p->prio;
-
 	__setscheduler_params(p, attr);
 
 	/*
@@ -4374,13 +4371,6 @@ static void __setscheduler(struct rq *rq, struct task_struct *p,
 	else
 		p->prio = p->normal_prio;
 	update_task_priodl(p);
-
-	if (task_running(p)) {
-		reset_rq_task(rq, p);
-		/* Resched only if we might now be preempted */
-		if (p->prio > oldprio || p->rt_priority > oldrtprio)
-			resched_curr(rq);
-	}
 }
 
 /*
