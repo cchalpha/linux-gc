@@ -1153,6 +1153,17 @@ static inline void deactivate_task(struct task_struct *p, struct rq *rq)
 }
 
 #ifdef CONFIG_SMP
+static inline void __set_task_cpu(struct task_struct *p, unsigned int cpu)
+{
+	/*
+	 * After ->cpu is set up to a new value, task_grq_lock(p, ...) can be
+	 * successfully executed on another CPU. We must ensure that updates of
+	 * per-task data have been completed by this moment.
+	 */
+	smp_wmb();
+	task_thread_info(p)->cpu = cpu;
+}
+
 void set_task_cpu(struct task_struct *p, unsigned int cpu)
 {
 #ifdef CONFIG_LOCKDEP
@@ -1166,17 +1177,11 @@ void set_task_cpu(struct task_struct *p, unsigned int cpu)
 	trace_sched_migrate_task(p, cpu);
 	perf_event_task_migrate(p);
 
-	/*
-	 * After ->cpu is set up to a new value, task_grq_lock(p, ...) can be
-	 * successfully executed on another CPU. We must ensure that updates of
-	 * per-task data have been completed by this moment.
-	 */
-	smp_wmb();
 	if (p->on_rq) {
 		task_rq(p)->soft_affined--;
 		cpu_rq(cpu)->soft_affined++;
 	}
-	task_thread_info(p)->cpu = cpu;
+	__set_task_cpu(p, cpu);
 }
 
 static inline void
@@ -1818,16 +1823,12 @@ static void time_slice_expired(struct task_struct *p);
  */
 int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 {
+	unsigned long flags;
+	int cpu = get_cpu();
+
 #ifdef CONFIG_PREEMPT_NOTIFIERS
 	INIT_HLIST_HEAD(&p->preempt_notifiers);
 #endif
-	/*
-	 * The process state is set to the same value of the process executing
-	 * do_fork() code. That is running. This guarantees that nobody will
-	 * actually run it, and a signal or other external event cannot wake
-	 * it up and insert it on the runqueue either.
-	 */
-
 	/* Should be reset in fork.c but done here for ease of bfs patching */
 	p->on_rq =
 	p->utime =
@@ -1837,6 +1838,16 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 	p->sched_time =
 	p->stime_pc =
 	p->utime_pc = 0;
+
+	p->sl_level = bfs_skiplist_random_level();
+	INIT_SKIPLIST_NODE(&p->sl_node);
+
+	/*
+	 * We mark the process as NEW here. This guarantees that
+	 * nobody will actually run it, and a signal or other external
+	 * event cannot wake it up and insert it on the runqueue either.
+	 */
+	p->state = TASK_NEW;
 
 	/*
 	 * Revert to default priority/policy on fork if requested.
@@ -1859,8 +1870,21 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 		p->sched_reset_on_fork = 0;
 	}
 
-	p->sl_level = bfs_skiplist_random_level();
-	INIT_SKIPLIST_NODE(&p->sl_node);
+	/*
+	 * The child is not yet in the pid-hash so no cgroup attach races,
+	 * and the cgroup is pinned to this child due to cgroup_fork()
+	 * is ran before sched_fork().
+	 *
+	 * Silence PROVE_RCU.
+	 */
+	raw_spin_lock_irqsave(&p->pi_lock, flags);
+	/*
+	 * We're setting the cpu for the first time, we don't migrate,
+	 * so use __set_task_cpu().
+	 */
+	__set_task_cpu(p, cpu);
+	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
+
 #ifdef CONFIG_SCHED_INFO
 	if (unlikely(sched_info_on()))
 		memset(&p->sched_info, 0, sizeof(p->sched_info));
@@ -1868,6 +1892,8 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 	p->on_cpu = false;
 	clear_sticky(p);
 	init_task_preempt_count(p);
+
+	put_cpu();
 	return 0;
 }
 
@@ -1964,6 +1990,7 @@ void wake_up_new_task(struct task_struct *p)
 	parent = p->parent;
 	rq = task_grq_lock(p, &flags);
 
+	p->state = TASK_RUNNING;
 	/*
 	 * Reinit new task deadline as its creator deadline could have changed
 	 * since call to dup_task_struct().
@@ -1974,8 +2001,11 @@ void wake_up_new_task(struct task_struct *p)
 	 * If the task is a new process, current and parent are the same. If
 	 * the task is a new thread in the thread group, it will have much more
 	 * in common with current than with the parent.
+	 *
+	 * Use __set_task_cpu() to avoid calling sched_class::migrate_task_rq,
+	 * as we're not fully set-up yet.
 	 */
-	set_task_cpu(p, task_cpu(rq->curr));
+	__set_task_cpu(p, task_cpu(rq->curr));
 
 	/*
 	 * Make sure we do not leak PI boosting priority to the child.
@@ -3489,6 +3519,9 @@ static noinline void __schedule_bug(struct task_struct *prev)
 		pr_cont("\n");
 	}
 #endif
+	if (panic_on_warn)
+		panic("scheduling while atomic\n");
+
 	dump_stack();
 	add_taint(TAINT_WARN, LOCKDEP_STILL_OK);
 }
@@ -5106,7 +5139,8 @@ out_unlock:
  * @len: length in bytes of the bitmask pointed to by user_mask_ptr
  * @user_mask_ptr: user-space pointer to hold the current cpu mask
  *
- * Return: 0 on success. An error code otherwise.
+ * Return: size of CPU mask copied to user_mask_ptr on success. An
+ * error code otherwise.
  */
 SYSCALL_DEFINE3(sched_getaffinity, pid_t, pid, unsigned int, len,
 		unsigned long __user *, user_mask_ptr)
@@ -5549,7 +5583,7 @@ void init_idle(struct task_struct *idle, int cpu)
 
 	/* Silence PROVE_RCU */
 	rcu_read_lock();
-	set_task_cpu(idle, cpu);
+	__set_task_cpu(idle, cpu);
 	rcu_read_unlock();
 
 	rq->curr = rq->idle = idle;
@@ -7003,13 +7037,6 @@ static int cpuset_cpu_inactive(unsigned int cpu)
 	return 0;
 }
 
-static void sched_rq_cpu_starting(unsigned int cpu)
-{
-	struct rq *rq = cpu_rq(cpu);
-
-	account_reset_rq(rq);
-}
-
 int sched_cpu_activate(unsigned int cpu)
 {
 	struct rq *rq = cpu_rq(cpu);
@@ -7080,8 +7107,9 @@ int sched_cpu_starting(unsigned int cpu)
 	/*
 	 * BFS doesn't have rq start time record
 	 * set_cpu_rq_start_time(cpu);
+	 * And do nothing in sched_rq_cpu_starting()
+	 * sched_rq_cpu_starting(cpu);
 	 */
-	sched_rq_cpu_starting(cpu);
 	return 0;
 }
 
