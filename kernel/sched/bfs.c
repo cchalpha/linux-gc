@@ -115,6 +115,8 @@
 #define SCHED_PRIO(p)		((p) + MAX_RT_PRIO)
 #define STOP_PRIO		(MAX_RT_PRIO - 1)
 
+#define cacheable_task(p)	(batch_task(p) || idleprio_task(p))
+
 /*
  * Some helpers for converting to/from various scales. Use shifts to get
  * approximate multiples of ten for less overhead.
@@ -1297,7 +1299,7 @@ static inline void __cache_task(struct task_struct *p, struct rq *rq)
 
 static inline void cache_task(struct task_struct *p, struct rq *rq)
 {
-	if(p->mm && !rt_task(p))
+	if(p->mm && cacheable_task(p))
 		__cache_task(p, rq);
 }
 
@@ -4091,7 +4093,7 @@ activate_choose_task##subfix(struct rq *rq, int cpu,\
 		take_preempt_task(rq, next);\
 \
 		if (likely(next->priodl < prev->priodl)) {\
-			if (likely(prev->mm && !rt_task(prev))) {\
+			if (likely(prev->mm && cacheable_task(prev))) {\
 				rq->grq_locked = false;\
 				/* set prev as preempt_task */\
 				rq->preempt_task = prev;\
@@ -4124,7 +4126,7 @@ activate_choose_task##subfix(struct rq *rq, int cpu,\
 		}\
 		next = earliest_deadline_task(rq, cpu, prev);\
 		if (next !=  prev) {\
-			if (likely(prev->mm && !rt_task(prev))) {\
+			if (likely(prev->mm && cacheable_task(prev))) {\
 				/* set prev as preempt_task */\
 				rq->preempt_task = prev;\
 				__cache_task(prev, rq);\
