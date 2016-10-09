@@ -7328,7 +7328,6 @@ int sched_cpu_activate(unsigned int cpu)
 		set_rq_online(rq);
 	}
 	/* mark rq preemptable */
-	cpumask_set_cpu(cpu, &grq.cpu_preemptable_mask);
 	tasks_cpu_hotplug(cpu);
 	grq.noc = num_online_cpus();
 	/* set grq.cpu_idle_map when cpu is online */
@@ -7379,6 +7378,12 @@ int sched_cpu_starting(unsigned int cpu)
 	 * And do nothing in sched_rq_cpu_starting()
 	 * sched_rq_cpu_starting(cpu);
 	 */
+	/*
+	 * grq.cpu_preemptable_mask should be set as soon as cpu online, but it
+	 * is too late too do that in sched_cpu_activate(). So, dirty hack here
+	 * to set it before cpu comes online.
+	 */
+	cpumask_set_cpu(cpu, &grq.cpu_preemptable_mask);
 	return 0;
 }
 
@@ -7551,7 +7556,8 @@ void __init sched_init(void)
 #ifdef CONFIG_SMP
 	init_defrootdomain();
 	cpumask_clear(&grq.cpu_idle_map);
-	cpumask_setall(&grq.cpu_preemptable_mask);
+	cpumask_clear(&grq.cpu_preemptable_mask);
+	cpumask_set_cpu(smp_processor_id(), &grq.cpu_preemptable_mask);
 #ifndef CONFIG_64BIT
 	raw_spin_lock_init(&grq.priodl_lock);
 #endif
