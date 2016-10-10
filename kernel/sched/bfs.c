@@ -71,7 +71,6 @@
 #include <linux/context_tracking.h>
 #include <linux/sched/prio.h>
 #include <linux/frame.h>
-#include <linux/skip_list.h>
 
 #include <asm/switch_to.h>
 #include <asm/tlb.h>
@@ -546,9 +545,14 @@ static inline void grq_priodl_unlock(void)
  * and does not require a full look up. Thus it occurs in O(k) time where k
  * is the "level" of the list the task was stored at - usually < 4, max 16.
  */
-static void dequeue_task(struct task_struct *p)
+static void dequeue_task(struct task_struct *p, struct rq *rq)
 {
 	skiplist_del_init(&grq.sl_header, &p->sl_node);
+
+	WARN_ONCE(task_rq(p) != rq, "bfs: dequeue task reside on cpu%d from cpu%d\n",
+		  task_cpu(p), cpu_of(rq));
+	skiplist_del_init(&rq->sl_header, &p->rq_sl_node);
+
 	sched_info_dequeued(task_rq(p), p);
 }
 
@@ -633,7 +637,13 @@ static void enqueue_task(struct task_struct *p, struct rq *rq)
 	p->sl_node.level = p->sl_level;
 	bfs_skiplist_insert(&grq.sl_header, &p->sl_node);
 
-	sched_info_queued(task_rq(p), p);
+	WARN_ONCE(task_rq(p) != rq, "bfs: enqueue task reside on cpu%d to cpu%d\n",
+		  task_cpu(p), cpu_of(rq));
+
+	p->rq_sl_node.level = p->sl_level;
+	bfs_skiplist_insert(&rq->sl_header, &p->rq_sl_node);
+
+	sched_info_queued(rq, p);
 }
 
 static inline void requeue_task(struct task_struct *p)
@@ -1195,7 +1205,7 @@ static inline void unstick_task(struct rq *rq, struct task_struct *p)
  * Move a task off the global queue and take it to a cpu for it will
  * become the running task.
  */
-static inline void take_task(int cpu, struct task_struct *p)
+static inline void take_task(int cpu, struct rq *rq, struct task_struct *p)
 {
 	set_task_cpu(p, cpu);
 	/*
@@ -1204,7 +1214,7 @@ static inline void take_task(int cpu, struct task_struct *p)
 	 * here.
 	 */
 	p->on_cpu = 1;
-	dequeue_task(p);
+	dequeue_task(p, rq);
 	clear_sticky(p);
 	dec_qnr();
 }
@@ -1622,12 +1632,18 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 	} else
 		prq = rq;
 
+	raw_spin_lock(&prq->lock);
+	cpu = cpu_of(prq);
+
 	_grq_lock();
+	if (cpu != task_cpu(p))
+		__set_task_cpu(p, cpu);
 	ttwu_activate(p, prq);
 	ttwu_do_wakeup(prq, p, 0);
-	cpu = task_cpu(p);
-	ttwu_stat(p, cpu, wake_flags);
 	_grq_unlock();
+	raw_spin_unlock(&prq->lock);
+
+	ttwu_stat(p, cpu, wake_flags);
 	task_access_unlock_irqrestore(lock, &flags);
 
 	preempt_rq(prq);
@@ -3407,7 +3423,7 @@ task_struct *earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *
 		break;
 	}
 	if (likely(edt != idle))
-		take_task(cpu, edt);
+		take_task(cpu, rq, edt);
 	return edt;
 }
 
@@ -3933,7 +3949,7 @@ check_task_changed(struct rq *rq, struct task_struct *p, int oldprio)
 		if (p->prio > oldprio)
 			resched_curr(rq);
 	} else if (task_queued(p)) {
-		dequeue_task(p);
+		dequeue_task(p, rq);
 		enqueue_task(p, rq);
 	}
 
@@ -4036,7 +4052,7 @@ void set_user_nice(struct task_struct *p, long nice)
 	}
 	queued = task_queued(p);
 	if (queued) {
-		dequeue_task(p);
+		dequeue_task(p, rq);
 	}
 
 	adjust_deadline(p, new_static);
@@ -7244,6 +7260,7 @@ void __init sched_init(void)
 #endif
 	for_each_possible_cpu(i) {
 		rq = cpu_rq(i);
+		FULL_INIT_SKIPLIST_NODE(&rq->sl_header);
 		rq->try_preempt_tsk = NULL;
 		raw_spin_lock_init(&rq->lock);
 		rq->user_pc = rq->nice_pc = rq->softirq_pc = rq->system_pc =
