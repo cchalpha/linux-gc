@@ -60,6 +60,9 @@ struct rq {
 	u64 clock_task;
 	bool dither;
 
+	unsigned long nr_running;
+	unsigned long nr_uninterruptible;
+
 #ifdef CONFIG_SCHEDSTATS
 
 	/* latency stats */
