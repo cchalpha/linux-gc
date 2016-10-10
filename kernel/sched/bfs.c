@@ -175,8 +175,6 @@ static inline int timeslice(void)
  */
 struct global_rq {
 	raw_spinlock_t lock;
-	unsigned long nr_running;
-	unsigned long nr_uninterruptible;
 	unsigned long qnr; /* queued not running */
 #ifdef CONFIG_SMP
 	cpumask_t cpu_idle_map;
@@ -1031,10 +1029,10 @@ static void activate_task(struct task_struct *p, struct rq *rq)
 	p->prio = effective_prio(p);
 	update_task_priodl(p);
 	if (task_contributes_to_load(p))
-		grq.nr_uninterruptible--;
+		rq->nr_uninterruptible--;
 	enqueue_task(p, rq);
 	p->on_rq = 1;
-	grq.nr_running++;
+	rq->nr_running++;
 	inc_qnr();
 	cpufreq_update_this_cpu(rq, 0);
 }
@@ -1048,9 +1046,9 @@ static inline void clear_sticky(struct task_struct *p);
 static inline void deactivate_task(struct task_struct *p, struct rq *rq)
 {
 	if (task_contributes_to_load(p))
-		grq.nr_uninterruptible++;
+		rq->nr_uninterruptible++;
 	p->on_rq = 0;
-	grq.nr_running--;
+	rq->nr_running--;
 	clear_sticky(p);
 	cpufreq_update_this_cpu(rq, 0);
 }
@@ -2164,20 +2162,12 @@ context_switch(struct rq *rq, struct task_struct *prev,
  */
 unsigned long nr_running(void)
 {
-	long nr = grq.nr_running;
+	unsigned long i, sum = 0;
 
-	if (unlikely(nr < 0))
-		nr = 0;
-	return (unsigned long)nr;
-}
+	for_each_online_cpu(i)
+		sum += cpu_rq(i)->nr_running;
 
-static unsigned long nr_uninterruptible(void)
-{
-	long nu = grq.nr_uninterruptible;
-
-	if (unlikely(nu < 0))
-		nu = 0;
-	return nu;
+	return sum;
 }
 
 /*
@@ -2226,9 +2216,18 @@ unsigned long nr_iowait_cpu(int cpu)
 	return atomic_read(&this->nr_iowait);
 }
 
-unsigned long nr_active(void)
+static unsigned long nr_active(void)
 {
-	return nr_running() + nr_uninterruptible();
+	int i;
+	unsigned long long sum = 0;
+	struct rq *rq;
+
+	for_each_possible_cpu(i) {
+		rq = cpu_rq(i);
+		sum += rq->nr_running + rq->nr_uninterruptible;
+	}
+
+	return sum;
 }
 
 /* Beyond a task running on this CPU, load is equal everywhere on BFS, so we
@@ -2239,9 +2238,7 @@ void get_iowait_load(unsigned long *nr_waiters, unsigned long *load)
 	struct rq *rq = this_rq();
 
 	*nr_waiters = atomic_read(&rq->nr_iowait);
-	/* Beyond a task running on this CPU, load is equal everywhere on BFS */
-	*load = rq->rq_running +
-		((queued_notrunning() + nr_uninterruptible()) / grq.noc);
+	*load = rq->nr_running + rq->nr_uninterruptible;
 }
 
 /* Variables and functions for calc_load */
@@ -7149,7 +7146,6 @@ void __init sched_init(void)
 		prio_ratios[i] = prio_ratios[i - 1] * 11 / 10;
 
 	raw_spin_lock_init(&grq.lock);
-	grq.nr_running = grq.nr_uninterruptible = 0;
 	raw_spin_lock_init(&grq.iso_lock);
 	grq.iso_ticks = 0;
 	grq.iso_refractory = false;
@@ -7171,6 +7167,7 @@ void __init sched_init(void)
 		rq->user_pc = rq->nice_pc = rq->softirq_pc = rq->system_pc =
 			      rq->iowait_pc = rq->idle_pc = 0;
 		rq->dither = false;
+		rq->nr_running = rq->nr_uninterruptible = 0;
 #ifdef CONFIG_SMP
 		rq->sticky_task = NULL;
 		rq->sd = NULL;
