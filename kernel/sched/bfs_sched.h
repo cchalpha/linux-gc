@@ -1,9 +1,10 @@
+#ifndef BFS_SCHED_H
+#define BFS_SCHED_H
+
 #include <linux/sched.h>
 #include <linux/cpuidle.h>
 #include <linux/stop_machine.h>
-
-#ifndef BFS_SCHED_H
-#define BFS_SCHED_H
+#include <linux/skip_list.h>
 
 /*
  * This is the main, per-CPU runqueue data structure.
@@ -16,6 +17,8 @@ struct rq {
 	struct task_struct *curr, *idle, *stop;
 	struct task_struct *try_preempt_tsk;
 	struct mm_struct *prev_mm;
+
+	struct skiplist_node sl_header;
 
 	/* switch count */
 	u64 nr_switches;

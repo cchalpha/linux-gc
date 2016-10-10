@@ -71,7 +71,6 @@
 #include <linux/context_tracking.h>
 #include <linux/sched/prio.h>
 #include <linux/frame.h>
-#include <linux/skip_list.h>
 
 #include <asm/switch_to.h>
 #include <asm/tlb.h>
@@ -7414,6 +7413,7 @@ void __init sched_init(void)
 #endif
 	for_each_possible_cpu(i) {
 		rq = cpu_rq(i);
+		FULL_INIT_SKIPLIST_NODE(&rq->sl_header);
 		rq->try_preempt_tsk = NULL;
 		raw_spin_lock_init(&rq->lock);
 		rq->user_pc = rq->nice_pc = rq->softirq_pc = rq->system_pc =
