@@ -1609,24 +1609,24 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 		return success;
 	}
 
-	_grq_lock();
-
-	ttwu_activate(p, rq);
-	ttwu_do_wakeup(rq, p, 0);
-	cpu = task_cpu(p);
-	ttwu_stat(p, cpu, wake_flags);
-
 	/*
 	 * Sync wakeups (i.e. those types of wakeups where the waker
 	 * has indicated that it will leave the CPU in short order)
 	 * don't trigger a preemption if there are no idle cpus,
 	 * instead waiting for current to deschedule.
 	 */
-	if (!(wake_flags & WF_SYNC) || suitable_idle_cpus(p))
+	if (!(wake_flags & WF_SYNC) || suitable_idle_cpus(p)) {
 		prq = task_preemptable_rq(p);
-	else
-		prq = NULL;
+		if (NULL == prq)
+			prq = rq;
+	} else
+		prq = rq;
 
+	_grq_lock();
+	ttwu_activate(p, prq);
+	ttwu_do_wakeup(prq, p, 0);
+	cpu = task_cpu(p);
+	ttwu_stat(p, cpu, wake_flags);
 	_grq_unlock();
 	task_access_unlock_irqrestore(lock, &flags);
 
@@ -1923,7 +1923,7 @@ after_ts_init:
 			 */
 			__set_tsk_resched(parent);
 		} else
-			prq = task_preemptable_rq(p);
+			prq = NULL;
 	} else {
 		if (rq->curr == parent) {
 			/*
@@ -3935,8 +3935,6 @@ check_task_changed(struct rq *rq, struct task_struct *p, int oldprio)
 	} else if (task_queued(p)) {
 		dequeue_task(p);
 		enqueue_task(p, rq);
-		if (p->prio < oldprio)
-			return task_preemptable_rq(p);
 	}
 
 	return NULL;
@@ -4049,8 +4047,6 @@ void set_user_nice(struct task_struct *p, long nice)
 
 	if (queued) {
 		enqueue_task(p, rq);
-		if (new_static < old_static)
-			prq = task_preemptable_rq(p);
 	} else if (task_running(p)) {
 		reset_rq_task(rq, p);
 		if (old_static < new_static)
@@ -4253,7 +4249,7 @@ static int __set_cpus_allowed_ptr(struct task_struct *p,
 
 out:
 	if (queued)
-		prq = task_preemptable_rq(p);
+		prq = NULL;
 	task_access_unlock_irqrestore(lock, &flags);
 
 	preempt_rq(prq);
