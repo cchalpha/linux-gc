@@ -414,12 +414,14 @@ static inline struct rq
 			}
 			raw_spin_unlock(&rq->lock);
 		} else if (task_queued(p)) {
+			raw_spin_lock(&rq->lock);
 			raw_spin_lock(&grq.lock);
 			if (likely(!p->on_cpu && task_queued(p) && rq == task_rq(p))) {
-				*plock = &grq.lock;
+				*plock = &rq->lock;
 				return rq;
 			}
 			raw_spin_unlock(&grq.lock);
+			raw_spin_unlock(&rq->lock);
 		} else {
 			*plock = NULL;
 			return rq;
@@ -428,8 +430,10 @@ static inline struct rq
 }
 
 static inline void
-__task_access_unlock(raw_spinlock_t *lock)
+__task_access_unlock(struct task_struct *p, raw_spinlock_t *lock)
 {
+	if (task_queued(p))
+		raw_spin_unlock(&grq.lock);
 	if (NULL != lock)
 		raw_spin_unlock(lock);
 }
@@ -548,6 +552,8 @@ static inline void grq_priodl_unlock(void)
  */
 static void dequeue_task(struct task_struct *p, struct rq *rq)
 {
+	lockdep_assert_held(&grq.lock);
+
 	skiplist_del_init(&grq.sl_header, &p->sl_node);
 
 	WARN_ONCE(task_rq(p) != rq, "bfs: dequeue task reside on cpu%d from cpu%d\n",
@@ -625,6 +631,8 @@ DEFINE_SKIPLIST_INSERT_FUNC(bfs_skiplist_insert, bfs_skiplist_task_search);
  */
 static void enqueue_task(struct task_struct *p, struct rq *rq)
 {
+	lockdep_assert_held(&grq.lock);
+
 	if (!rt_task(p)) {
 		/* Check it hasn't gotten rt from PI */
 		if ((idleprio_task(p) && idleprio_suitable(p)) ||
@@ -4172,7 +4180,7 @@ void rt_mutex_setprio(struct task_struct *p, int prio)
 	prq = check_task_changed(rq, p, oldprio);
 
 out_unlock:
-	__task_access_unlock(lock);
+	__task_access_unlock(p, lock);
 
 	preempt_rq(prq);
 }
@@ -4236,7 +4244,7 @@ void set_user_nice(struct task_struct *p, long nice)
 			resched_curr(rq);
 	}
 out_unlock:
-	__task_access_unlock(lock);
+	__task_access_unlock(p, lock);
 	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 
 	preempt_rq(prq);
@@ -4642,7 +4650,7 @@ recheck:
 	 * Changing the policy of the stop threads its a very bad idea
 	 */
 	if (p == rq->stop) {
-		__task_access_unlock(lock);
+		__task_access_unlock(p, lock);
 		raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 		return -EINVAL;
 	}
@@ -4653,7 +4661,7 @@ recheck:
 	if (unlikely(policy == p->policy && (!is_rt_policy(policy) ||
 		attr->sched_priority == p->rt_priority))) {
 		p->sched_reset_on_fork = reset_on_fork;
-		__task_access_unlock(lock);
+		__task_access_unlock(p, lock);
 		raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 		return 0;
 	}
@@ -4661,7 +4669,7 @@ recheck:
 	/* recheck policy now with rq lock held */
 	if (unlikely(oldpolicy != -1 && oldpolicy != p->policy)) {
 		policy = oldpolicy = -1;
-		__task_access_unlock(lock);
+		__task_access_unlock(p, lock);
 		raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 		goto recheck;
 	}
@@ -4679,7 +4687,7 @@ recheck:
 		 */
 		if (rt_mutex_get_effective_prio(p, newprio) == oldprio) {
 			__setscheduler_params(p, attr);
-			__task_access_unlock(lock);
+			__task_access_unlock(p, lock);
 			raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 			return 0;
 		}
@@ -4689,7 +4697,7 @@ recheck:
 
 	prq = check_task_changed(rq, p, oldprio);
 
-	__task_access_unlock(lock);
+	__task_access_unlock(p, lock);
 	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 
 	if (pi)
