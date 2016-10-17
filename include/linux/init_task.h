@@ -217,6 +217,7 @@ extern struct task_group root_task_group;
 	},								\
 	.sl_level	= 0,						\
 	.sl_node	= SKIPLIST_NODE_INIT(tsk.sl_node),		\
+	.rq_sl_node	= SKIPLIST_NODE_INIT(tsk.rq_sl_node),		\
 	.time_slice	= HZ,					\
 	.tasks		= LIST_HEAD_INIT(tsk.tasks),			\
 	INIT_PUSHABLE_TASKS(tsk)					\
