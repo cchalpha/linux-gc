@@ -413,12 +413,14 @@ static inline struct rq
 			}
 			raw_spin_unlock(&rq->lock);
 		} else if (task_queued(p)) {
+			raw_spin_lock(&rq->lock);
 			raw_spin_lock(&grq.lock);
 			if (likely(!p->on_cpu && task_queued(p) && rq == task_rq(p))) {
-				*plock = &grq.lock;
+				*plock = &rq->lock;
 				return rq;
 			}
 			raw_spin_unlock(&grq.lock);
+			raw_spin_unlock(&rq->lock);
 		} else {
 			*plock = NULL;
 			return rq;
@@ -427,8 +429,10 @@ static inline struct rq
 }
 
 static inline void
-__task_access_unlock(raw_spinlock_t *lock)
+__task_access_unlock(struct task_struct *p, raw_spinlock_t *lock)
 {
+	if (task_queued(p))
+		raw_spin_unlock(&grq.lock);
 	if (NULL != lock)
 		raw_spin_unlock(lock);
 }
@@ -447,12 +451,14 @@ static inline struct rq
 			}
 			raw_spin_unlock_irqrestore(&rq->lock, *flags);
 		} else if (task_queued(p)) {
-			raw_spin_lock_irqsave(&grq.lock, *flags);
+			raw_spin_lock_irqsave(&rq->lock, *flags);
+			raw_spin_lock(&grq.lock);
 			if (likely(!p->on_cpu && task_queued(p) && rq == task_rq(p))) {
-				*plock = &grq.lock;
+				*plock = &rq->lock;
 				return rq;
 			}
-			raw_spin_unlock_irqrestore(&grq.lock, *flags);
+			raw_spin_unlock(&grq.lock);
+			raw_spin_unlock_irqrestore(&rq->lock, *flags);
 		} else {
 			raw_spin_lock_irqsave(&p->pi_lock, *flags);
 			if (likely(!p->on_cpu && !task_queued(p) && rq == task_rq(p))) {
@@ -465,8 +471,10 @@ static inline struct rq
 }
 
 static inline void
-task_access_unlock_irqrestore(raw_spinlock_t *lock, unsigned long *flags)
+task_access_unlock_irqrestore(struct task_struct *p, raw_spinlock_t *lock, unsigned long *flags)
 {
+	if (task_queued(p))
+		raw_spin_unlock(&grq.lock);
 	raw_spin_unlock_irqrestore(lock, *flags);
 }
 
@@ -547,6 +555,9 @@ static inline void grq_priodl_unlock(void)
  */
 static void dequeue_task(struct task_struct *p, struct rq *rq)
 {
+	lockdep_assert_held(&grq.lock);
+	lockdep_assert_held(&rq->lock);
+
 	skiplist_del_init(&grq.sl_header, &p->sl_node);
 
 	WARN_ONCE(task_rq(p) != rq, "bfs: dequeue task reside on cpu%d from cpu%d\n",
@@ -624,6 +635,9 @@ DEFINE_SKIPLIST_INSERT_FUNC(bfs_skiplist_insert, bfs_skiplist_task_search);
  */
 static void enqueue_task(struct task_struct *p, struct rq *rq)
 {
+	lockdep_assert_held(&grq.lock);
+	lockdep_assert_held(&rq->lock);
+
 	if (!rt_task(p)) {
 		/* Check it hasn't gotten rt from PI */
 		if ((idleprio_task(p) && idleprio_suitable(p)) ||
@@ -1328,7 +1342,7 @@ unsigned long wait_task_inactive(struct task_struct *p, long match_state)
 		ncsw = 0;
 		if (!match_state || p->state == match_state)
 			ncsw = p->nvcsw | LONG_MIN; /* sets MSB */
-		task_access_unlock_irqrestore(lock, &flags);
+		task_access_unlock_irqrestore(p, lock, &flags);
 
 		/*
 		 * If it changed from the expected state, bail out now.
@@ -1604,7 +1618,7 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 
 	/* state is a volatile long, どうして、分からない */
 	if (!(p->state & state)) {
-		task_access_unlock_irqrestore(lock, &flags);
+		task_access_unlock_irqrestore(p, lock, &flags);
 		return 0;
 	}
 
@@ -1615,7 +1629,7 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 		ttwu_do_wakeup(rq, p, 0);
 		cpu = task_cpu(p);
 		ttwu_stat(p, cpu, wake_flags);
-		task_access_unlock_irqrestore(lock, &flags);
+		task_access_unlock_irqrestore(p, lock, &flags);
 		return success;
 	}
 
@@ -1644,7 +1658,7 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 	raw_spin_unlock(&prq->lock);
 
 	ttwu_stat(p, cpu, wake_flags);
-	task_access_unlock_irqrestore(lock, &flags);
+	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 
 	preempt_rq(prq);
 
@@ -2895,7 +2909,7 @@ unsigned long long task_sched_runtime(struct task_struct *p)
 		p->sched_time += ns;
 	}
 	ns = tsk_seruntime(p);
-	task_access_unlock_irqrestore(lock, &flags);
+	task_access_unlock_irqrestore(p, lock, &flags);
 
 	return ns;
 }
@@ -4005,7 +4019,7 @@ void rt_mutex_setprio(struct task_struct *p, int prio)
 	prq = check_task_changed(rq, p, oldprio);
 
 out_unlock:
-	__task_access_unlock(lock);
+	__task_access_unlock(p, lock);
 
 	preempt_rq(prq);
 }
@@ -4069,7 +4083,7 @@ void set_user_nice(struct task_struct *p, long nice)
 			resched_curr(rq);
 	}
 out_unlock:
-	__task_access_unlock(lock);
+	__task_access_unlock(p, lock);
 	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 
 	preempt_rq(prq);
@@ -4266,7 +4280,7 @@ static int __set_cpus_allowed_ptr(struct task_struct *p,
 out:
 	if (queued)
 		prq = NULL;
-	task_access_unlock_irqrestore(lock, &flags);
+	task_access_unlock_irqrestore(p, lock, &flags);
 
 	preempt_rq(prq);
 
@@ -4475,7 +4489,7 @@ recheck:
 	 * Changing the policy of the stop threads its a very bad idea
 	 */
 	if (p == rq->stop) {
-		__task_access_unlock(lock);
+		__task_access_unlock(p, lock);
 		raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 		return -EINVAL;
 	}
@@ -4486,7 +4500,7 @@ recheck:
 	if (unlikely(policy == p->policy && (!is_rt_policy(policy) ||
 		attr->sched_priority == p->rt_priority))) {
 		p->sched_reset_on_fork = reset_on_fork;
-		__task_access_unlock(lock);
+		__task_access_unlock(p, lock);
 		raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 		return 0;
 	}
@@ -4494,7 +4508,7 @@ recheck:
 	/* recheck policy now with rq lock held */
 	if (unlikely(oldpolicy != -1 && oldpolicy != p->policy)) {
 		policy = oldpolicy = -1;
-		__task_access_unlock(lock);
+		__task_access_unlock(p, lock);
 		raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 		goto recheck;
 	}
@@ -4512,7 +4526,7 @@ recheck:
 		 */
 		if (rt_mutex_get_effective_prio(p, newprio) == oldprio) {
 			__setscheduler_params(p, attr);
-			__task_access_unlock(lock);
+			__task_access_unlock(p, lock);
 			raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 			return 0;
 		}
@@ -4522,7 +4536,7 @@ recheck:
 
 	prq = check_task_changed(rq, p, oldprio);
 
-	__task_access_unlock(lock);
+	__task_access_unlock(p, lock);
 	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 
 	if (pi)
@@ -5057,7 +5071,7 @@ long sched_getaffinity(pid_t pid, cpumask_t *mask)
 
 	task_access_lock_irqsave(p, &lock, &flags);
 	cpumask_and(mask, tsk_cpus_allowed(p), cpu_active_mask);
-	task_access_unlock_irqrestore(lock, &flags);
+	task_access_unlock_irqrestore(p, lock, &flags);
 
 out_unlock:
 	rcu_read_unlock();
@@ -5398,7 +5412,7 @@ SYSCALL_DEFINE2(sched_rr_get_interval, pid_t, pid,
 
 	task_access_lock_irqsave(p, &lock, &flags);
 	time_slice = p->policy == SCHED_FIFO ? 0 : MS_TO_NS(task_timeslice(p));
-	task_access_unlock_irqrestore(lock, &flags);
+	task_access_unlock_irqrestore(p, lock, &flags);
 
 	rcu_read_unlock();
 	t = ns_to_timespec(time_slice);
