@@ -570,6 +570,7 @@ static inline void grq_priodl_unlock(void)
 static void dequeue_task(struct task_struct *p, struct rq *rq)
 {
 	lockdep_assert_held(&grq.lock);
+	lockdep_assert_held(&rq->lock);
 
 	skiplist_del_init(&grq.sl_header, &p->sl_node);
 
@@ -649,6 +650,7 @@ DEFINE_SKIPLIST_INSERT_FUNC(bfs_skiplist_insert, bfs_skiplist_task_search);
 static void enqueue_task(struct task_struct *p, struct rq *rq)
 {
 	lockdep_assert_held(&grq.lock);
+	lockdep_assert_held(&rq->lock);
 
 	if (!rt_task(p)) {
 		/* Check it hasn't gotten rt from PI */
