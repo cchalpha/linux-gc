@@ -563,6 +563,7 @@ static void dequeue_task(struct task_struct *p, struct rq *rq)
 	WARN_ONCE(task_rq(p) != rq, "bfs: dequeue task reside on cpu%d from cpu%d\n",
 		  task_cpu(p), cpu_of(rq));
 	skiplist_del_init(&rq->sl_header, &p->rq_sl_node);
+	rq->nr_queued--;
 
 	sched_info_dequeued(task_rq(p), p);
 }
@@ -656,6 +657,7 @@ static void enqueue_task(struct task_struct *p, struct rq *rq)
 
 	p->rq_sl_node.level = p->sl_level;
 	bfs_skiplist_insert(&rq->sl_header, &p->rq_sl_node);
+	rq->nr_queued++;
 
 	sched_info_queued(rq, p);
 }
@@ -7275,6 +7277,7 @@ void __init sched_init(void)
 	for_each_possible_cpu(i) {
 		rq = cpu_rq(i);
 		FULL_INIT_SKIPLIST_NODE(&rq->sl_header);
+		rq->nr_queued = 0;
 		rq->try_preempt_tsk = NULL;
 		raw_spin_lock_init(&rq->lock);
 		rq->user_pc = rq->nice_pc = rq->softirq_pc = rq->system_pc =
