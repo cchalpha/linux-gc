@@ -1134,12 +1134,15 @@ static inline void __set_task_cpu(struct task_struct *p, unsigned int cpu)
 
 void set_task_cpu(struct task_struct *p, unsigned int cpu)
 {
+#ifdef CONFIG_SCHED_DEBUG
 #ifdef CONFIG_LOCKDEP
 	/*
-	 * The caller should hold grq lock or rq lock, release this checking
-	 * atm.
+	 * The caller should hold task rq lock
+	 * release checking for now
 	 */
-	/*WARN_ON_ONCE(debug_locks && !lockdep_is_held(&grq.lock));*/
+	/* WARN_ON_ONCE(debug_locks && (!lockdep_is_held(&grq.lock) ||
+				     !lockdep_is_held(&task_rq()->lock)));*/
+#endif
 #endif
 	if (task_cpu(p) == cpu)
 		return;
