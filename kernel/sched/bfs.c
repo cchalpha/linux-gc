@@ -1599,17 +1599,8 @@ static struct rq* task_preemptable_rq(struct task_struct *p)
 	}
 	grq_priodl_unlock();
 
-	if (can_preempt(p, highest_priodl)) {
-		/*
-		 * If we have decided this task should preempt this CPU,
-		 * set the task's CPU to match so there is no discrepancy
-		 * in earliest_deadline_task which biases away tasks with
-		 * a different CPU set. This means waking tasks are
-		 * treated differently to rescheduling tasks.
-		 */
-		set_task_cpu(p, target_cpu);
+	if (can_preempt(p, highest_priodl))
 		return cpu_rq(target_cpu);
-	}
 
 	return NULL;
 }
