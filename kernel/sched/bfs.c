@@ -134,6 +134,10 @@ void print_scheduler_version(void)
 	printk(KERN_INFO "BFS CPU scheduler v0.472 by Con Kolivas.\n");
 }
 
+/* task_struct::on_rq states: */
+#define TASK_ON_RQ_QUEUED	1
+#define TASK_ON_RQ_MIGRATING	2
+
 /*
  * This is the time all tasks within the same priority round robin.
  * Value is in ms and set to a minimum of 6ms. Scales with number of cpus.
@@ -1143,6 +1147,118 @@ void set_task_cpu(struct task_struct *p, unsigned int cpu)
 	perf_event_task_migrate(p);
 
 	__set_task_cpu(p, cpu);
+}
+
+/*
+ * This is how migration works:
+ *
+ * 1) we invoke migration_cpu_stop() on the target CPU using
+ *    stop_one_cpu().
+ * 2) stopper starts to run (implicitly forcing the migrated thread
+ *    off the CPU)
+ * 3) it checks whether the migrated task is still in the wrong runqueue.
+ * 4) if it's in the wrong runqueue then the migration thread removes
+ *    it and puts it into the right queue.
+ * 5) stopper completes and stop_one_cpu() returns and the migration
+ *    is done.
+ */
+
+void check_preempt_curr(struct rq *rq, struct task_struct *p)
+{
+	if (p->priodl < rq->curr->priodl)
+		resched_curr(rq);
+}
+
+/*
+ * move_queued_task - move a queued task to new rq.
+ *
+ * Returns (locked) new rq. Old rq's lock is released.
+ */
+static struct rq *move_queued_task(struct rq *rq, struct task_struct *p, int
+				   new_cpu)
+{
+	lockdep_assert_held(&rq->lock);
+
+	p->on_rq = TASK_ON_RQ_MIGRATING;
+	dequeue_task(p, rq);
+	set_task_cpu(p, new_cpu);
+	_grq_unlock();
+	raw_spin_unlock(&rq->lock);
+
+	rq = cpu_rq(new_cpu);
+
+	raw_spin_lock(&rq->lock);
+	BUG_ON(task_cpu(p) != new_cpu);
+	_grq_lock();
+	enqueue_task(p, rq);
+	p->on_rq = TASK_ON_RQ_QUEUED;
+	check_preempt_curr(rq, p);
+
+	return rq;
+}
+
+/*
+ * Move (not current) task off this cpu, onto dest cpu. We're doing
+ * this because either it can't run here any more (set_cpus_allowed()
+ * away from this CPU, or CPU going down), or because we're
+ * attempting to rebalance this task on exec (sched_exec).
+ *
+ * So we race with normal scheduler movements, but that's OK, as long
+ * as the task is no longer on this CPU.
+ */
+static struct rq *__migrate_task(struct rq *rq, struct task_struct *p, int
+				 dest_cpu)
+{
+	if (unlikely(!cpu_active(dest_cpu)))
+		return rq;
+
+	/* Affinity changed (again). */
+	if (unlikely(!cpumask_test_cpu(dest_cpu, tsk_cpus_allowed(p))))
+		return rq;
+
+	_grq_lock();
+	rq = move_queued_task(rq, p, dest_cpu);
+	_grq_unlock();
+
+	return rq;
+}
+
+struct migration_arg {
+	struct task_struct *task;
+	int dest_cpu;
+};
+
+/*
+ * migration_cpu_stop - this will be executed by a highprio stopper thread
+ * and performs thread migration by bumping thread off CPU then
+ * 'pushing' onto another runqueue.
+ */
+static int migration_cpu_stop(void *data)
+{
+	struct migration_arg *arg = data;
+	struct task_struct *p = arg->task;
+	struct rq *rq = this_rq();
+
+	/*
+	 * The original target cpu might have gone down and we might
+	 * be on another cpu but it doesn't matter.
+	 */
+	local_irq_disable();
+
+	raw_spin_lock(&p->pi_lock);
+	raw_spin_lock(&rq->lock);
+	/*
+	 * If task_rq(p) != rq, it cannot be migrated here, because we're
+	 * holding rq->lock, if p->on_rq == 0 it cannot get enqueued because
+	 * we're holding p->pi_lock.
+	 */
+	if (task_rq(p) == rq)
+		rq = __migrate_task(rq, p, arg->dest_cpu);
+	raw_spin_unlock(&rq->lock);
+	raw_spin_unlock(&p->pi_lock);
+
+	local_irq_enable();
+	return 0;
 }
 
 static inline void
@@ -3642,39 +3758,31 @@ static void __sched notrace __schedule(bool preempt)
 		if (deactivate)
 			deactivate_task(prev, rq);
 		else {
-			/* Task changed affinity off this CPU */
-			if (unlikely(needs_other_cpu(prev, cpu))) {
+			if (queued_notrunning()) {
 				enqueue_task(prev, rq);
 				inc_qnr();
-				rq->try_preempt_tsk = prev;
-				goto earliest_deadline_next;
-			} else {
-				if (queued_notrunning()) {
-					enqueue_task(prev, rq);
-					inc_qnr();
-					next = earliest_deadline_task(rq, cpu, idle);
-					if (likely(prev != next)) {
-						/*
-						 * Don't stick tasks when a real time task is going
-						 * to run as they may literally get stuck.
-						 */
-						if (!rt_task(next))
-							swap_sticky(rq, cpu, prev);
-						else
-							rq->try_preempt_tsk = prev;
-						goto do_switch;
-					}
-					goto unlock_out;
-				} else {
+				next = earliest_deadline_task(rq, cpu, idle);
+				if (likely(prev != next)) {
 					/*
-					* We now know prev is the only thing that is
-					* awaiting CPU so we can bypass rechecking for
-					* the earliest deadline task and just run it
-					* again.
-					*/
-					set_rq_task(rq, prev);
-					goto unlock_out;
+					 * Don't stick tasks when a real time task is going
+					 * to run as they may literally get stuck.
+					 */
+					if (!rt_task(next))
+						swap_sticky(rq, cpu, prev);
+					else
+						rq->try_preempt_tsk = prev;
+					goto do_switch;
 				}
+				goto unlock_out;
+			} else {
+				/*
+				* We now know prev is the only thing that is
+				* awaiting CPU so we can bypass rechecking for
+				* the earliest deadline task and just run it
+				* again.
+				*/
+				set_rq_task(rq, prev);
+				goto unlock_out;
 			}
 		}
 	} else {
@@ -3685,7 +3793,6 @@ static void __sched notrace __schedule(bool preempt)
 	}
 
 	if (likely(queued_notrunning())) {
-earliest_deadline_next:
 		next = earliest_deadline_task(rq, cpu, idle);
 	} else {
 		/*
@@ -4218,14 +4325,15 @@ static int __set_cpus_allowed_ptr(struct task_struct *p,
 				  const struct cpumask *new_mask, bool check)
 {
 	const struct cpumask *cpu_valid_mask = cpu_active_mask;
-	bool running_wrong = false;
+	int dest_cpu;
 	bool queued = false;
 	unsigned long flags;
-	struct rq *rq, *prq = NULL;
+	struct rq *rq;
 	raw_spinlock_t *lock;
 	int ret = 0;
 
-	rq = task_access_lock_irqsave(p, &lock, &flags);
+	raw_spin_lock_irqsave(&p->pi_lock, flags);
+	rq = __task_access_lock(p, &lock);
 
 	if (p->flags & PF_KTHREAD) {
 		/*
@@ -4269,25 +4377,28 @@ static int __set_cpus_allowed_ptr(struct task_struct *p,
 	if (cpumask_test_cpu(task_cpu(p), new_mask))
 		goto out;
 
+	dest_cpu = cpumask_any_and(cpu_valid_mask, new_mask);
 	if (task_running(p)) {
-		/* Task is running on the wrong cpu now, reschedule it. */
-		if (rq == this_rq()) {
-			set_tsk_need_resched(p);
-			running_wrong = true;
-		} else
-			resched_curr(rq);
-	} else
-		set_task_cpu(p, cpumask_any_and(cpu_valid_mask, new_mask));
+		struct migration_arg arg = { p, dest_cpu };
+
+		/* Need help from migration thread: drop lock and wait. */
+		__task_access_unlock(p, lock);
+		raw_spin_unlock_irqrestore(&p->pi_lock, flags);
+		stop_one_cpu(cpu_of(rq), migration_cpu_stop, &arg);
+		tlb_migrate_finish(p->mm);
+		return 0;
+	} else if (task_queued(p)) {
+		/*
+		 * OK, since we're going to drop the lock immediately
+		 * afterwards anyway.
+		 */
+		rq = move_queued_task(rq, p, dest_cpu);
+		lock = &rq->lock;
+	}
 
 out:
-	if (queued)
-		prq = NULL;
-	task_access_unlock_irqrestore(p, lock, &flags);
-
-	preempt_rq(prq);
-
-	if (running_wrong)
-		preempt_schedule_common();
+	__task_access_unlock(p, lock);
+	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 
 	return ret;
 }
