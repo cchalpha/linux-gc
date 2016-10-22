@@ -7552,6 +7552,7 @@ void __init sched_init(void)
 	for_each_possible_cpu(i) {
 		rq = cpu_rq(i);
 		FULL_INIT_SKIPLIST_NODE(&rq->sl_header);
+		rq->nr_queued = 0;
 		rq->try_preempt_tsk = NULL;
 		raw_spin_lock_init(&rq->lock);
 		rq->user_pc = rq->nice_pc = rq->softirq_pc = rq->system_pc =
