@@ -818,78 +818,6 @@ bool cpus_share_cache(int this_cpu, int that_cpu)
 	return (this_rq->cpu_locality[that_cpu] < 3);
 }
 
-#ifdef CONFIG_SMT_NICE
-static const cpumask_t *thread_cpumask(int cpu);
-
-/* Find the best real time priority running on any SMT siblings of cpu and if
- * none are running, the static priority of the best deadline task running.
- * The lookups to the other runqueues is done lockless as the occasional wrong
- * value would be harmless. */
-static int best_smt_bias(int cpu)
-{
-	int other_cpu, best_bias = 0;
-
-	for_each_cpu(other_cpu, thread_cpumask(cpu)) {
-		struct rq *rq;
-
-		if (other_cpu == cpu)
-			continue;
-		rq = cpu_rq(other_cpu);
-		if (rq_idle(rq))
-			continue;
-		if (!rq->online)
-			continue;
-		if (!rq->rq_mm)
-			continue;
-		if (likely(rq->rq_smt_bias > best_bias))
-			best_bias = rq->rq_smt_bias;
-	}
-	return best_bias;
-}
-
-static int task_prio_bias(struct task_struct *p)
-{
-	if (rt_task(p))
-		return 1 << 30;
-	else if (task_running_iso(p))
-		return 1 << 29;
-	else if (task_running_idle(p))
-		return 0;
-	return MAX_PRIO - p->static_prio;
-}
-
-/* We've already decided p can run on CPU, now test if it shouldn't for SMT
- * nice reasons. */
-static bool smt_should_schedule(struct task_struct *p, int cpu)
-{
-	int best_bias, task_bias;
-
-	/* Kernel threads always run */
-	if (unlikely(!p->mm))
-		return true;
-	if (rt_task(p))
-		return true;
-	if (!idleprio_suitable(p))
-		return true;
-	best_bias = best_smt_bias(cpu);
-	/* The smt siblings are all idle or running IDLEPRIO */
-	if (best_bias < 1)
-		return true;
-	task_bias = task_prio_bias(p);
-	if (task_bias < 1)
-		return false;
-	if (task_bias >= best_bias)
-		return true;
-	/* Dither 25% cpu of normal tasks regardless of nice difference */
-	if (best_bias % 4 == 1)
-		return true;
-	/* Sorry, you lose */
-	return false;
-}
-#else
-#define smt_should_schedule(p, cpu) (1)
-#endif
-
 static inline bool resched_best_idle(struct task_struct *p)
 {
         cpumask_t check_cpumask;
@@ -898,10 +826,6 @@ static inline bool resched_best_idle(struct task_struct *p)
                 int best_cpu;
 
                 best_cpu = best_mask_cpu(task_cpu(p), &check_cpumask);
-#ifdef CONFIG_SMT_NICE
-		if (!smt_should_schedule(p, best_cpu))
-			return false;
-#endif
 		resched_curr(cpu_rq(best_cpu));
 		return true;
 	}
@@ -1425,10 +1349,6 @@ static void try_preempt(struct task_struct *p, struct rq *this_rq)
 	}
 	grq_priodl_unlock();
 
-#ifdef CONFIG_SMT_NICE
-	if (!smt_should_schedule(p, target_cpu))
-		return;
-#endif
 	if (can_preempt(p, highest_priodl)) {
 		/*
 		 * If we have decided this task should preempt this CPU,
@@ -3188,21 +3108,6 @@ static void time_slice_expired(struct task_struct *p, struct rq *rq)
 	p->time_slice = timeslice();
 	p->deadline = rq->clock + task_deadline_diff(p);
 	update_task_priodl(p);
-#ifdef CONFIG_SMT_NICE
-	if (!p->mm)
-		p->smt_bias = 0;
-	else if (rt_task(p))
-		p->smt_bias = 1 << 30;
-	else if (task_running_iso(p))
-		p->smt_bias = 1 << 29;
-	else if (idleprio_task(p)) {
-		if (task_running_idle(p))
-			p->smt_bias = 0;
-		else
-			p->smt_bias = 1;
-	} else if (--p->smt_bias < 1)
-		p->smt_bias = MAX_PRIO - p->static_prio;
-#endif
 }
 
 /*
@@ -3291,11 +3196,6 @@ task_struct *earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *
 		/* Make sure affinity is ok */
 		if (needs_other_cpu(p, cpu))
 			continue;
-
-#ifdef CONFIG_SMT_NICE
-		if (!smt_should_schedule(p, cpu))
-			continue;
-#endif
 
 		/*
 		 * First matched RT task has the highest priority
@@ -3404,10 +3304,6 @@ static inline void set_rq_task(struct rq *rq, struct task_struct *p)
 	grq.rq_priodls[cpu_of(rq)] = p->priodl;
 	grq_priodl_unlock();
 
-#ifdef CONFIG_SMT_NICE
-	rq->rq_mm = p->mm;
-	rq->rq_smt_bias = p->smt_bias;
-#endif
 	if (p != rq->idle)
 		rq->rq_running = true;
 	else
@@ -3423,63 +3319,7 @@ static void reset_rq_task(struct rq *rq, struct task_struct *p)
 	grq_priodl_lock();
 	grq.rq_priodls[cpu_of(rq)] = p->priodl;
 	grq_priodl_unlock();
-
-#ifdef CONFIG_SMT_NICE
-	rq->rq_smt_bias = p->smt_bias;
-#endif
 }
-
-#ifdef CONFIG_SMT_NICE
-/* Iterate over smt siblings when we've scheduled a process on cpu and decide
- * whether they should continue running or be descheduled. */
-static void check_smt_siblings(int cpu)
-{
-	int other_cpu;
-
-	for_each_cpu(other_cpu, thread_cpumask(cpu)) {
-		struct task_struct *p;
-		struct rq *rq;
-
-		if (other_cpu == cpu)
-			continue;
-		rq = cpu_rq(other_cpu);
-		if (rq_idle(rq))
-			continue;
-		if (!rq->online)
-			continue;
-		p = rq->curr;
-		if (!smt_should_schedule(p, cpu)) {
-			set_tsk_need_resched(p);
-			smp_send_reschedule(other_cpu);
-		}
-	}
-}
-
-static void wake_smt_siblings(int cpu)
-{
-	int other_cpu;
-
-	if (!queued_notrunning())
-		return;
-
-	for_each_cpu(other_cpu, thread_cpumask(cpu)) {
-		struct rq *rq;
-
-		if (other_cpu == cpu)
-			continue;
-		rq = cpu_rq(other_cpu);
-		if (rq_idle(rq)) {
-			struct task_struct *p = rq->curr;
-
-			set_tsk_need_resched(p);
-			smp_send_reschedule(other_cpu);
-		}
-	}
-}
-#else
-static void check_smt_siblings(int __maybe_unused cpu) {}
-static void wake_smt_siblings(int __maybe_unused cpu) {}
-#endif
 
 /*
  * schedule() is the main scheduler function.
@@ -3640,10 +3480,6 @@ static void __sched notrace __schedule(bool preempt)
 		if (rt_task(next))
 			unstick_task(rq, prev);
 		set_rq_task(rq, next);
-		if (next != idle)
-			check_smt_siblings(cpu);
-		else
-			wake_smt_siblings(cpu);
 		rq->nr_switches++;
 		prev->on_cpu = false;
 		next->on_cpu = true;
@@ -3656,7 +3492,6 @@ static void __sched notrace __schedule(bool preempt)
 		idle = rq->idle;
 	} else {
 rerun_prev_unlocked:
-		check_smt_siblings(cpu);
 		grq_unlock_irq();
 	}
 }
@@ -5434,9 +5269,6 @@ void init_idle(struct task_struct *idle, int cpu)
 	 * And since this is boot we can forgo the serialisation.
 	 */
 	set_cpus_allowed_common(idle, cpumask_of(cpu));
-#ifdef CONFIG_SMT_NICE
-	idle->smt_bias = 0;
-#endif
 #endif
 	set_rq_task(rq, idle);
 
