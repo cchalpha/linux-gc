@@ -178,7 +178,6 @@ static inline int timeslice(void)
  */
 struct global_rq {
 	raw_spinlock_t lock;
-	unsigned long qnr; /* queued not running */
 #ifdef CONFIG_SMP
 	cpumask_t cpu_idle_map;
 	cpumask_t non_scaled_cpumask;
@@ -191,8 +190,6 @@ struct global_rq {
 	raw_spinlock_t iso_lock;
 	int iso_ticks;
 	bool iso_refractory;
-
-	struct skiplist_node sl_header;
 };
 
 #ifdef CONFIG_SMP
@@ -561,11 +558,9 @@ static void dequeue_task(struct task_struct *p, struct rq *rq)
 	lockdep_assert_held(&grq.lock);
 	/*lockdep_assert_held(&rq->lock);*/
 
-	skiplist_del_init(&grq.sl_header, &p->sl_node);
-
 	WARN_ONCE(task_rq(p) != rq, "bfs: dequeue task reside on cpu%d from cpu%d\n",
 		  task_cpu(p), cpu_of(rq));
-	skiplist_del_init(&rq->sl_header, &p->rq_sl_node);
+	skiplist_del_init(&rq->sl_header, &p->sl_node);
 	rq->nr_queued--;
 
 	sched_info_dequeued(task_rq(p), p);
@@ -652,14 +647,11 @@ static void enqueue_task(struct task_struct *p, struct rq *rq)
 		update_task_priodl(p);
 	}
 
-	p->sl_node.level = p->sl_level;
-	bfs_skiplist_insert(&grq.sl_header, &p->sl_node);
-
 	WARN_ONCE(task_rq(p) != rq, "bfs: enqueue task reside on cpu%d to cpu%d\n",
 		  task_cpu(p), cpu_of(rq));
 
-	p->rq_sl_node.level = p->sl_level;
-	bfs_skiplist_insert(&rq->sl_header, &p->rq_sl_node);
+	p->sl_node.level = p->sl_level;
+	bfs_skiplist_insert(&rq->sl_header, &p->sl_node);
 	rq->nr_queued++;
 
 	sched_info_queued(rq, p);
@@ -769,26 +761,6 @@ static inline void preempt_rq(struct rq * rq)
 		resched_curr(rq);
 		raw_spin_unlock_irqrestore(&rq->lock, flags);
 	}
-}
-
-/*
- * qnr is the "queued but not running" count which is the total number of
- * tasks on the global runqueue list waiting for cpu time but not actually
- * currently running on a cpu.
- */
-static inline void inc_qnr(void)
-{
-	grq.qnr++;
-}
-
-static inline void dec_qnr(void)
-{
-	grq.qnr--;
-}
-
-static inline int queued_notrunning(void)
-{
-	return grq.qnr;
 }
 
 #ifdef CONFIG_SMP
@@ -1094,7 +1066,6 @@ static void activate_task(struct task_struct *p, struct rq *rq)
 	enqueue_task(p, rq);
 	p->on_rq = 1;
 	rq->nr_running++;
-	inc_qnr();
 	cpufreq_update_this_cpu(rq, 0);
 }
 
@@ -1339,7 +1310,7 @@ static inline void unstick_task(struct rq *rq, struct task_struct *p)
  * Move a task off the global queue and take it to a cpu for it will
  * become the running task.
  */
-static inline void take_task(int cpu, struct rq *rq, struct task_struct *p)
+static inline void take_task(struct rq *rq, int cpu, struct task_struct *p)
 {
 	/*
 	 * We can optimise this out completely for !SMP, because the
@@ -1349,7 +1320,6 @@ static inline void take_task(int cpu, struct rq *rq, struct task_struct *p)
 	p->on_cpu = 1;
 	dequeue_task(p, task_rq(p));
 	clear_sticky(p);
-	dec_qnr();
 	set_task_cpu(p, cpu);
 }
 
@@ -2403,7 +2373,7 @@ unsigned long nr_running(void)
  */
 bool single_task_running(void)
 {
-	return (raw_rq()->rq_running && (0 == queued_notrunning()));
+	return (raw_rq()->rq_running && (0 == raw_rq()->nr_queued));
 }
 EXPORT_SYMBOL(single_task_running);
 
@@ -3499,56 +3469,15 @@ found_middle:
 static inline struct
 task_struct *earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *idle)
 {
-	struct task_struct *edt = idle;
-	struct skiplist_node *node = &grq.sl_header;
-	u64 earliest_deadline = ~0ULL;
+	struct task_struct *edt;
+	struct skiplist_node *node = &rq->sl_header;
 
-	while ((node = node->next[0]) != &grq.sl_header) {
-		struct task_struct *p = skiplist_entry(node, struct task_struct,
-						       sl_node);
-		int tcpu;
+	if ((node = node->next[0]) == &rq->sl_header)
+		return idle;
 
-		/* Make sure affinity is ok */
-		if (needs_other_cpu(p, cpu))
-			continue;
+	edt = skiplist_entry(node, struct task_struct, sl_node);
 
-		/*
-		 * First matched RT task has the highest priority
-		 */
-		if (p->prio < MAX_RT_PRIO) {
-			edt = p;
-			break;
-		}
-
-		/*
-		 * Just search tasks with same priority of current candidate
-		 */
-		if (unlikely(p->prio > edt->prio))
-			break;
-
-		if (!sched_interactive && (tcpu = task_cpu(p)) != cpu) {
-			u64 dl;
-
-			if (task_sticky(p) && scaling_rq(rq))
-				continue;
-			dl = p->deadline << locality_diff(tcpu, rq);
-			if (unlikely(!deadline_before(dl, earliest_deadline)))
-				continue;
-			earliest_deadline = dl;
-			edt = p;
-			/* We continue even though we've found the earliest
-			 * deadline task as the locality offset means there
-			 * may be a better candidate after it. */
-			continue;
-		}
-		/* This wouldn't happen if we encountered a better deadline from
-		 * another CPU and have already set edt. */
-		if (likely(p->deadline < earliest_deadline))
-			edt = p;
-		break;
-	}
-	if (likely(edt != idle))
-		take_task(cpu, rq, edt);
+	take_task(rq, cpu, edt);
 	return edt;
 }
 
@@ -3751,9 +3680,8 @@ static void __sched notrace __schedule(bool preempt)
 		if (deactivate)
 			deactivate_task(prev, rq);
 		else {
-			if (queued_notrunning()) {
+			if (rq->nr_queued) {
 				enqueue_task(prev, rq);
-				inc_qnr();
 				next = earliest_deadline_task(rq, cpu, idle);
 				if (likely(prev != next)) {
 					/*
@@ -3785,7 +3713,7 @@ static void __sched notrace __schedule(bool preempt)
 		_grq_lock();
 	}
 
-	if (likely(queued_notrunning())) {
+	if (likely(rq->nr_queued)) {
 		next = earliest_deadline_task(rq, cpu, idle);
 	} else {
 		/*
@@ -7367,7 +7295,6 @@ void __init sched_init(void)
 	raw_spin_lock_init(&grq.iso_lock);
 	grq.iso_ticks = 0;
 	grq.iso_refractory = false;
-	FULL_INIT_SKIPLIST_NODE(&grq.sl_header);
 
 #ifdef CONFIG_SMP
 	init_defrootdomain();
