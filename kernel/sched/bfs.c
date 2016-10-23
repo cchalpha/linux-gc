@@ -109,7 +109,7 @@
 
 #define rq_idle(rq)		((rq)->rq_prio == PRIO_LIMIT)
 
-#define ISO_PERIOD		((5 * HZ * grq.noc) + 1)
+#define ISO_PERIOD		((5 * HZ * num_online_cpus()) + 1)
 
 #define SCHED_PRIO(p)		((p) + MAX_RT_PRIO)
 #define STOP_PRIO		(MAX_RT_PRIO - 1)
@@ -187,7 +187,6 @@ struct global_rq {
 #endif
 #endif
 	u64 rq_priodls[NR_CPUS];
-	int noc; /* num_online_cpus stored and updated when it changes */
 
 	raw_spinlock_t iso_lock;
 	int iso_ticks;
@@ -7146,7 +7145,6 @@ int sched_cpu_activate(unsigned int cpu)
 		set_rq_online(rq);
 	}
 	unbind_zero(cpu);
-	grq.noc = num_online_cpus();
 	/* set grq.cpu_idle_map when cpu is online */
 	cpumask_set_cpu(cpu, &grq.cpu_idle_map);
 	rq_grq_unlock_irqrestore(rq, &flags);
@@ -7211,7 +7209,6 @@ int sched_cpu_dying(unsigned int cpu)
 		set_rq_offline(rq);
 	}
 	bind_zero(cpu);
-	grq.noc = num_online_cpus();
 	/* clear grq.cpu_idle_map when cpu is offline, let it looks *busy* */
 	cpumask_clear_cpu(cpu, &grq.cpu_idle_map);
 	/*
@@ -7370,7 +7367,6 @@ void __init sched_init(void)
 	raw_spin_lock_init(&grq.iso_lock);
 	grq.iso_ticks = 0;
 	grq.iso_refractory = false;
-	grq.noc = 1;
 	FULL_INIT_SKIPLIST_NODE(&grq.sl_header);
 
 #ifdef CONFIG_SMP
