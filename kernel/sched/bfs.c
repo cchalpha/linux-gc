@@ -560,7 +560,7 @@ static inline void grq_priodl_unlock(void)
 static void dequeue_task(struct task_struct *p, struct rq *rq)
 {
 	lockdep_assert_held(&grq.lock);
-	lockdep_assert_held(&rq->lock);
+	/*lockdep_assert_held(&rq->lock);*/
 
 	skiplist_del_init(&grq.sl_header, &p->sl_node);
 
@@ -1342,16 +1342,16 @@ static inline void unstick_task(struct rq *rq, struct task_struct *p)
  */
 static inline void take_task(int cpu, struct rq *rq, struct task_struct *p)
 {
-	set_task_cpu(p, cpu);
 	/*
 	 * We can optimise this out completely for !SMP, because the
 	 * SMP rebalancing from interrupt is the only thing that cares
 	 * here.
 	 */
 	p->on_cpu = 1;
-	dequeue_task(p, rq);
+	dequeue_task(p, task_rq(p));
 	clear_sticky(p);
 	dec_qnr();
+	set_task_cpu(p, cpu);
 }
 
 /* Enter with rq lock held. We know p is on the local cpu */
@@ -5503,6 +5503,9 @@ SYSCALL_DEFINE2(sched_rr_get_interval, pid_t, pid,
 	int retval;
 	struct timespec t;
 	raw_spinlock_t *lock;
+
+	printk(KERN_INFO "bfs: 0x%02u 0x%02u\n", cpu_rq(0)->nr_queued,
+	       cpu_rq(1)->nr_queued);
 
 	if (pid < 0)
 		return -EINVAL;
