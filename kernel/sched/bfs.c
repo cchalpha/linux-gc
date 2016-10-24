@@ -173,12 +173,10 @@ static inline int timeslice(void)
 }
 
 /*
- * The global runqueue data that all CPUs work off. Data is protected either
- * by the global grq lock, or the discrete lock that precedes the data in this
- * struct.
+ * The global runqueue data that all CPUs work off. Data is protected by the
+ * discrete lock that precedes the data in this struct.
  */
 struct global_rq {
-	raw_spinlock_t lock;
 #ifdef CONFIG_SMP
 	cpumask_t cpu_idle_map;
 	cpumask_t non_scaled_cpumask;
@@ -363,12 +361,10 @@ static inline struct rq
 			raw_spin_unlock(&rq->lock);
 		} else if (task_queued(p)) {
 			raw_spin_lock(&rq->lock);
-			raw_spin_lock(&grq.lock);
 			if (likely(!p->on_cpu && task_queued(p) && rq == task_rq(p))) {
 				*plock = &rq->lock;
 				return rq;
 			}
-			raw_spin_unlock(&grq.lock);
 			raw_spin_unlock(&rq->lock);
 		} else {
 			*plock = NULL;
@@ -380,8 +376,6 @@ static inline struct rq
 static inline void
 __task_access_unlock(struct task_struct *p, raw_spinlock_t *lock)
 {
-	if (task_queued(p))
-		raw_spin_unlock(&grq.lock);
 	if (NULL != lock)
 		raw_spin_unlock(lock);
 }
@@ -401,12 +395,10 @@ static inline struct rq
 			raw_spin_unlock_irqrestore(&rq->lock, *flags);
 		} else if (task_queued(p)) {
 			raw_spin_lock_irqsave(&rq->lock, *flags);
-			raw_spin_lock(&grq.lock);
 			if (likely(!p->on_cpu && task_queued(p) && rq == task_rq(p))) {
 				*plock = &rq->lock;
 				return rq;
 			}
-			raw_spin_unlock(&grq.lock);
 			raw_spin_unlock_irqrestore(&rq->lock, *flags);
 		} else {
 			raw_spin_lock_irqsave(&p->pi_lock, *flags);
@@ -422,8 +414,6 @@ static inline struct rq
 static inline void
 task_access_unlock_irqrestore(struct task_struct *p, raw_spinlock_t *lock, unsigned long *flags)
 {
-	if (task_queued(p))
-		raw_spin_unlock(&grq.lock);
 	raw_spin_unlock_irqrestore(lock, *flags);
 }
 
@@ -494,10 +484,12 @@ static inline void grq_priodl_unlock(void)
 #endif
 
 /*
- * Removing from the global runqueue. Enter with grq locked. Deleting a task
- * from the skip list is done via the stored node reference in the task struct
- * and does not require a full look up. Thus it occurs in O(k) time where k
- * is the "level" of the list the task was stored at - usually < 4, max 16.
+ * Removing from the global runqueue. Deleting a task from the skip list is done
+ * via the stored node reference in the task struct and does not require a full
+ * look up. Thus it occurs in O(k) time where k is the "level" of the list the
+ * task was stored at - usually < 4, max 16.
+ *
+ * Context: rq->lock
  */
 static void dequeue_task(struct task_struct *p, struct rq *rq)
 {
@@ -575,7 +567,9 @@ bfs_skiplist_task_search(struct skiplist_node *it, struct skiplist_node *node)
 DEFINE_SKIPLIST_INSERT_FUNC(bfs_skiplist_insert, bfs_skiplist_task_search);
 
 /*
- * Adding to the global runqueue. Enter with grq locked.
+ * Adding task to the runqueue.
+ *
+ * Context: rq->lock
  */
 static void enqueue_task(struct task_struct *p, struct rq *rq)
 {
@@ -986,7 +980,9 @@ static int effective_prio(struct task_struct *p)
 }
 
 /*
- * activate_task - move a task to the runqueue. Enter with grq locked.
+ * activate_task - move a task to the runqueue.
+ *
+ * Context: rq->lock
  */
 static void activate_task(struct task_struct *p, struct rq *rq)
 {
@@ -1017,7 +1013,9 @@ static inline void clear_sticky(struct task_struct *p);
 
 /*
  * deactivate_task - If it's running, it's not on the grq and we can just
- * decrement the nr_running. Enter with grq locked.
+ * decrement the nr_running.
+ *
+ * Context: rq->lock
  */
 static inline void deactivate_task(struct task_struct *p, struct rq *rq)
 {
@@ -1054,8 +1052,7 @@ void set_task_cpu(struct task_struct *p, unsigned int cpu)
 	 * The caller should hold task rq lock
 	 * release checking for now
 	 */
-	/* WARN_ON_ONCE(debug_locks && (!lockdep_is_held(&grq.lock) ||
-				     !lockdep_is_held(&task_rq()->lock)));*/
+	/* WARN_ON_ONCE(debug_locks && !lockdep_is_held(&task_rq()->lock));*/
 #endif
 #endif
 	if (task_cpu(p) == cpu)
@@ -2123,7 +2120,6 @@ prepare_task_switch(struct rq *rq, struct task_struct *prev,
  * because prev may have moved to another CPU.
  */
 static struct rq *finish_task_switch(struct task_struct *prev)
-	__releases(grq.lock)
 	__releases(rq->lock)
 {
 	struct rq *rq = this_rq();
@@ -2277,9 +2273,7 @@ context_switch(struct rq *rq, struct task_struct *prev,
  * nr_running, nr_uninterruptible and nr_context_switches:
  *
  * externally visible scheduler statistics: current number of runnable
- * threads, total number of context switches performed since bootup. All are
- * measured without grabbing the grq lock but the occasional inaccurate result
- * doesn't matter so long as it's positive.
+ * threads, total number of context switches performed since bootup.
  */
 unsigned long nr_running(void)
 {
@@ -3183,8 +3177,7 @@ static void task_running_tick(struct rq *rq)
 
 /*
  * This function gets called by the timer code, with HZ frequency.
- * We call it with interrupts disabled. The data modified is all
- * local to struct rq so we don't need to grab grq lock.
+ * We call it with interrupts disabled.
  */
 void scheduler_tick(void)
 {
@@ -3466,8 +3459,7 @@ static inline void schedule_debug(struct task_struct *prev)
 
 /*
  * The currently running task's information is all stored in rq local data
- * which is only modified by the local CPU, thereby allowing the data to be
- * changed without grabbing the grq lock.
+ * which is only modified by the local CPU.
  */
 static inline void set_rq_task(struct rq *rq, struct task_struct *p)
 {
@@ -7212,7 +7204,6 @@ void __init sched_init(void)
 	for (i = 1 ; i < NICE_WIDTH ; i++)
 		prio_ratios[i] = prio_ratios[i - 1] * 11 / 10;
 
-	raw_spin_lock_init(&grq.lock);
 	raw_spin_lock_init(&grq.iso_lock);
 	grq.iso_ticks = 0;
 	grq.iso_refractory = false;
