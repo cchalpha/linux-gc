@@ -336,22 +336,6 @@ static inline void double_rq_unlock(struct rq *rq1, struct rq *rq2)
 		__release(rq2->lock);
 }
 
-static inline void _grq_lock(void)
-	__acquires(grq.lock)
-{
-	raw_spinlock_t *lock = &grq.lock;
-	spin_acquire(&lock->dep_map, 0, 0, _RET_IP_);
-	LOCK_CONTENDED(lock, do_raw_spin_trylock, do_raw_spin_lock);
-}
-
-static inline void _grq_unlock(void)
-	__releases(grq.lock)
-{
-	raw_spinlock_t *lock = &grq.lock;
-	spin_release(&lock->dep_map, 1, _RET_IP_);
-	do_raw_spin_unlock(lock);
-}
-
 static inline void grq_lock(void)
 	__acquires(grq.lock)
 {
@@ -2037,9 +2021,7 @@ after_ts_init:
 		time_slice_expired(p, rq);
 	}
 
-	_grq_lock();
 	activate_task(p, rq);
-	_grq_unlock();
 
 	raw_spin_unlock_irqrestore(&rq->lock, flags);
 
@@ -5536,7 +5518,6 @@ void init_idle(struct task_struct *idle, int cpu)
 
 	raw_spin_lock_irqsave(&idle->pi_lock, flags);
 	raw_spin_lock(&rq->lock);
-	_grq_lock();
 	update_rq_clock(rq);
 
 	idle->last_ran = rq->clock_task;
@@ -5567,7 +5548,6 @@ void init_idle(struct task_struct *idle, int cpu)
 	rq->curr = rq->idle = idle;
 	idle->on_cpu = 1;
 
-	_grq_unlock();
 	raw_spin_unlock(&rq->lock);
 	raw_spin_unlock_irqrestore(&idle->pi_lock, flags);
 
@@ -7193,7 +7173,6 @@ void __init sched_init_smp(void)
 		struct rq *rq = cpu_rq(cpu);
 
 		raw_spin_lock_irq(&rq->lock);
-		_grq_lock();
 		/* First check if this cpu is in the same node */
 		for_each_domain(cpu, sd) {
 			if (sd->level > SD_LV_NODE)
@@ -7216,7 +7195,6 @@ void __init sched_init_smp(void)
 			if (rq->cpu_locality[other_cpu] > 1)
 				rq->cpu_locality[other_cpu] = 1;
 #endif
-		_grq_unlock();
 		raw_spin_unlock_irq(&rq->lock);
 	}
 	mutex_unlock(&sched_domains_mutex);
