@@ -271,12 +271,6 @@ struct rq *uprq;
 # define finish_arch_post_lock_switch()	do { } while (0)
 #endif
 
-/*
- * All common locking functions performed on grq.lock. rq->clock is local to
- * the CPU accessing it so it can be modified just with interrupts disabled
- * when we're not updating niffies.
- * Looking up task_rq must be done under grq.lock to be safe.
- */
 static void update_rq_clock_task(struct rq *rq, s64 delta);
 
 static inline void update_rq_clock(struct rq *rq)
@@ -334,24 +328,6 @@ static inline void double_rq_unlock(struct rq *rq1, struct rq *rq2)
 		raw_spin_unlock(&rq2->lock);
 	else
 		__release(rq2->lock);
-}
-
-static inline void
-rq_grq_lock_irqsave(struct rq *rq, unsigned long *flags)
-	__acquires(rq->lock)
-	__acquires(grq.lock)
-{
-	raw_spin_lock_irqsave(&rq->lock, *flags);
-	raw_spin_lock(&grq.lock);
-}
-
-static inline void
-rq_grq_unlock_irqrestore(struct rq *rq, unsigned long *flags)
-	__releases(grq.lock)
-	__releases(rq->lock)
-{
-	raw_spin_unlock(&grq.lock);
-	raw_spin_unlock_irqrestore(&rq->lock, *flags);
 }
 
 /*
@@ -5998,7 +5974,7 @@ static void rq_attach_root(struct rq *rq, struct root_domain *rd)
 	struct root_domain *old_rd = NULL;
 	unsigned long flags;
 
-	rq_grq_lock_irqsave(rq, &flags);
+	raw_spin_lock_irqsave(&rq->lock, flags);
 
 	if (rq->rd) {
 		old_rd = rq->rd;
@@ -6024,7 +6000,7 @@ static void rq_attach_root(struct rq *rq, struct root_domain *rd)
 	if (cpumask_test_cpu(rq->cpu, cpu_active_mask))
 		set_rq_online(rq);
 
-	rq_grq_unlock_irqrestore(rq, &flags);
+	raw_spin_unlock_irqrestore(&rq->lock, flags);
 
 	if (old_rd)
 		call_rcu_sched(&old_rd->rcu, free_rootdomain);
@@ -7014,7 +6990,7 @@ int sched_cpu_activate(unsigned int cpu)
 	 *    domains.
 	 */
 	read_lock(&tasklist_lock);
-	rq_grq_lock_irqsave(rq, &flags);
+	raw_spin_lock_irqsave(&rq->lock, flags);
 	if (rq->rd) {
 		BUG_ON(!cpumask_test_cpu(cpu, rq->rd->span));
 		set_rq_online(rq);
@@ -7022,7 +6998,7 @@ int sched_cpu_activate(unsigned int cpu)
 	unbind_zero(cpu);
 	/* set grq.cpu_idle_map when cpu is online */
 	cpumask_set_cpu(cpu, &grq.cpu_idle_map);
-	rq_grq_unlock_irqrestore(rq, &flags);
+	raw_spin_unlock_irqrestore(&rq->lock, flags);
 	read_unlock(&tasklist_lock);
 
 	return 0;
@@ -7078,7 +7054,7 @@ int sched_cpu_dying(unsigned int cpu)
 	unsigned long flags;
 
 	read_lock(&tasklist_lock);
-	rq_grq_lock_irqsave(rq, &flags);
+	raw_spin_lock_irqsave(&rq->lock, flags);
 	if (rq->rd) {
 		BUG_ON(!cpumask_test_cpu(cpu, rq->rd->span));
 		set_rq_offline(rq);
@@ -7091,7 +7067,7 @@ int sched_cpu_dying(unsigned int cpu)
 	 */
 	set_rq_task(rq, rq->idle);
 	update_rq_clock(rq);
-	rq_grq_unlock_irqrestore(rq, &flags);
+	raw_spin_unlock_irqrestore(&rq->lock, flags);
 	read_unlock(&tasklist_lock);
 
 	return 0;
