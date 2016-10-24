@@ -1746,7 +1746,7 @@ static void try_to_wake_up_local(struct task_struct *p)
 {
 	struct rq *rq = task_rq(p);
 
-	lockdep_assert_held(&grq.lock);
+	lockdep_assert_held(&rq->lock);
 
 	if (!(p->state & TASK_NORMAL))
 		return;
@@ -2302,7 +2302,6 @@ context_switch(struct rq *rq, struct task_struct *prev,
 	 * of the scheduler it's an obvious special-case), so we
 	 * do an early lockdep release here:
 	 */
-	spin_release(&grq.lock.dep_map, 1, _THIS_IP_);
 	spin_release(&rq->lock.dep_map, 1, _THIS_IP_);
 
 	/* Here we just switch the register state and the stack. */
