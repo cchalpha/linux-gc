@@ -172,12 +172,10 @@ static inline int timeslice(void)
 }
 
 /*
- * The global runqueue data that all CPUs work off. Data is protected either
- * by the global grq lock, or the discrete lock that precedes the data in this
- * struct.
+ * The global runqueue data that all CPUs work off. Data is protected by the
+ * discrete lock that precedes the data in this struct.
  */
 struct global_rq {
-	raw_spinlock_t lock;
 #ifdef CONFIG_SMP
 	cpumask_t cpu_idle_map;
 	cpumask_t non_scaled_cpumask;
@@ -270,12 +268,6 @@ struct rq *uprq;
 # define finish_arch_post_lock_switch()	do { } while (0)
 #endif
 
-/*
- * All common locking functions performed on grq.lock. rq->clock is local to
- * the CPU accessing it so it can be modified just with interrupts disabled
- * when we're not updating niffies.
- * Looking up task_rq must be done under grq.lock to be safe.
- */
 static void update_rq_clock_task(struct rq *rq, s64 delta);
 
 static inline void update_rq_clock(struct rq *rq)
@@ -335,52 +327,6 @@ static inline void double_rq_unlock(struct rq *rq1, struct rq *rq2)
 		__release(rq2->lock);
 }
 
-static inline void _grq_lock(void)
-	__acquires(grq.lock)
-{
-	raw_spinlock_t *lock = &grq.lock;
-	spin_acquire(&lock->dep_map, 0, 0, _RET_IP_);
-	LOCK_CONTENDED(lock, do_raw_spin_trylock, do_raw_spin_lock);
-}
-
-static inline void _grq_unlock(void)
-	__releases(grq.lock)
-{
-	raw_spinlock_t *lock = &grq.lock;
-	spin_release(&lock->dep_map, 1, _RET_IP_);
-	do_raw_spin_unlock(lock);
-}
-
-static inline void grq_lock(void)
-	__acquires(grq.lock)
-{
-	raw_spin_lock(&grq.lock);
-}
-
-static inline void grq_unlock(void)
-	__releases(grq.lock)
-{
-	raw_spin_unlock(&grq.lock);
-}
-
-static inline void
-rq_grq_lock_irqsave(struct rq *rq, unsigned long *flags)
-	__acquires(rq->lock)
-	__acquires(grq.lock)
-{
-	raw_spin_lock_irqsave(&rq->lock, *flags);
-	raw_spin_lock(&grq.lock);
-}
-
-static inline void
-rq_grq_unlock_irqrestore(struct rq *rq, unsigned long *flags)
-	__releases(grq.lock)
-	__releases(rq->lock)
-{
-	raw_spin_unlock(&grq.lock);
-	raw_spin_unlock_irqrestore(&rq->lock, *flags);
-}
-
 /*
  * A task that is not running or queued will have an empty skip list node.
  * A task that is queued but not running will be on the grq skip list.
@@ -414,12 +360,10 @@ static inline struct rq
 			raw_spin_unlock(&rq->lock);
 		} else if (task_queued(p)) {
 			raw_spin_lock(&rq->lock);
-			raw_spin_lock(&grq.lock);
 			if (likely(!p->on_cpu && task_queued(p) && rq == task_rq(p))) {
 				*plock = &rq->lock;
 				return rq;
 			}
-			raw_spin_unlock(&grq.lock);
 			raw_spin_unlock(&rq->lock);
 		} else {
 			*plock = NULL;
@@ -431,8 +375,6 @@ static inline struct rq
 static inline void
 __task_access_unlock(struct task_struct *p, raw_spinlock_t *lock)
 {
-	if (task_queued(p))
-		raw_spin_unlock(&grq.lock);
 	if (NULL != lock)
 		raw_spin_unlock(lock);
 }
@@ -452,12 +394,10 @@ static inline struct rq
 			raw_spin_unlock_irqrestore(&rq->lock, *flags);
 		} else if (task_queued(p)) {
 			raw_spin_lock_irqsave(&rq->lock, *flags);
-			raw_spin_lock(&grq.lock);
 			if (likely(!p->on_cpu && task_queued(p) && rq == task_rq(p))) {
 				*plock = &rq->lock;
 				return rq;
 			}
-			raw_spin_unlock(&grq.lock);
 			raw_spin_unlock_irqrestore(&rq->lock, *flags);
 		} else {
 			raw_spin_lock_irqsave(&p->pi_lock, *flags);
@@ -473,8 +413,6 @@ static inline struct rq
 static inline void
 task_access_unlock_irqrestore(struct task_struct *p, raw_spinlock_t *lock, unsigned long *flags)
 {
-	if (task_queued(p))
-		raw_spin_unlock(&grq.lock);
 	raw_spin_unlock_irqrestore(lock, *flags);
 }
 
@@ -486,7 +424,7 @@ static inline void prepare_lock_switch(struct rq *rq, struct task_struct *next)
 static inline void finish_lock_switch(struct rq *rq, struct task_struct *prev)
 {
 	/*
-	 * After ->on_cpu is cleared, the task would be locked on grq
+	 * After ->on_cpu is cleared, the task would be locked on rq
 	 * lock or pi_lock, We must ensure this doesn't happen until the
 	 * switch is completely finished.
 	 */
@@ -494,7 +432,6 @@ static inline void finish_lock_switch(struct rq *rq, struct task_struct *prev)
 	prev->on_cpu = 0;
 #ifdef CONFIG_DEBUG_SPINLOCK
 	/* this is a valid case when another task releases the spinlock */
-	grq.lock.owner = current;
 	rq->lock.owner = current;
 #endif
 	/*
@@ -503,9 +440,7 @@ static inline void finish_lock_switch(struct rq *rq, struct task_struct *prev)
 	 * prev into current:
 	 */
 	spin_acquire(&rq->lock.dep_map, 0, 0, _THIS_IP_);
-	spin_acquire(&grq.lock.dep_map, 0, 0, _THIS_IP_);
 
-	_grq_unlock();
 	raw_spin_unlock_irq(&rq->lock);
 }
 
@@ -548,10 +483,12 @@ static inline void grq_priodl_unlock(void)
 #endif
 
 /*
- * Removing from the global runqueue. Enter with grq locked. Deleting a task
- * from the skip list is done via the stored node reference in the task struct
- * and does not require a full look up. Thus it occurs in O(k) time where k
- * is the "level" of the list the task was stored at - usually < 4, max 16.
+ * Removing from the global runqueue. Deleting a task from the skip list is done
+ * via the stored node reference in the task struct and does not require a full
+ * look up. Thus it occurs in O(k) time where k is the "level" of the list the
+ * task was stored at - usually < 4, max 16.
+ *
+ * Context: rq->lock
  */
 static void dequeue_task(struct task_struct *p, struct rq *rq)
 {
@@ -629,7 +566,9 @@ bfs_skiplist_task_search(struct skiplist_node *it, struct skiplist_node *node)
 DEFINE_SKIPLIST_INSERT_FUNC(bfs_skiplist_insert, bfs_skiplist_task_search);
 
 /*
- * Adding to the global runqueue. Enter with grq locked.
+ * Adding task to the runqueue.
+ *
+ * Context: rq->lock
  */
 static void enqueue_task(struct task_struct *p, struct rq *rq)
 {
@@ -1040,7 +979,9 @@ static int effective_prio(struct task_struct *p)
 }
 
 /*
- * activate_task - move a task to the runqueue. Enter with grq locked.
+ * activate_task - move a task to the runqueue.
+ *
+ * Context: rq->lock
  */
 static void activate_task(struct task_struct *p, struct rq *rq)
 {
@@ -1071,7 +1012,9 @@ static inline void clear_sticky(struct task_struct *p);
 
 /*
  * deactivate_task - If it's running, it's not on the grq and we can just
- * decrement the nr_running. Enter with grq locked.
+ * decrement the nr_running.
+ *
+ * Context: rq->lock
  */
 static inline void deactivate_task(struct task_struct *p, struct rq *rq)
 {
@@ -1108,8 +1051,7 @@ void set_task_cpu(struct task_struct *p, unsigned int cpu)
 	 * The caller should hold task rq lock
 	 * release checking for now
 	 */
-	/* WARN_ON_ONCE(debug_locks && (!lockdep_is_held(&grq.lock) ||
-				     !lockdep_is_held(&task_rq()->lock)));*/
+	/* WARN_ON_ONCE(debug_locks && !lockdep_is_held(&task_rq()->lock));*/
 #endif
 #endif
 	if (task_cpu(p) == cpu)
@@ -1153,14 +1095,12 @@ static struct rq *move_queued_task(struct rq *rq, struct task_struct *p, int
 	p->on_rq = TASK_ON_RQ_MIGRATING;
 	dequeue_task(p, rq);
 	set_task_cpu(p, new_cpu);
-	_grq_unlock();
 	raw_spin_unlock(&rq->lock);
 
 	rq = cpu_rq(new_cpu);
 
 	raw_spin_lock(&rq->lock);
 	BUG_ON(task_cpu(p) != new_cpu);
-	_grq_lock();
 	enqueue_task(p, rq);
 	p->on_rq = TASK_ON_RQ_QUEUED;
 	check_preempt_curr(rq, p);
@@ -1187,11 +1127,7 @@ static struct rq *__migrate_task(struct rq *rq, struct task_struct *p, int
 	if (unlikely(!cpumask_test_cpu(dest_cpu, tsk_cpus_allowed(p))))
 		return rq;
 
-	_grq_lock();
-	rq = move_queued_task(rq, p, dest_cpu);
-	_grq_unlock();
-
-	return rq;
+	return move_queued_task(rq, p, dest_cpu);
 }
 
 struct migration_arg {
@@ -1754,7 +1690,7 @@ static void try_to_wake_up_local(struct task_struct *p)
 {
 	struct rq *rq = task_rq(p);
 
-	lockdep_assert_held(&grq.lock);
+	lockdep_assert_held(&rq->lock);
 
 	if (!(p->state & TASK_NORMAL))
 		return;
@@ -2045,9 +1981,7 @@ after_ts_init:
 		time_slice_expired(p, rq);
 	}
 
-	_grq_lock();
 	activate_task(p, rq);
-	_grq_unlock();
 
 	raw_spin_unlock_irqrestore(&rq->lock, flags);
 
@@ -2185,7 +2119,6 @@ prepare_task_switch(struct rq *rq, struct task_struct *prev,
  * because prev may have moved to another CPU.
  */
 static struct rq *finish_task_switch(struct task_struct *prev)
-	__releases(grq.lock)
 	__releases(rq->lock)
 {
 	struct rq *rq = this_rq();
@@ -2310,7 +2243,6 @@ context_switch(struct rq *rq, struct task_struct *prev,
 	 * of the scheduler it's an obvious special-case), so we
 	 * do an early lockdep release here:
 	 */
-	spin_release(&grq.lock.dep_map, 1, _THIS_IP_);
 	spin_release(&rq->lock.dep_map, 1, _THIS_IP_);
 
 	/* Here we just switch the register state and the stack. */
@@ -2340,9 +2272,7 @@ context_switch(struct rq *rq, struct task_struct *prev,
  * nr_running, nr_uninterruptible and nr_context_switches:
  *
  * externally visible scheduler statistics: current number of runnable
- * threads, total number of context switches performed since bootup. All are
- * measured without grabbing the grq lock but the occasional inaccurate result
- * doesn't matter so long as it's positive.
+ * threads, total number of context switches performed since bootup.
  */
 unsigned long nr_running(void)
 {
@@ -3246,8 +3176,7 @@ static void task_running_tick(struct rq *rq)
 
 /*
  * This function gets called by the timer code, with HZ frequency.
- * We call it with interrupts disabled. The data modified is all
- * local to struct rq so we don't need to grab grq lock.
+ * We call it with interrupts disabled.
  */
 void scheduler_tick(void)
 {
@@ -3529,8 +3458,7 @@ static inline void schedule_debug(struct task_struct *prev)
 
 /*
  * The currently running task's information is all stored in rq local data
- * which is only modified by the local CPU, thereby allowing the data to be
- * changed without grabbing the grq lock.
+ * which is only modified by the local CPU.
  */
 static inline void set_rq_task(struct rq *rq, struct task_struct *p)
 {
@@ -3645,9 +3573,7 @@ static void __sched notrace __schedule(bool preempt)
 					if (unlikely(to_wakeup == prev))
 						deactivate = false;
 					else {
-						_grq_lock();
 						try_to_wake_up_local(to_wakeup);
-						_grq_unlock();
 						rq->try_preempt_tsk = to_wakeup;
 					}
 				}
@@ -3670,8 +3596,6 @@ static void __sched notrace __schedule(bool preempt)
 		prev->time_slice = rq->rq_time_slice;
 		check_deadline(prev, rq);
 		prev->last_ran = rq->clock_task;
-
-		_grq_lock();
 
 		if (deactivate)
 			deactivate_task(prev, rq);
@@ -3706,7 +3630,6 @@ static void __sched notrace __schedule(bool preempt)
 		update_rq_clock(rq);
 		update_cpu_clock_switch_idle(rq, prev);
 		rq->dither = (rq->clock - rq->last_tick < HALF_JIFFY_NS);
-		_grq_lock();
 	}
 
 	if (likely(rq->nr_queued)) {
@@ -3736,7 +3659,7 @@ do_switch:
 		set_rq_task(rq, next);
 
 		/* Once next->on_cpu is set, task_access_lock...() can be locked on
-		 * task's runqueue, so set it before release grq.lock 
+		 * task's runqueue, so set it before release rq lock
 		 */
 		next->on_cpu = true;
 		rq->curr = next;
@@ -3744,12 +3667,11 @@ do_switch:
 		rq->nr_switches++;
 
 		trace_sched_switch(preempt, prev, next);
-		rq = context_switch(rq, prev, next); /* unlocks the grq */
+		rq = context_switch(rq, prev, next); /* unlocks the rq */
 		cpu = cpu_of(rq);
 		idle = rq->idle;
 	} else {
 unlock_out:
-		_grq_unlock();
 		raw_spin_unlock_irq(&rq->lock);
 	}
 }
@@ -5297,7 +5219,6 @@ int __sched yield_to(struct task_struct *p, bool preempt)
 
 	rq = this_rq();
 	raw_spin_lock_irqsave(&rq->lock, flags);
-	grq_lock();
 	if (task_running(p) || p->state) {
 		yielded = -ESRCH;
 		goto out_unlock;
@@ -5316,7 +5237,6 @@ int __sched yield_to(struct task_struct *p, bool preempt)
 	if (preempt && rq != p_rq)
 		resched_curr(p_rq);
 out_unlock:
-	grq_unlock();
 	raw_spin_unlock_irqrestore(&rq->lock, flags);
 
 	if (yielded > 0)
@@ -5551,7 +5471,6 @@ void init_idle(struct task_struct *idle, int cpu)
 
 	raw_spin_lock_irqsave(&idle->pi_lock, flags);
 	raw_spin_lock(&rq->lock);
-	_grq_lock();
 	update_rq_clock(rq);
 
 	idle->last_ran = rq->clock_task;
@@ -5582,7 +5501,6 @@ void init_idle(struct task_struct *idle, int cpu)
 	rq->curr = rq->idle = idle;
 	idle->on_cpu = 1;
 
-	_grq_unlock();
 	raw_spin_unlock(&rq->lock);
 	raw_spin_unlock_irqrestore(&idle->pi_lock, flags);
 
@@ -6047,7 +5965,7 @@ static void rq_attach_root(struct rq *rq, struct root_domain *rd)
 	struct root_domain *old_rd = NULL;
 	unsigned long flags;
 
-	rq_grq_lock_irqsave(rq, &flags);
+	raw_spin_lock_irqsave(&rq->lock, flags);
 
 	if (rq->rd) {
 		old_rd = rq->rd;
@@ -6073,7 +5991,7 @@ static void rq_attach_root(struct rq *rq, struct root_domain *rd)
 	if (cpumask_test_cpu(rq->cpu, cpu_active_mask))
 		set_rq_online(rq);
 
-	rq_grq_unlock_irqrestore(rq, &flags);
+	raw_spin_unlock_irqrestore(&rq->lock, flags);
 
 	if (old_rd)
 		call_rcu_sched(&old_rd->rcu, free_rootdomain);
@@ -7063,7 +6981,7 @@ int sched_cpu_activate(unsigned int cpu)
 	 *    domains.
 	 */
 	read_lock(&tasklist_lock);
-	rq_grq_lock_irqsave(rq, &flags);
+	raw_spin_lock_irqsave(&rq->lock, flags);
 	if (rq->rd) {
 		BUG_ON(!cpumask_test_cpu(cpu, rq->rd->span));
 		set_rq_online(rq);
@@ -7071,7 +6989,7 @@ int sched_cpu_activate(unsigned int cpu)
 	unbind_zero(cpu);
 	/* set grq.cpu_idle_map when cpu is online */
 	cpumask_set_cpu(cpu, &grq.cpu_idle_map);
-	rq_grq_unlock_irqrestore(rq, &flags);
+	raw_spin_unlock_irqrestore(&rq->lock, flags);
 	read_unlock(&tasklist_lock);
 
 	return 0;
@@ -7127,7 +7045,7 @@ int sched_cpu_dying(unsigned int cpu)
 	unsigned long flags;
 
 	read_lock(&tasklist_lock);
-	rq_grq_lock_irqsave(rq, &flags);
+	raw_spin_lock_irqsave(&rq->lock, flags);
 	if (rq->rd) {
 		BUG_ON(!cpumask_test_cpu(cpu, rq->rd->span));
 		set_rq_offline(rq);
@@ -7140,7 +7058,7 @@ int sched_cpu_dying(unsigned int cpu)
 	 */
 	set_rq_task(rq, rq->idle);
 	update_rq_clock(rq);
-	rq_grq_unlock_irqrestore(rq, &flags);
+	raw_spin_unlock_irqrestore(&rq->lock, flags);
 	read_unlock(&tasklist_lock);
 
 	return 0;
@@ -7208,7 +7126,6 @@ void __init sched_init_smp(void)
 		struct rq *rq = cpu_rq(cpu);
 
 		raw_spin_lock_irq(&rq->lock);
-		_grq_lock();
 		/* First check if this cpu is in the same node */
 		for_each_domain(cpu, sd) {
 			if (sd->level > SD_LV_NODE)
@@ -7231,7 +7148,6 @@ void __init sched_init_smp(void)
 			if (rq->cpu_locality[other_cpu] > 1)
 				rq->cpu_locality[other_cpu] = 1;
 #endif
-		_grq_unlock();
 		raw_spin_unlock_irq(&rq->lock);
 	}
 	mutex_unlock(&sched_domains_mutex);
@@ -7287,7 +7203,6 @@ void __init sched_init(void)
 	for (i = 1 ; i < NICE_WIDTH ; i++)
 		prio_ratios[i] = prio_ratios[i - 1] * 11 / 10;
 
-	raw_spin_lock_init(&grq.lock);
 	raw_spin_lock_init(&grq.iso_lock);
 	grq.iso_ticks = 0;
 	grq.iso_refractory = false;
