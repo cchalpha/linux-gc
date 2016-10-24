@@ -487,7 +487,7 @@ static inline void prepare_lock_switch(struct rq *rq, struct task_struct *next)
 static inline void finish_lock_switch(struct rq *rq, struct task_struct *prev)
 {
 	/*
-	 * After ->on_cpu is cleared, the task would be locked on grq
+	 * After ->on_cpu is cleared, the task would be locked on rq
 	 * lock or pi_lock, We must ensure this doesn't happen until the
 	 * switch is completely finished.
 	 */
@@ -495,7 +495,6 @@ static inline void finish_lock_switch(struct rq *rq, struct task_struct *prev)
 	prev->on_cpu = 0;
 #ifdef CONFIG_DEBUG_SPINLOCK
 	/* this is a valid case when another task releases the spinlock */
-	grq.lock.owner = current;
 	rq->lock.owner = current;
 #endif
 	/*
@@ -504,9 +503,7 @@ static inline void finish_lock_switch(struct rq *rq, struct task_struct *prev)
 	 * prev into current:
 	 */
 	spin_acquire(&rq->lock.dep_map, 0, 0, _THIS_IP_);
-	spin_acquire(&grq.lock.dep_map, 0, 0, _THIS_IP_);
 
-	_grq_unlock();
 	raw_spin_unlock_irq(&rq->lock);
 }
 
@@ -3646,9 +3643,7 @@ static void __sched notrace __schedule(bool preempt)
 					if (unlikely(to_wakeup == prev))
 						deactivate = false;
 					else {
-						_grq_lock();
 						try_to_wake_up_local(to_wakeup);
-						_grq_unlock();
 						rq->try_preempt_tsk = to_wakeup;
 					}
 				}
@@ -3671,8 +3666,6 @@ static void __sched notrace __schedule(bool preempt)
 		prev->time_slice = rq->rq_time_slice;
 		check_deadline(prev, rq);
 		prev->last_ran = rq->clock_task;
-
-		_grq_lock();
 
 		if (deactivate)
 			deactivate_task(prev, rq);
@@ -3707,7 +3700,6 @@ static void __sched notrace __schedule(bool preempt)
 		update_rq_clock(rq);
 		update_cpu_clock_switch_idle(rq, prev);
 		rq->dither = (rq->clock - rq->last_tick < HALF_JIFFY_NS);
-		_grq_lock();
 	}
 
 	if (likely(rq->nr_queued)) {
@@ -3737,7 +3729,7 @@ do_switch:
 		set_rq_task(rq, next);
 
 		/* Once next->on_cpu is set, task_access_lock...() can be locked on
-		 * task's runqueue, so set it before release grq.lock 
+		 * task's runqueue, so set it before release rq lock
 		 */
 		next->on_cpu = true;
 		rq->curr = next;
@@ -3745,12 +3737,11 @@ do_switch:
 		rq->nr_switches++;
 
 		trace_sched_switch(preempt, prev, next);
-		rq = context_switch(rq, prev, next); /* unlocks the grq */
+		rq = context_switch(rq, prev, next); /* unlocks the rq */
 		cpu = cpu_of(rq);
 		idle = rq->idle;
 	} else {
 unlock_out:
-		_grq_unlock();
 		raw_spin_unlock_irq(&rq->lock);
 	}
 }
