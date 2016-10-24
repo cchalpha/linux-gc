@@ -1151,14 +1151,12 @@ static struct rq *move_queued_task(struct rq *rq, struct task_struct *p, int
 	p->on_rq = TASK_ON_RQ_MIGRATING;
 	dequeue_task(p, rq);
 	set_task_cpu(p, new_cpu);
-	_grq_unlock();
 	raw_spin_unlock(&rq->lock);
 
 	rq = cpu_rq(new_cpu);
 
 	raw_spin_lock(&rq->lock);
 	BUG_ON(task_cpu(p) != new_cpu);
-	_grq_lock();
 	enqueue_task(p, rq);
 	p->on_rq = TASK_ON_RQ_QUEUED;
 	check_preempt_curr(rq, p);
@@ -1185,11 +1183,7 @@ static struct rq *__migrate_task(struct rq *rq, struct task_struct *p, int
 	if (unlikely(!cpumask_test_cpu(dest_cpu, tsk_cpus_allowed(p))))
 		return rq;
 
-	_grq_lock();
-	rq = move_queued_task(rq, p, dest_cpu);
-	_grq_unlock();
-
-	return rq;
+	return move_queued_task(rq, p, dest_cpu);
 }
 
 struct migration_arg {
