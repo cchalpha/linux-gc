@@ -1754,9 +1754,9 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 	if (!(wake_flags & WF_SYNC) || suitable_idle_cpus(p)) {
 		prq = task_preemptable_rq(p);
 		if (NULL == prq)
-			prq = rq;
+			prq = cpu_rq(cpumask_any(tsk_cpus_allowed(p)));
 	} else
-		prq = rq;
+		prq = cpu_rq(cpumask_any(tsk_cpus_allowed(p)));
 
 	raw_spin_lock(&prq->lock);
 	cpu = cpu_of(prq);
