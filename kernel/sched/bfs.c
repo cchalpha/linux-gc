@@ -336,18 +336,6 @@ static inline void double_rq_unlock(struct rq *rq1, struct rq *rq2)
 		__release(rq2->lock);
 }
 
-static inline void grq_lock(void)
-	__acquires(grq.lock)
-{
-	raw_spin_lock(&grq.lock);
-}
-
-static inline void grq_unlock(void)
-	__releases(grq.lock)
-{
-	raw_spin_unlock(&grq.lock);
-}
-
 static inline void
 rq_grq_lock_irqsave(struct rq *rq, unsigned long *flags)
 	__acquires(rq->lock)
@@ -5264,7 +5252,6 @@ int __sched yield_to(struct task_struct *p, bool preempt)
 
 	rq = this_rq();
 	raw_spin_lock_irqsave(&rq->lock, flags);
-	grq_lock();
 	if (task_running(p) || p->state) {
 		yielded = -ESRCH;
 		goto out_unlock;
@@ -5283,7 +5270,6 @@ int __sched yield_to(struct task_struct *p, bool preempt)
 	if (preempt && rq != p_rq)
 		resched_curr(p_rq);
 out_unlock:
-	grq_unlock();
 	raw_spin_unlock_irqrestore(&rq->lock, flags);
 
 	if (yielded > 0)
