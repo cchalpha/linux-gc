@@ -555,8 +555,7 @@ static inline void grq_priodl_unlock(void)
  */
 static void dequeue_task(struct task_struct *p, struct rq *rq)
 {
-	lockdep_assert_held(&grq.lock);
-	/*lockdep_assert_held(&rq->lock);*/
+	lockdep_assert_held(&rq->lock);
 
 	WARN_ONCE(task_rq(p) != rq, "bfs: dequeue task reside on cpu%d from cpu%d\n",
 		  task_cpu(p), cpu_of(rq));
@@ -634,7 +633,6 @@ DEFINE_SKIPLIST_INSERT_FUNC(bfs_skiplist_insert, bfs_skiplist_task_search);
  */
 static void enqueue_task(struct task_struct *p, struct rq *rq)
 {
-	lockdep_assert_held(&grq.lock);
 	lockdep_assert_held(&rq->lock);
 
 	if (!rt_task(p)) {
@@ -1730,18 +1728,16 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 	raw_spin_lock(&prq->lock);
 	cpu = cpu_of(prq);
 
-	_grq_lock();
 	if (cpu != task_cpu(p))
 		__set_task_cpu(p, cpu);
 	ttwu_activate(p, prq);
 	ttwu_do_wakeup(prq, p, 0);
-	_grq_unlock();
+
+	check_preempt_curr(prq, p);
 	raw_spin_unlock(&prq->lock);
 
 	ttwu_stat(p, cpu, wake_flags);
 	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
-
-	preempt_rq(prq);
 
 	return success;
 }
