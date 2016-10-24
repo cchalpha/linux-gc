@@ -24,7 +24,10 @@ struct rq {
 	/* switch count */
 	u64 nr_switches;
 
-	/* Stored data about rq->curr to work outside grq lock */
+	/*
+	 * Stored data about rq->curr to work outside grq lock.
+	 * TODO still need these local data?!
+	 */
 	u64 rq_deadline;
 	unsigned int rq_policy;
 	int rq_time_slice;
