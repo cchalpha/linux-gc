@@ -173,6 +173,7 @@ static inline int timeslice(void)
 
 #ifdef CONFIG_SMP
 static cpumask_t sched_cpu_idle_mask ____cacheline_aligned_in_smp;
+static cpumask_t sched_cpu_non_scaled_mask ____cacheline_aligned_in_smp;
 #endif
 
 /*
@@ -181,7 +182,6 @@ static cpumask_t sched_cpu_idle_mask ____cacheline_aligned_in_smp;
  */
 struct global_rq {
 #ifdef CONFIG_SMP
-	cpumask_t non_scaled_cpumask;
 #ifndef CONFIG_64BIT
 	raw_spinlock_t priodl_lock;
 #endif
@@ -782,7 +782,7 @@ static inline int best_mask_cpu(const int cpu, cpumask_t *cpumask)
 	if (cpumask_weight(cpumask) == 1)
 		return cpumask_first(cpumask);
 
-	if (cpumask_and(&non_scaled_mask, cpumask, &grq.non_scaled_cpumask)) {
+	if (cpumask_and(&non_scaled_mask, cpumask, &sched_cpu_non_scaled_mask)) {
 		/*
 		 * non_scaled llc cpus checking
 		 */
@@ -889,13 +889,13 @@ static inline struct rq *task_best_idle_rq(struct task_struct *p)
 void cpu_scaling(int cpu)
 {
 	cpu_rq(cpu)->scaling = true;
-	cpumask_clear_cpu(cpu, &grq.non_scaled_cpumask);
+	cpumask_clear_cpu(cpu, &sched_cpu_non_scaled_mask);
 }
 
 void cpu_nonscaling(int cpu)
 {
 	cpu_rq(cpu)->scaling = false;
-	cpumask_set_cpu(cpu, &grq.non_scaled_cpumask);
+	cpumask_set_cpu(cpu, &sched_cpu_non_scaled_mask);
 }
 
 static inline bool scaling_rq(struct rq *rq)
