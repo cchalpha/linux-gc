@@ -171,13 +171,16 @@ static inline int timeslice(void)
 	return MS_TO_US(rr_interval);
 }
 
+#ifdef CONFIG_SMP
+static cpumask_t sched_cpu_idle_mask ____cacheline_aligned_in_smp;
+#endif
+
 /*
  * The global runqueue data that all CPUs work off. Data is protected by the
  * discrete lock that precedes the data in this struct.
  */
 struct global_rq {
 #ifdef CONFIG_SMP
-	cpumask_t cpu_idle_map;
 	cpumask_t non_scaled_cpumask;
 #ifndef CONFIG_64BIT
 	raw_spinlock_t priodl_lock;
@@ -702,7 +705,7 @@ static inline void preempt_rq(struct rq * rq)
 
 #ifdef CONFIG_SMP
 /*
- * The cpu_idle_map stores a bitmap of all the CPUs currently idle to
+ * The sched_cpu_idle_mask stores a bitmap of all the CPUs currently idle to
  * allow easy lookup of whether any suitable idle CPUs are available.
  * It's cheaper to maintain a binary yes/no if there are any idle CPUs on the
  * idle_cpus variable than to do a full bitmask check when we are busy.
@@ -710,17 +713,17 @@ static inline void preempt_rq(struct rq * rq)
 static inline void set_cpuidle_map(int cpu)
 {
 	if (likely(cpu_online(cpu)))
-		cpumask_set_cpu(cpu, &grq.cpu_idle_map);
+		cpumask_set_cpu(cpu, &sched_cpu_idle_mask);
 }
 
 static inline void clear_cpuidle_map(int cpu)
 {
-	cpumask_clear_cpu(cpu, &grq.cpu_idle_map);
+	cpumask_clear_cpu(cpu, &sched_cpu_idle_mask);
 }
 
 static inline bool suitable_idle_cpus(struct task_struct *p)
 {
-	return (cpumask_intersects(&p->cpus_allowed, &grq.cpu_idle_map));
+	return (cpumask_intersects(tsk_cpus_allowed(p), &sched_cpu_idle_mask));
 }
 
 static inline bool scaling_rq(struct rq *rq);
@@ -868,7 +871,7 @@ static inline struct rq *task_best_idle_rq(struct task_struct *p)
 {
         cpumask_t check_cpumask;
 
-        if (cpumask_and(&check_cpumask, &p->cpus_allowed, &grq.cpu_idle_map)) {
+        if (cpumask_and(&check_cpumask, &p->cpus_allowed, &sched_cpu_idle_mask)) {
 		int best_cpu;
 
                 best_cpu = best_mask_cpu(task_cpu(p), &check_cpumask);
@@ -6900,8 +6903,8 @@ int sched_cpu_activate(unsigned int cpu)
 		set_rq_online(rq);
 	}
 	unbind_zero(cpu);
-	/* set grq.cpu_idle_map when cpu is online */
-	cpumask_set_cpu(cpu, &grq.cpu_idle_map);
+	/* set sched_cpu_idle_mask when cpu is online */
+	cpumask_set_cpu(cpu, &sched_cpu_idle_mask);
 	raw_spin_unlock_irqrestore(&rq->lock, flags);
 	read_unlock(&tasklist_lock);
 
@@ -6964,8 +6967,8 @@ int sched_cpu_dying(unsigned int cpu)
 		set_rq_offline(rq);
 	}
 	bind_zero(cpu);
-	/* clear grq.cpu_idle_map when cpu is offline, let it looks *busy* */
-	cpumask_clear_cpu(cpu, &grq.cpu_idle_map);
+	/* clear sched_cpu_idle_mask when cpu is offline, let it looks *busy* */
+	cpumask_clear_cpu(cpu, &sched_cpu_idle_mask);
 	/*
 	 * BFS/VRQ: TODO debug load to test still need set rq to idle?
 	 */
@@ -7122,7 +7125,7 @@ void __init sched_init(void)
 
 #ifdef CONFIG_SMP
 	init_defrootdomain();
-	cpumask_clear(&grq.cpu_idle_map);
+	cpumask_clear(&sched_cpu_idle_mask);
 #ifndef CONFIG_64BIT
 	raw_spin_lock_init(&grq.priodl_lock);
 #endif
