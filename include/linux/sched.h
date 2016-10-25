@@ -556,10 +556,6 @@ struct task_struct {
 	/* Policy/nice level bias across smt siblings */
 	int				smt_bias;
 #endif
-#ifdef CONFIG_SMP
-	/* Soft affined flag */
-	bool				sticky;
-#endif
 #ifdef CONFIG_HOTPLUG_CPU
 	/* Bound to CPU0 for hotplug */
 	bool				zerobound;
