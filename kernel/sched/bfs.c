@@ -179,13 +179,13 @@ static raw_spinlock_t sched_cpu_priodls_lock ____cacheline_aligned_in_smp;
 #endif
 #endif
 
+static u64 sched_rq_priodls[NR_CPUS] ____cacheline_aligned;
+
 /*
  * The global runqueue data that all CPUs work off. Data is protected by the
  * discrete lock that precedes the data in this struct.
  */
 struct global_rq {
-	u64 rq_priodls[NR_CPUS];
-
 	raw_spinlock_t iso_lock;
 	int iso_ticks;
 	bool iso_refractory;
@@ -1420,12 +1420,12 @@ static struct rq* task_preemptable_rq(struct task_struct *p)
 	target_cpu = cpu = cpumask_first(&tmp);
 
 	sched_cpu_priodls_lock();
-	highest_priodl = grq.rq_priodls[cpu];
+	highest_priodl = sched_rq_priodls[cpu];
 
 	for(;cpu = cpumask_next(cpu, &tmp), cpu < nr_cpu_ids;) {
 		u64 rq_priodl;
 
-		rq_priodl = grq.rq_priodls[cpu];
+		rq_priodl = sched_rq_priodls[cpu];
 		if (rq_priodl > highest_priodl ) {
 			target_cpu = cpu;
 			highest_priodl = rq_priodl;
@@ -1448,7 +1448,7 @@ static struct rq* task_preemptable_rq(struct task_struct *p)
 {
 	if (p->policy == SCHED_IDLEPRIO)
 		return NULL;
-	if (can_preempt(p, grq.rq_priodls[0]))
+	if (can_preempt(p, sched_rq_priodls[0]))
 		return uprq;
 	return NULL;
 }
@@ -3399,7 +3399,7 @@ static inline void set_rq_task(struct rq *rq, struct task_struct *p)
 	rq->rq_prio = p->prio;
 
 	sched_cpu_priodls_lock();
-	grq.rq_priodls[cpu_of(rq)] = p->priodl;
+	sched_rq_priodls[cpu_of(rq)] = p->priodl;
 	sched_cpu_priodls_unlock();
 
 	rq->rq_running = (p != rq->idle);
@@ -3412,7 +3412,7 @@ static inline void reset_rq_task(struct rq *rq, struct task_struct *p)
 	rq->rq_deadline = p->deadline;
 
 	sched_cpu_priodls_lock();
-	grq.rq_priodls[cpu_of(rq)] = p->priodl;
+	sched_rq_priodls[cpu_of(rq)] = p->priodl;
 	sched_cpu_priodls_unlock();
 }
 
