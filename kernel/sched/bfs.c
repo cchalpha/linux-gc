@@ -1022,8 +1022,6 @@ static void activate_task(struct task_struct *p, struct rq *rq)
 	cpufreq_trigger(rq->clock, rq->nr_running + rq->nr_uninterruptible);
 }
 
-static inline void clear_sticky(struct task_struct *p);
-
 /*
  * deactivate_task - If it's running, it's not on the grq and we can just
  * decrement the nr_running.
@@ -1036,7 +1034,6 @@ static inline void deactivate_task(struct task_struct *p, struct rq *rq)
 		rq->nr_uninterruptible++;
 	p->on_rq = 0;
 	rq->nr_running--;
-	clear_sticky(p);
 	cpufreq_trigger(rq->clock, rq->nr_running + rq->nr_uninterruptible);
 }
 
@@ -1196,65 +1193,6 @@ void do_set_cpus_allowed(struct task_struct *p, const struct cpumask *new_mask)
 {
 	set_cpus_allowed_common(p, new_mask);
 }
-
-static inline void clear_sticky(struct task_struct *p)
-{
-	p->sticky = false;
-}
-
-static inline bool task_sticky(struct task_struct *p)
-{
-	return p->sticky;
-}
-
-/*
- * We set the sticky flag on a task that is descheduled involuntarily meaning
- * it is awaiting further CPU time. If the last sticky task is still sticky
- * but unlucky enough to not be the next task scheduled, we unstick it and try
- * to find it an idle CPU. Realtime tasks do not stick to minimise their
- * latency at all times.
- */
-static inline void
-swap_sticky(struct rq *rq, int cpu, struct task_struct *p)
-{
-	if (rq->sticky_task) {
-		if (rq->sticky_task == p) {
-			p->sticky = true;
-			return;
-		}
-		if (task_sticky(rq->sticky_task))
-			clear_sticky(rq->sticky_task);
-	}
-	if (!rt_task(p)) {
-		p->sticky = true;
-		rq->sticky_task = p;
-	} else
-		rq->sticky_task = NULL;
-}
-
-static inline void unstick_task(struct rq *rq, struct task_struct *p)
-{
-	rq->sticky_task = NULL;
-	clear_sticky(p);
-}
-#else
-static inline void clear_sticky(struct task_struct *p)
-{
-}
-
-static inline bool task_sticky(struct task_struct *p)
-{
-	return false;
-}
-
-static inline void
-swap_sticky(struct rq *rq, int cpu, struct task_struct *p)
-{
-}
-
-static inline void unstick_task(struct rq *rq, struct task_struct *p)
-{
-}
 #endif
 
 /*
@@ -1270,7 +1208,6 @@ static inline void take_task(struct rq *rq, int cpu, struct task_struct *p)
 	 */
 	p->on_cpu = 1;
 	dequeue_task(p, task_rq(p));
-	clear_sticky(p);
 	set_task_cpu(p, cpu);
 }
 
@@ -1484,13 +1421,6 @@ static struct rq* task_preemptable_rq(struct task_struct *p)
 	struct rq *target_rq;
 	u64 highest_priodl;
 	cpumask_t tmp;
-
-	/*
-	 * We clear the sticky flag here because for a task to have called
-	 * try_preempt with the sticky flag enabled means some complicated
-	 * re-scheduling has occurred and we should ignore the sticky flag.
-	 */
-	clear_sticky(p);
 
 	target_rq = task_best_idle_rq(p);
 	if (target_rq)
@@ -1824,7 +1754,6 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 		memset(&p->sched_info, 0, sizeof(p->sched_info));
 #endif
 	p->on_cpu = 0;
-	clear_sticky(p);
 	init_task_preempt_count(p);
 
 	put_cpu();
@@ -3629,17 +3558,8 @@ static void __sched notrace __schedule(bool preempt)
 			if (rq->nr_queued) {
 				enqueue_task(prev, rq);
 				next = earliest_deadline_task(rq, cpu, idle);
-				if (likely(prev != next)) {
-					/*
-					 * Don't stick tasks when a real time task is going
-					 * to run as they may literally get stuck.
-					 */
-					if (!rt_task(next))
-						swap_sticky(rq, cpu, prev);
-					else
-						rq->try_preempt_tsk = prev;
+				if (likely(prev != next))
 					goto do_switch;
-				}
 				goto unlock_out;
 			} else {
 				/*
@@ -3670,12 +3590,6 @@ static void __sched notrace __schedule(bool preempt)
 	}
 
 	if (likely(prev != next)) {
-		/*
-		 * Don't stick tasks when a real time task is going to run as
-		 * they may literally get stuck.
-		 */
-		if (rt_task(next))
-			unstick_task(rq, prev);
 do_switch:
 		if (likely(next->prio != PRIO_LIMIT))
 			clear_cpuidle_map(cpu);
@@ -6906,7 +6820,6 @@ static void tasks_cpu_hotplug(int cpu)
 		return;
 
 	do_each_thread(t, p) {
-		clear_sticky(p);
 		if (cpumask_test_cpu(cpu, &p->cpus_allowed_master)) {
 			count++;
 			if (likely(cpumask_and(tsk_cpus_allowed(p),
@@ -7181,7 +7094,6 @@ void __init sched_init(void)
 		rq->dither = false;
 		rq->nr_running = rq->nr_uninterruptible = 0;
 #ifdef CONFIG_SMP
-		rq->sticky_task = NULL;
 		rq->sd = NULL;
 		rq->rd = NULL;
 		rq->online = false;
