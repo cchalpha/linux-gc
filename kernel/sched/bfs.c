@@ -174,6 +174,9 @@ static inline int timeslice(void)
 #ifdef CONFIG_SMP
 static cpumask_t sched_cpu_idle_mask ____cacheline_aligned_in_smp;
 static cpumask_t sched_cpu_non_scaled_mask ____cacheline_aligned_in_smp;
+#ifndef CONFIG_64BIT
+static raw_spinlock_t sched_cpu_priodls_lock ____cacheline_aligned_in_smp;
+#endif
 #endif
 
 /*
@@ -181,11 +184,6 @@ static cpumask_t sched_cpu_non_scaled_mask ____cacheline_aligned_in_smp;
  * discrete lock that precedes the data in this struct.
  */
 struct global_rq {
-#ifdef CONFIG_SMP
-#ifndef CONFIG_64BIT
-	raw_spinlock_t priodl_lock;
-#endif
-#endif
 	u64 rq_priodls[NR_CPUS];
 
 	raw_spinlock_t iso_lock;
@@ -466,21 +464,21 @@ static inline void update_task_priodl(struct task_struct *p)
 }
 
 #if defined(CONFIG_SMP) && !defined(CONFIG_64BIT)
-static inline void grq_priodl_lock(void)
+static inline void sched_cpu_priodls_lock(void)
 {
-	raw_spin_lock(&grq.priodl_lock);
+	raw_spin_lock(&sched_cpu_priodls_lock);
 }
 
-static inline void grq_priodl_unlock(void)
+static inline void sched_cpu_priodls_unlock(void)
 {
-	raw_spin_unlock(&grq.priodl_lock);
+	raw_spin_unlock(&sched_cpu_priodls_lock);
 }
 #else
-static inline void grq_priodl_lock(void)
+static inline void sched_cpu_priodls_lock(void)
 {
 }
 
-static inline void grq_priodl_unlock(void)
+static inline void sched_cpu_priodls_unlock(void)
 {
 }
 #endif
@@ -1421,7 +1419,7 @@ static struct rq* task_preemptable_rq(struct task_struct *p)
 
 	target_cpu = cpu = cpumask_first(&tmp);
 
-	grq_priodl_lock();
+	sched_cpu_priodls_lock();
 	highest_priodl = grq.rq_priodls[cpu];
 
 	for(;cpu = cpumask_next(cpu, &tmp), cpu < nr_cpu_ids;) {
@@ -1433,7 +1431,7 @@ static struct rq* task_preemptable_rq(struct task_struct *p)
 			highest_priodl = rq_priodl;
 		}
 	}
-	grq_priodl_unlock();
+	sched_cpu_priodls_unlock();
 
 	if (can_preempt(p, highest_priodl))
 		return cpu_rq(target_cpu);
@@ -3400,9 +3398,9 @@ static inline void set_rq_task(struct rq *rq, struct task_struct *p)
 	rq->rq_policy = p->policy;
 	rq->rq_prio = p->prio;
 
-	grq_priodl_lock();
+	sched_cpu_priodls_lock();
 	grq.rq_priodls[cpu_of(rq)] = p->priodl;
-	grq_priodl_unlock();
+	sched_cpu_priodls_unlock();
 
 	rq->rq_running = (p != rq->idle);
 }
@@ -3413,9 +3411,9 @@ static inline void reset_rq_task(struct rq *rq, struct task_struct *p)
 	rq->rq_prio = p->prio;
 	rq->rq_deadline = p->deadline;
 
-	grq_priodl_lock();
+	sched_cpu_priodls_lock();
 	grq.rq_priodls[cpu_of(rq)] = p->priodl;
-	grq_priodl_unlock();
+	sched_cpu_priodls_unlock();
 }
 
 /*
@@ -7127,7 +7125,7 @@ void __init sched_init(void)
 	init_defrootdomain();
 	cpumask_clear(&sched_cpu_idle_mask);
 #ifndef CONFIG_64BIT
-	raw_spin_lock_init(&grq.priodl_lock);
+	raw_spin_lock_init(&sched_cpu_priodls_lock);
 #endif
 #else
 	uprq = &per_cpu(runqueues, 0);
