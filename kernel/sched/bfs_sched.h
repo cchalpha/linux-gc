@@ -48,7 +48,6 @@ struct rq {
 	int cpu;		/* cpu of this runqueue */
 	bool online;
 	bool scaling; /* This CPU is managed by a scaling CPU freq governor */
-	struct task_struct *sticky_task;
 
 	struct root_domain *rd;
 	struct sched_domain *sd;
