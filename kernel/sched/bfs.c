@@ -1027,12 +1027,22 @@ static inline void __set_task_cpu(struct task_struct *p, unsigned int cpu)
 void set_task_cpu(struct task_struct *p, unsigned int cpu)
 {
 #ifdef CONFIG_SCHED_DEBUG
+	/*
+	 * We should never call set_task_cpu() on a blocked task,
+	 * ttwu() will sort out the placement.
+	 */
+	WARN_ON_ONCE(p->state != TASK_RUNNING && p->state != TASK_WAKING &&
+		     !p->on_rq);
 #ifdef CONFIG_LOCKDEP
 	/*
-	 * The caller should hold task rq lock
-	 * release checking for now
+	 * The caller should hold either p->pi_lock or rq->lock, when changing
+	 * a task's CPU. ->pi_lock for waking tasks, rq->lock for runnable tasks.
+	 *
+	 * sched_move_task() holds both and thus holding either pins the cgroup,
+	 * see task_group().
 	 */
-	/* WARN_ON_ONCE(debug_locks && !lockdep_is_held(&task_rq()->lock));*/
+	WARN_ON_ONCE(debug_locks && !(lockdep_is_held(&p->pi_lock) ||
+				      lockdep_is_held(&task_rq(p)->lock)));
 #endif
 #endif
 	if (task_cpu(p) == cpu)
@@ -1168,6 +1178,8 @@ void do_set_cpus_allowed(struct task_struct *p, const struct cpumask *new_mask)
  */
 static inline void take_task(struct rq *rq, int cpu, struct task_struct *p)
 {
+	WARN_ONCE(rq != task_rq(p), "vrq: cpu[%d] take_task reside on %d.\n",
+		  cpu, task_cpu(p));
 	/*
 	 * We can optimise this out completely for !SMP, because the
 	 * SMP rebalancing from interrupt is the only thing that cares
@@ -1175,7 +1187,6 @@ static inline void take_task(struct rq *rq, int cpu, struct task_struct *p)
 	 */
 	p->on_cpu = 1;
 	dequeue_task(p, task_rq(p));
-	set_task_cpu(p, cpu);
 }
 
 /* Enter with rq lock held. We know p is on the local cpu */
@@ -1578,8 +1589,11 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 	raw_spin_lock(&prq->lock);
 	cpu = cpu_of(prq);
 
-	if (cpu != task_cpu(p))
-		__set_task_cpu(p, cpu);
+	if (cpu != task_cpu(p)) {
+		wake_flags |= WF_MIGRATED;
+		set_task_cpu(p, cpu);
+	}
+
 	ttwu_activate(p, prq);
 	ttwu_do_wakeup(prq, p, 0);
 
@@ -1825,26 +1839,24 @@ retry:
 
 	parent = p->parent;
 
-#ifdef CONFIG_SMP
-	set_task_cpu(p, rq->cpu);
-#endif
-
 	p->state = TASK_RUNNING;
+#ifdef CONFIG_SMP
+	/*
+	 * Fork balancing, do it here and not earlier because:
+	 * - cpus_allowed can change in the fork path
+	 * - any previously selected cpu might disappear through hotplug
+	 * Use __set_task_cpu() to avoid calling sched_class::migrate_task_rq,
+	 * as we're not fully set-up yet.
+	 *
+	 * For now, just set it to its original cpu
+	 */
+	__set_task_cpu(p, task_cpu(rq->curr));
+#endif
 	/*
 	 * Reinit new task deadline as its creator deadline could have changed
 	 * since call to dup_task_struct().
 	 */
 	p->deadline = rq->rq_deadline;
-
-	/*
-	 * If the task is a new process, current and parent are the same. If
-	 * the task is a new thread in the thread group, it will have much more
-	 * in common with current than with the parent.
-	 *
-	 * Use __set_task_cpu() to avoid calling sched_class::migrate_task_rq,
-	 * as we're not fully set-up yet.
-	 */
-	__set_task_cpu(p, task_cpu(rq->curr));
 
 	/*
 	 * Make sure we do not leak PI boosting priority to the child.
