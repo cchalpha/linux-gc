@@ -1573,6 +1573,8 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 		return success;
 	}
 
+	p->state = TASK_WAKING;
+
 	/*
 	 * Sync wakeups (i.e. those types of wakeups where the waker
 	 * has indicated that it will leave the CPU in short order)
@@ -4100,7 +4102,7 @@ static int __set_cpus_allowed_ptr(struct task_struct *p,
 		goto out;
 
 	dest_cpu = cpumask_any_and(cpu_valid_mask, new_mask);
-	if (task_running(p)) {
+	if (task_running(p) || p->state == TASK_WAKING) {
 		struct migration_arg arg = { p, dest_cpu };
 
 		/* Need help from migration thread: drop lock and wait. */
