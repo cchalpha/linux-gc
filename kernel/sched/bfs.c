@@ -131,7 +131,7 @@
 
 void print_scheduler_version(void)
 {
-	printk(KERN_INFO "BFS CPU scheduler v0.472 by Con Kolivas.\n");
+	printk(KERN_INFO "BFS enhancement patchset VRQ 0.89 by Alfred Chen.\n");
 }
 
 /* task_struct::on_rq states: */
