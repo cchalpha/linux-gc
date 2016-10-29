@@ -1584,9 +1584,14 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 	if (!(wake_flags & WF_SYNC) || suitable_idle_cpus(p)) {
 		prq = task_preemptable_rq(p);
 		if (NULL == prq)
-			prq = cpu_rq(cpumask_any(tsk_cpus_allowed(p)));
+			prq = cpu_rq(select_fallback_rq(task_cpu(p), p));
 	} else
-		prq = cpu_rq(cpumask_any(tsk_cpus_allowed(p)));
+		prq = cpu_rq(select_fallback_rq(task_cpu(p), p));
+
+	if (!prq->online)
+		printk(KERN_INFO "vrq: task %d affinity %lu ttwu cpu %d, online_mask %lu",
+		       p->pid, tsk_cpus_allowed(p)->bits[0],
+		       cpu_of(prq), cpu_online_mask->bits[0]);
 
 	raw_spin_lock(&prq->lock);
 	cpu = cpu_of(prq);
