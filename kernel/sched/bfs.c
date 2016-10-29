@@ -5599,66 +5599,6 @@ void wake_up_nohz_cpu(int cpu)
 #endif /* CONFIG_NO_HZ_COMMON */
 
 #ifdef CONFIG_HOTPLUG_CPU
-/* Run through task list and find tasks affined to the dead cpu, then remove
- * that cpu from the list, enable cpu0 and set the zerobound flag. */
-static void bind_zero(int src_cpu)
-{
-	struct task_struct *p, *t;
-	int bound = 0;
-
-	if (src_cpu == 0)
-		return;
-
-	do_each_thread(t, p) {
-		if (cpumask_test_cpu(src_cpu, tsk_cpus_allowed(p))) {
-			cpumask_clear_cpu(src_cpu, tsk_cpus_allowed(p));
-			cpumask_set_cpu(0, tsk_cpus_allowed(p));
-			p->zerobound = true;
-			bound++;
-		}
-	} while_each_thread(t, p);
-
-	if (bound) {
-		printk(KERN_INFO "Removed affinity for %d processes to cpu %d\n",
-		       bound, src_cpu);
-	}
-}
-
-/* Find processes with the zerobound flag and reenable their affinity for the
- * CPU coming alive. */
-static void unbind_zero(int src_cpu)
-{
-	int unbound = 0, zerobound = 0;
-	struct task_struct *p, *t;
-
-	if (src_cpu == 0)
-		return;
-
-	do_each_thread(t, p) {
-		if (!p->mm)
-			p->zerobound = false;
-		if (p->zerobound) {
-			unbound++;
-			cpumask_set_cpu(src_cpu, tsk_cpus_allowed(p));
-			/* Once every CPU affinity has been re-enabled, remove
-			 * the zerobound flag */
-			if (cpumask_subset(cpu_possible_mask, tsk_cpus_allowed(p))) {
-				p->zerobound = false;
-				zerobound++;
-			}
-		}
-	} while_each_thread(t, p);
-
-	if (unbound) {
-		printk(KERN_INFO "Added affinity for %d processes to cpu %d\n",
-		       unbound, src_cpu);
-	}
-	if (zerobound) {
-		printk(KERN_INFO "Released forced binding to cpu0 for %d processes\n",
-		       zerobound);
-	}
-}
-
 /*
  * Ensures that the idle task is using init_mm right before its cpu goes
  * offline.
@@ -5675,8 +5615,6 @@ void idle_task_exit(void)
 	}
 	mmdrop(mm);
 }
-#else /* CONFIG_HOTPLUG_CPU */
-static void unbind_zero(int src_cpu) {}
 #endif /* CONFIG_HOTPLUG_CPU */
 
 void sched_set_stop_task(int cpu, struct task_struct *stop)
@@ -6848,6 +6786,29 @@ static int cpuset_cpu_inactive(unsigned int cpu)
 	return 0;
 }
 
+/*
+ * Need to be rewriten
+ */
+static void tasks_cpu_hotplug(int cpu)
+{
+	struct task_struct *p, *t;
+	int count = 0;
+
+	if (cpu == 0)
+		return;
+
+	do_each_thread(t, p) {
+		if (!cpumask_intersects(tsk_cpus_allowed(p), cpu_online_mask))
+			cpumask_set_cpu(0, tsk_cpus_allowed(p));
+		p->nr_cpus_allowed = cpumask_weight(tsk_cpus_allowed(p));
+	} while_each_thread(t, p);
+
+	if (count) {
+		printk(KERN_INFO "Renew affinity for %d processes to cpu %d\n",
+		       count, cpu);
+	}
+}
+
 int sched_cpu_activate(unsigned int cpu)
 {
 	struct rq *rq = cpu_rq(cpu);
@@ -6875,7 +6836,7 @@ int sched_cpu_activate(unsigned int cpu)
 		BUG_ON(!cpumask_test_cpu(cpu, rq->rd->span));
 		set_rq_online(rq);
 	}
-	unbind_zero(cpu);
+	tasks_cpu_hotplug(cpu);
 	/* set sched_cpu_idle_mask when cpu is online */
 	cpumask_set_cpu(cpu, &sched_cpu_idle_mask);
 	raw_spin_unlock_irqrestore(&rq->lock, flags);
@@ -6939,7 +6900,7 @@ int sched_cpu_dying(unsigned int cpu)
 		BUG_ON(!cpumask_test_cpu(cpu, rq->rd->span));
 		set_rq_offline(rq);
 	}
-	bind_zero(cpu);
+	tasks_cpu_hotplug(cpu);
 	/* clear sched_cpu_idle_mask when cpu is offline, let it looks *busy* */
 	cpumask_clear_cpu(cpu, &sched_cpu_idle_mask);
 	/*
