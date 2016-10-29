@@ -1171,16 +1171,8 @@ static int migration_cpu_stop(void *data)
 static inline void
 set_cpus_allowed_common(struct task_struct *p, const struct cpumask *new_mask)
 {
-	cpumask_copy(&p->cpus_allowed_master, new_mask);
-	if (likely(cpumask_and(&p->cpus_allowed,
-			       &p->cpus_allowed_master, cpu_online_mask))) {
-		p->nr_cpus_allowed = cpumask_weight(&p->cpus_allowed);
-		return;
-	}
-
 	cpumask_copy(&p->cpus_allowed, new_mask);
-	cpumask_set_cpu(0, &p->cpus_allowed);
-	p->nr_cpus_allowed = cpumask_weight(&p->cpus_allowed);
+	p->nr_cpus_allowed = cpumask_weight(new_mask);
 }
 
 void do_set_cpus_allowed(struct task_struct *p, const struct cpumask *new_mask)
@@ -6784,8 +6776,7 @@ static int cpuset_cpu_inactive(unsigned int cpu)
 }
 
 /*
- * Run through task list and find tasks affined to the given cpu, then renew
- * cpu_allowed cpumask from the cpus_allowed_master
+ * Need to be rewriten
  */
 static void tasks_cpu_hotplug(int cpu)
 {
@@ -6796,20 +6787,9 @@ static void tasks_cpu_hotplug(int cpu)
 		return;
 
 	do_each_thread(t, p) {
-		if (cpumask_test_cpu(cpu, &p->cpus_allowed_master)) {
-			count++;
-			if (likely(cpumask_and(tsk_cpus_allowed(p),
-					   &p->cpus_allowed_master,
-					   cpu_online_mask))) {
-				p->nr_cpus_allowed =
-					cpumask_weight(tsk_cpus_allowed(p));
-				continue;
-			}
-			cpumask_copy(tsk_cpus_allowed(p),
-				     &p->cpus_allowed_master);
+		if (!cpumask_intersects(tsk_cpus_allowed(p), cpu_online_mask))
 			cpumask_set_cpu(0, tsk_cpus_allowed(p));
-			p->nr_cpus_allowed = cpumask_weight(tsk_cpus_allowed(p));
-		}
+		p->nr_cpus_allowed = cpumask_weight(tsk_cpus_allowed(p));
 	} while_each_thread(t, p);
 
 	if (count) {

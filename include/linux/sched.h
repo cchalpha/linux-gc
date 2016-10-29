@@ -1513,9 +1513,6 @@ struct task_struct {
 	unsigned int policy;
 	int nr_cpus_allowed;
 	cpumask_t cpus_allowed;
-#ifdef CONFIG_SCHED_BFS
-	cpumask_t cpus_allowed_master;
-#endif
 
 #ifdef CONFIG_PREEMPT_RCU
 	int rcu_read_lock_nesting;
