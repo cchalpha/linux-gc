@@ -5743,6 +5743,84 @@ void sched_set_stop_task(int cpu, struct task_struct *stop)
 	}
 }
 
+#ifdef CONFIG_HOTPLUG_CPU
+/*
+ * Migrate all tasks from the rq, sleeping tasks will be migrated by
+ * try_to_wake_up()->select_task_rq().
+ *
+ * Called with rq->lock held even though we'er in stop_machine() and
+ * there's no concurrency possible, we hold the required locks anyway
+ * because of lock validation efforts.
+ */
+static void migrate_tasks(struct rq *dead_rq)
+{
+	struct rq *rq = dead_rq;
+	struct task_struct *next, *stop = rq->stop;
+	struct skiplist_node *node;
+	int dest_cpu;
+
+	/*
+	 * Fudge the rq selection such that the below task selection loop
+	 * doesn't get stuck on the currently eligible stop task.
+	 *
+	 * We're currently inside stop_machine() and the rq is either stuck
+	 * in the stop_machine_cpu_stop() loop, or we're executing this code,
+	 * either way we should never end up calling schedule() until we're
+	 * done here.
+	 */
+	rq->stop = NULL;
+
+	for (;;) {
+		/*
+		 * There's this thread running, bail when that's the only
+		 * remaining thread.
+		 */
+		if (rq->nr_running == 1)
+			break;
+
+		node = &rq->sl_header;
+		BUG_ON((node = node->next[0]) == &rq->sl_header);
+		next = skiplist_entry(node, struct task_struct, sl_node);
+
+		/*
+		 * Rules for changing task_struct::cpus_allowed are holding
+		 * both pi_lock and rq->lock, such that holding either
+		 * stabilizes the mask.
+		 *
+		 * Drop rq->lock is not quite as disastrous as it usually is
+		 * because !cpu_active at this point, which means load-balance
+		 * will not interfere. Also, stop-machine.
+		 */
+		raw_spin_unlock(&rq->lock);
+		raw_spin_lock(&next->pi_lock);
+		raw_spin_lock(&rq->lock);
+
+		/*
+		 * Since we're inside stop-machine, _nothing_ should have
+		 * changed the task, WARN if weird stuff happened, because in
+		 * that case the above rq->lock drop is a fail too.
+		 */
+		if (WARN_ON(task_rq(next) != rq || !task_on_rq_queued(next))) {
+			raw_spin_unlock(&next->pi_lock);
+			continue;
+		}
+
+		/* Find suitable destination for @next, with force if needed. */
+		dest_cpu = select_fallback_rq(dead_rq->cpu, next);
+
+		rq = __migrate_task(rq, next, dest_cpu);
+		if (rq != dead_rq) {
+			raw_spin_unlock(&rq->lock);
+			rq = dead_rq;
+			raw_spin_lock(&rq->lock);
+		}
+		raw_spin_unlock(&next->pi_lock);
+	}
+
+	rq->stop = stop;
+}
+#endif /* CONFIG_HOTPLUG_CPU */
+
 static void set_rq_online(struct rq *rq)
 {
 	if (!rq->online) {
@@ -6927,17 +7005,15 @@ int sched_cpu_activate(unsigned int cpu)
 	 * 2) At runtime, if cpuset_cpu_active() fails to rebuild the
 	 *    domains.
 	 */
-	read_lock(&tasklist_lock);
 	raw_spin_lock_irqsave(&rq->lock, flags);
 	if (rq->rd) {
 		BUG_ON(!cpumask_test_cpu(cpu, rq->rd->span));
 		set_rq_online(rq);
 	}
-	tasks_cpu_hotplug(cpu);
+	raw_spin_unlock_irqrestore(&rq->lock, flags);
+
 	/* set sched_cpu_idle_mask when cpu is online */
 	cpumask_set_cpu(cpu, &sched_cpu_idle_mask);
-	raw_spin_unlock_irqrestore(&rq->lock, flags);
-	read_unlock(&tasklist_lock);
 
 	return 0;
 }
@@ -6998,10 +7074,11 @@ int sched_cpu_dying(unsigned int cpu)
 		set_rq_offline(rq);
 	}
 	tasks_cpu_hotplug(cpu);
+
 	/* clear sched_cpu_idle_mask when cpu is offline, let it looks *busy* */
 	cpumask_clear_cpu(cpu, &sched_cpu_idle_mask);
 	/*
-	 * BFS/VRQ: TODO debug load to test still need set rq to idle?
+	 * VRQ: TODO debug load to test still need set rq to idle?
 	 */
 	set_rq_task(rq, rq->idle);
 	update_rq_clock(rq);
