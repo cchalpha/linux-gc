@@ -482,6 +482,7 @@ static void dequeue_task(struct task_struct *p, struct rq *rq)
 		  task_cpu(p), cpu_of(rq));
 	skiplist_del_init(&rq->sl_header, &p->sl_node);
 	rq->nr_queued--;
+	rq->nr_running--;
 
 	sched_info_dequeued(task_rq(p), p);
 }
@@ -574,6 +575,7 @@ static void enqueue_task(struct task_struct *p, struct rq *rq)
 	p->sl_node.level = p->sl_level;
 	bfs_skiplist_insert(&rq->sl_header, &p->sl_node);
 	rq->nr_queued++;
+	rq->nr_running++;
 
 	sched_info_queued(rq, p);
 }
@@ -1605,12 +1607,24 @@ ttwu_do_wakeup(struct rq *rq, struct task_struct *p, int wake_flags)
 	trace_sched_wakeup(p);
 }
 
+static inline void
+ttwu_do_activate(struct rq *rq, struct task_struct *p, int wake_flags)
+{
+#ifdef CONFIG_SMP
+	if (p->sched_contributes_to_load)
+		rq->nr_uninterruptible--;
+#endif
+
+	ttwu_activate(p, rq);
+	ttwu_do_wakeup(rq, p, 0);
+}
+
 /*
  * wake flags
  */
 #define WF_SYNC		0x01		/* waker goes to sleep after wakeup */
 #define WF_FORK		0x02		/* child wakeup after fork */
-#define WF_MIGRATED	0x4		/* internal use, task got migrated */
+#define WF_MIGRATED	0x04		/* internal use, task got migrated */
 
 /***
  * try_to_wake_up - wake up a thread
@@ -1665,6 +1679,7 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 		return success;
 	}
 
+	p->sched_contributes_to_load = !!task_contributes_to_load(p);
 	p->state = TASK_WAKING;
 
 	/*
@@ -1693,8 +1708,7 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 		set_task_cpu(p, cpu);
 	}
 
-	ttwu_activate(p, prq);
-	ttwu_do_wakeup(prq, p, 0);
+	ttwu_do_activate(prq, p, wake_flags);
 
 	check_preempt_curr(prq, p);
 	raw_spin_unlock(&prq->lock);
@@ -2323,7 +2337,7 @@ unsigned long nr_running(void)
  */
 bool single_task_running(void)
 {
-	return (raw_rq()->rq_running && (0 == raw_rq()->nr_queued));
+	return raw_rq()->nr_running == 1;
 }
 EXPORT_SYMBOL(single_task_running);
 
@@ -5330,12 +5344,12 @@ SYSCALL_DEFINE2(sched_rr_get_interval, pid_t, pid,
 	raw_spinlock_t *lock;
 
 	/*
-	printk(KERN_INFO "bfs: 0x%02u 0x%02u\n", cpu_rq(0)->nr_queued,
-	       cpu_rq(1)->nr_queued);
-	*/
+	printk(KERN_INFO "vrq: 0x%02lu %lu %lu\n", sched_cpu_idle_mask.bits[0],
+	       cpu_rq(0)->nr_queued, cpu_rq(1)->nr_queued);
 	printk(KERN_INFO "bfs: %d [%d]=%d [%d]=%d\n", ISO_PERIOD,
 	       cpu_rq(0)->iso_refractory, cpu_rq(0)->iso_ticks,
 	       cpu_rq(1)->iso_refractory, cpu_rq(1)->iso_ticks);
+	*/
 
 	if (pid < 0)
 		return -EINVAL;
