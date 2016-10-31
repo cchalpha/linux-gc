@@ -1369,6 +1369,98 @@ void kick_process(struct task_struct *p)
 	preempt_enable();
 }
 EXPORT_SYMBOL_GPL(kick_process);
+
+/*
+ * ->cpus_allowed is protected by both rq->lock and p->pi_lock
+ *
+ * A few notes on cpu_active vs cpu_online:
+ *
+ *  - cpu_active must be a subset of cpu_online
+ *
+ *  - on cpu-up we allow per-cpu kthreads on the online && !active cpu,
+ *    see __set_cpus_allowed_ptr(). At this point the newly online
+ *    cpu isn't yet part of the sched domains, and balancing will not
+ *    see it.
+ *
+ *  - on cpu-down we clear cpu_active() to mask the sched domains and
+ *    avoid the load balancer to place new tasks on the to be removed
+ *    cpu. Existing tasks will remain running there and will be taken
+ *    off.
+ *
+ * This means that fallback selection must not select !active CPUs.
+ * And can assume that any active CPU must be online. Conversely
+ * select_task_rq() below may allow selection of !active CPUs in order
+ * to satisfy the above rules.
+ */
+static int select_fallback_rq(int cpu, struct task_struct *p)
+{
+	int nid = cpu_to_node(cpu);
+	const struct cpumask *nodemask = NULL;
+	enum { cpuset, possible, fail } state = cpuset;
+	int dest_cpu;
+
+	/*
+	 * If the node that the cpu is on has been offlined, cpu_to_node()
+	 * will return -1. There is no cpu on the node, and we should
+	 * select the cpu on the other node.
+	 */
+	if (nid != -1) {
+		nodemask = cpumask_of_node(nid);
+
+		/* Look for allowed, online CPU in same node. */
+		for_each_cpu(dest_cpu, nodemask) {
+			if (!cpu_active(dest_cpu))
+				continue;
+			if (cpumask_test_cpu(dest_cpu, tsk_cpus_allowed(p)))
+				return dest_cpu;
+		}
+	}
+
+	for (;;) {
+		/* Any allowed, online CPU? */
+		for_each_cpu(dest_cpu, tsk_cpus_allowed(p)) {
+			if (!(p->flags & PF_KTHREAD) && !cpu_active(dest_cpu))
+				continue;
+			if (!cpu_online(dest_cpu))
+				continue;
+			goto out;
+		}
+
+		/* No more Mr. Nice Guy. */
+		switch (state) {
+		case cpuset:
+			if (IS_ENABLED(CONFIG_CPUSETS)) {
+				cpuset_cpus_allowed_fallback(p);
+				state = possible;
+				break;
+			}
+			/* fall-through */
+		case possible:
+			do_set_cpus_allowed(p, cpu_possible_mask);
+			state = fail;
+			break;
+
+		case fail:
+			BUG();
+			break;
+		}
+	}
+
+out:
+	if (state != cpuset) {
+		/*
+		 * Don't tell them about moving exiting tasks or
+		 * kernel threads (both mm NULL), since they never
+		 * leave kernel.
+		 */
+		if (p->mm && printk_ratelimit()) {
+			printk_deferred("process %d (%s) no longer affine to cpu%d\n",
+					task_pid_nr(p), p->comm, cpu);
+		}
+	}
+
+	return dest_cpu;
+}
 #endif
 
 /*
@@ -1588,7 +1680,7 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 	} else
 		prq = cpu_rq(select_fallback_rq(task_cpu(p), p));
 
-	if (!prq->online)
+	if (!cpumask_test_cpu(cpu_of(prq), cpu_online_mask))
 		printk(KERN_INFO "vrq: task %d affinity %lu ttwu cpu %d, online_mask %lu",
 		       p->pid, tsk_cpus_allowed(p)->bits[0],
 		       cpu_of(prq), cpu_online_mask->bits[0]);
