@@ -6964,7 +6964,7 @@ static int cpuset_cpu_inactive(unsigned int cpu)
 /*
  * Need to be rewriten
  */
-static void tasks_cpu_hotplug(int cpu)
+static void tasks_cpu_hotplug(int cpu, struct rq *rq)
 {
 	struct task_struct *p, *t;
 	int count = 0;
@@ -6973,9 +6973,35 @@ static void tasks_cpu_hotplug(int cpu)
 		return;
 
 	do_each_thread(t, p) {
-		if (!cpumask_intersects(tsk_cpus_allowed(p), cpu_online_mask))
-			cpumask_set_cpu(0, tsk_cpus_allowed(p));
-		p->nr_cpus_allowed = cpumask_weight(tsk_cpus_allowed(p));
+		int dest_cpu;
+
+		/* move queued tasks to other cpu */
+		if (task_queued(p) && task_cpu(p) == cpu) {
+			/* leave kernel tasks only on this cpu along */
+			if (p->flags & PF_KTHREAD && p->nr_cpus_allowed == 1)
+				continue;
+
+			raw_spin_unlock(&rq->lock);
+			raw_spin_lock(&p->pi_lock);
+			raw_spin_lock(&rq->lock);
+
+			count++;
+			if (!cpumask_intersects(tsk_cpus_allowed(p),
+						cpu_online_mask))
+				cpumask_set_cpu(0, tsk_cpus_allowed(p));
+			p->nr_cpus_allowed = cpumask_weight(tsk_cpus_allowed(p));
+			dest_cpu = cpumask_any_and(tsk_cpus_allowed(p),
+						   cpu_online_mask);
+			printk(KERN_INFO "vrq: task%d %lu will move to cpu%d.\n",
+			       p->pid, tsk_cpus_allowed(p)->bits[0], dest_cpu);
+
+			rq = __migrate_task(rq, p, dest_cpu);
+			raw_spin_unlock(&rq->lock);
+			raw_spin_unlock(&p->pi_lock);
+
+			rq = cpu_rq(cpu);
+			raw_spin_lock(&rq->lock);
+		}
 	} while_each_thread(t, p);
 
 	if (count) {
@@ -7073,7 +7099,7 @@ int sched_cpu_dying(unsigned int cpu)
 		BUG_ON(!cpumask_test_cpu(cpu, rq->rd->span));
 		set_rq_offline(rq);
 	}
-	tasks_cpu_hotplug(cpu);
+	tasks_cpu_hotplug(cpu, rq);
 
 	/* clear sched_cpu_idle_mask when cpu is offline, let it looks *busy* */
 	cpumask_clear_cpu(cpu, &sched_cpu_idle_mask);
