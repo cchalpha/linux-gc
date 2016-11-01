@@ -5755,9 +5755,9 @@ void sched_set_stop_task(int cpu, struct task_struct *stop)
 static void migrate_tasks(struct rq *dead_rq)
 {
 	struct rq *rq = dead_rq;
-	struct task_struct *next, *stop = rq->stop;
+	struct task_struct *p, *stop = rq->stop;
 	struct skiplist_node *node;
-	int dest_cpu;
+	int count = 0;
 
 	/*
 	 * Fudge the rq selection such that the below task selection loop
@@ -5770,17 +5770,17 @@ static void migrate_tasks(struct rq *dead_rq)
 	 */
 	rq->stop = NULL;
 
-	for (;;) {
-		/*
-		 * There's this thread running, bail when that's the only
-		 * remaining thread.
-		 */
-		if (rq->nr_running == 1)
-			break;
+	node = &rq->sl_header;
+	while ((node = node->next[0]) != &rq->sl_header) {
+		int dest_cpu;
 
-		node = &rq->sl_header;
-		BUG_ON((node = node->next[0]) == &rq->sl_header);
-		next = skiplist_entry(node, struct task_struct, sl_node);
+		p = skiplist_entry(node, struct task_struct, sl_node);
+
+		/*
+		 * leave kernel tasks only on this cpu along
+		 */
+		if (p->flags & PF_KTHREAD && p->nr_cpus_allowed == 1)
+			continue;
 
 		/*
 		 * Rules for changing task_struct::cpus_allowed are holding
@@ -5792,7 +5792,7 @@ static void migrate_tasks(struct rq *dead_rq)
 		 * will not interfere. Also, stop-machine.
 		 */
 		raw_spin_unlock(&rq->lock);
-		raw_spin_lock(&next->pi_lock);
+		raw_spin_lock(&p->pi_lock);
 		raw_spin_lock(&rq->lock);
 
 		/*
@@ -5800,21 +5800,27 @@ static void migrate_tasks(struct rq *dead_rq)
 		 * changed the task, WARN if weird stuff happened, because in
 		 * that case the above rq->lock drop is a fail too.
 		 */
-		if (WARN_ON(task_rq(next) != rq || !task_on_rq_queued(next))) {
-			raw_spin_unlock(&next->pi_lock);
+		if (WARN_ON(task_rq(p) != rq || !task_queued(p))) {
+			raw_spin_unlock(&p->pi_lock);
 			continue;
 		}
 
-		/* Find suitable destination for @next, with force if needed. */
-		dest_cpu = select_fallback_rq(dead_rq->cpu, next);
+		count++;
+		if (!cpumask_intersects(tsk_cpus_allowed(p), cpu_online_mask))
+			cpumask_set_cpu(0, tsk_cpus_allowed(p));
+		p->nr_cpus_allowed = cpumask_weight(tsk_cpus_allowed(p));
+		dest_cpu = cpumask_any_and(tsk_cpus_allowed(p), cpu_online_mask);
+		printk(KERN_INFO "vrq: task %d affinity[%lu] will move to cpu %d.\n",
+			   p->pid, tsk_cpus_allowed(p)->bits[0], dest_cpu);
 
-		rq = __migrate_task(rq, next, dest_cpu);
-		if (rq != dead_rq) {
-			raw_spin_unlock(&rq->lock);
-			rq = dead_rq;
-			raw_spin_lock(&rq->lock);
-		}
-		raw_spin_unlock(&next->pi_lock);
+		rq = __migrate_task(rq, p, dest_cpu);
+		raw_spin_unlock(&rq->lock);
+		raw_spin_unlock(&p->pi_lock);
+
+		rq = dead_rq;
+		raw_spin_lock(&rq->lock);
+		/* check queued task all over from the header again */
+		node = &rq->sl_header;
 	}
 
 	rq->stop = stop;
@@ -6961,55 +6967,6 @@ static int cpuset_cpu_inactive(unsigned int cpu)
 	return 0;
 }
 
-/*
- * Need to be rewriten
- */
-static void tasks_cpu_hotplug(int cpu, struct rq *rq)
-{
-	struct task_struct *p, *t;
-	int count = 0;
-
-	if (cpu == 0)
-		return;
-
-	do_each_thread(t, p) {
-		int dest_cpu;
-
-		/* move queued tasks to other cpu */
-		if (task_queued(p) && task_cpu(p) == cpu) {
-			/* leave kernel tasks only on this cpu along */
-			if (p->flags & PF_KTHREAD && p->nr_cpus_allowed == 1)
-				continue;
-
-			raw_spin_unlock(&rq->lock);
-			raw_spin_lock(&p->pi_lock);
-			raw_spin_lock(&rq->lock);
-
-			count++;
-			if (!cpumask_intersects(tsk_cpus_allowed(p),
-						cpu_online_mask))
-				cpumask_set_cpu(0, tsk_cpus_allowed(p));
-			p->nr_cpus_allowed = cpumask_weight(tsk_cpus_allowed(p));
-			dest_cpu = cpumask_any_and(tsk_cpus_allowed(p),
-						   cpu_online_mask);
-			printk(KERN_INFO "vrq: task%d %lu will move to cpu%d.\n",
-			       p->pid, tsk_cpus_allowed(p)->bits[0], dest_cpu);
-
-			rq = __migrate_task(rq, p, dest_cpu);
-			raw_spin_unlock(&rq->lock);
-			raw_spin_unlock(&p->pi_lock);
-
-			rq = cpu_rq(cpu);
-			raw_spin_lock(&rq->lock);
-		}
-	} while_each_thread(t, p);
-
-	if (count) {
-		printk(KERN_INFO "Renew affinity for %d processes to cpu %d\n",
-		       count, cpu);
-	}
-}
-
 int sched_cpu_activate(unsigned int cpu)
 {
 	struct rq *rq = cpu_rq(cpu);
@@ -7093,13 +7050,12 @@ int sched_cpu_dying(unsigned int cpu)
 	struct rq *rq = cpu_rq(cpu);
 	unsigned long flags;
 
-	read_lock(&tasklist_lock);
 	raw_spin_lock_irqsave(&rq->lock, flags);
 	if (rq->rd) {
 		BUG_ON(!cpumask_test_cpu(cpu, rq->rd->span));
 		set_rq_offline(rq);
 	}
-	tasks_cpu_hotplug(cpu, rq);
+	migrate_tasks(rq);
 
 	/* clear sched_cpu_idle_mask when cpu is offline, let it looks *busy* */
 	cpumask_clear_cpu(cpu, &sched_cpu_idle_mask);
@@ -7109,7 +7065,6 @@ int sched_cpu_dying(unsigned int cpu)
 	set_rq_task(rq, rq->idle);
 	update_rq_clock(rq);
 	raw_spin_unlock_irqrestore(&rq->lock, flags);
-	read_unlock(&tasklist_lock);
 
 	return 0;
 }
