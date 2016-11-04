@@ -19,7 +19,7 @@ struct rq {
 	struct mm_struct *prev_mm;
 
 	struct skiplist_node sl_header;
-	unsigned long nr_queued; /* number of tasks in skip list */
+	unsigned int nr_queued; /* number of tasks in skip list */
 
 	/* switch count */
 	u64 nr_switches;
