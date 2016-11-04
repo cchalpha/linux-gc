@@ -1494,44 +1494,71 @@ static inline bool needs_other_cpu(struct task_struct *p, int cpu)
 	return !cpumask_test_cpu(cpu, &p->cpus_allowed);
 }
 
-static struct rq* task_preemptable_rq(struct task_struct *p)
+/*
+ * task_preemptible_rq - return the rq which the given task can preempt on
+ * @p: task wants to preempt cpu
+ * @only_preempt_idle: indicate only preempt idle rq or not
+ */
+static struct rq*
+task_preemptible_rq(struct task_struct *p, int only_preempt_idle)
 {
-	int cpu, target_cpu;
-	struct rq *target_rq;
-	u64 highest_priodl;
-	cpumask_t tmp;
+	int cpu;
+	cpumask_t tmp, check;
 
-	target_rq = task_best_idle_rq(p);
-	if (target_rq)
-		return target_rq;
+	if (unlikely(!cpumask_and(&check, tsk_cpus_allowed(p),
+				  cpu_online_mask)))
+		return NULL;
+
+	/* check idle rq */
+	if(likely(cpumask_and(&tmp, &check, &sched_cpu_idle_mask))) {
+		cpu = best_mask_cpu(task_cpu(p), &tmp);
+		return cpu_rq(cpu);
+	}
+
+	/* idle_preempt indicate just preempt idle rq */
+	if (unlikely(only_preempt_idle != 0))
+		return NULL;
 
 	/* IDLEPRIO tasks never preempt anything but idle */
 	if (p->policy == SCHED_IDLEPRIO)
 		return NULL;
 
-	if (unlikely(!cpumask_and(&tmp, cpu_online_mask, &p->cpus_allowed)))
-		return NULL;
-
-	target_cpu = cpu = cpumask_first(&tmp);
-
 	sched_cpu_priodls_lock();
-	highest_priodl = sched_rq_priodls[cpu];
-
-	for(;cpu = cpumask_next(cpu, &tmp), cpu < nr_cpu_ids;) {
-		u64 rq_priodl;
-
-		rq_priodl = sched_rq_priodls[cpu];
-		if (rq_priodl > highest_priodl ) {
-			target_cpu = cpu;
-			highest_priodl = rq_priodl;
+	cpu = cpumask_first(&check);
+	do {
+		if (likely(can_preempt(p, sched_rq_priodls[cpu]))) {
+			sched_cpu_priodls_unlock();
+			return cpu_rq(cpu);
 		}
-	}
+		cpu = cpumask_next(cpu, &check);
+	} while(cpu < nr_cpu_ids);
 	sched_cpu_priodls_unlock();
 
-	if (can_preempt(p, highest_priodl))
-		return cpu_rq(target_cpu);
-
 	return NULL;
+}
+
+static struct rq* task_balance_rq(struct task_struct *p)
+{
+	cpumask_t tmp;
+	int cpu, target_cpu;
+	unsigned int min_nr_queued = ~0;
+	unsigned int nr_queued;
+
+	if (unlikely(!cpumask_and(&tmp, tsk_cpus_allowed(p), cpu_online_mask))) {
+		printk(KERN_INFO "vrq: task %d has no online cpu to run on.\n",
+		       p->pid);
+		return cpu_rq(select_fallback_rq(task_cpu(p), p));
+	}
+
+	for_each_cpu(cpu, &tmp)
+		if ((nr_queued = cpu_rq(cpu)->nr_queued) < min_nr_queued) {
+			target_cpu = cpu;
+			min_nr_queued = nr_queued;
+			if (0 == min_nr_queued)
+				break;
+		}
+
+	return cpu_rq(target_cpu);
 }
 #else /* CONFIG_SMP */
 static inline bool needs_other_cpu(struct task_struct *p, int cpu)
@@ -1539,10 +1566,20 @@ static inline bool needs_other_cpu(struct task_struct *p, int cpu)
 	return false;
 }
 
-static struct rq* task_preemptable_rq(struct task_struct *p)
+static struct rq*
+task_preemptible_rq(struct task_struct *p, int only_preempt_idle)
 {
+	if(idle_queue(uprq))
+		return uprq;
+
+	/* idle_preempt indicate just preempt idle rq */
+	if (unlikely(only_preempt_idle != 0))
+		return NULL;
+
+	/* IDLEPRIO tasks never preempt anything but idle */
 	if (p->policy == SCHED_IDLEPRIO)
 		return NULL;
+
 	if (can_preempt(p, sched_rq_priodls[0]))
 		return uprq;
 	return NULL;
@@ -1695,12 +1732,9 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 	 * don't trigger a preemption if there are no idle cpus,
 	 * instead waiting for current to deschedule.
 	 */
-	if (!(wake_flags & WF_SYNC) || suitable_idle_cpus(p)) {
-		prq = task_preemptable_rq(p);
-		if (NULL == prq)
-			prq = cpu_rq(select_fallback_rq(task_cpu(p), p));
-	} else
-		prq = cpu_rq(select_fallback_rq(task_cpu(p), p));
+	prq = task_preemptible_rq(p, wake_flags & WF_SYNC);
+	if (NULL == prq)
+		prq = task_balance_rq(p);
 
 	if (!cpumask_test_cpu(cpu_of(prq), cpu_online_mask))
 		printk(KERN_INFO "vrq: task %d affinity %lu ttwu cpu %d, online_mask %lu",
@@ -1987,9 +2021,9 @@ void wake_up_new_task(struct task_struct *p)
 
 	p->state = TASK_RUNNING;
 
-	rq = task_preemptable_rq(p);
+	rq = task_preemptible_rq(p, 0);
 	if (NULL == rq)
-		rq = task_rq(p);
+		rq = task_balance_rq(p);
 #ifdef CONFIG_SMP
 	/*
 	 * Fork balancing, do it here and not earlier because:
