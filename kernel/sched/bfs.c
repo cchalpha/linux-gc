@@ -129,6 +129,8 @@
 
 #define RESCHED_US	(100) /* Reschedule if less than this many μs left */
 
+#define MIN_VISIBLE_DEADLINE	(1 << 8)
+
 void print_scheduler_version(void)
 {
 	printk(KERN_INFO "BFS enhancement patchset VRQ 0.89 by Alfred Chen.\n");
@@ -161,6 +163,11 @@ int sched_iso_cpu __read_mostly = 70;
  * The relative length of deadline for each priority(nice) level.
  */
 static int prio_ratios[NICE_WIDTH] __read_mostly;
+
+/*
+ * vrq debug
+ */
+static int bfs_test[20];
 
 /*
  * The quota handed out to tasks of all priority levels when refilling their
@@ -1777,6 +1784,7 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 {
 	unsigned long flags;
 	int cpu = get_cpu();
+	struct rq *rq = this_rq();
 
 #ifdef CONFIG_PREEMPT_NOTIFIERS
 	INIT_HLIST_HEAD(&p->preempt_notifiers);
@@ -1806,6 +1814,11 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 	p->state = TASK_NEW;
 
 	/*
+	 * Make sure we do not leak PI boosting priority to the child.
+	 */
+	p->prio = current->normal_prio;
+
+	/*
 	 * Revert to default priority/policy on fork if requested.
 	 */
 	if (unlikely(p->sched_reset_on_fork)) {
@@ -1819,11 +1832,40 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 			p->normal_prio = p->static_prio;
 		}
 
+		p->prio = p->normal_prio;
+
 		/*
 		 * We don't need the reset flag anymore after the fork. It has
 		 * fulfilled its duty:
 		 */
 		p->sched_reset_on_fork = 0;
+	}
+
+	/*
+	 * child should has earlier deadline than parent, which will do
+	 * child-runs-first in anticipation of an exec. usually avoids a lot of
+	 * COW overhead.
+	 */
+	p->deadline = current->deadline - MIN_VISIBLE_DEADLINE;
+
+	/*
+	 * Share the timeslice between parent and child, thus the
+	 * total amount of pending timeslices in the system doesn't change,
+	 * resulting in more scheduling fairness. If it's negative, it won't
+	 * matter since that's the same as being 0. current's time_slice is
+	 * actually in rq_time_slice when it's running, as is its last_ran
+	 * value. rq->rq_deadline is only modified within schedule() so it
+	 * is always equal to current->deadline.
+	 */
+	if (unlikely(p->policy == SCHED_FIFO)) {
+		raw_spin_lock(&rq->lock);
+		rq->rq_time_slice /=2;
+		p->time_slice = rq->rq_time_slice;
+		if (p->time_slice < RESCHED_US)
+			time_slice_expired(p, rq);
+		else
+			update_task_priodl(p);
+		raw_spin_unlock(&rq->lock);
 	}
 
 	/*
@@ -1938,21 +1980,16 @@ static inline void init_schedstats(void) {}
  */
 void wake_up_new_task(struct task_struct *p)
 {
-	struct task_struct *parent;
 	unsigned long flags;
-	struct rq *rq, *prq = NULL;
+	struct rq *rq;
 
-retry:
-	rq = task_rq(p);
-	raw_spin_lock_irqsave(&rq->lock, flags);
-	if (unlikely(rq != task_rq(p))) {
-		raw_spin_unlock_irqrestore(&rq->lock, flags);
-		goto retry;
-	}
-
-	parent = p->parent;
+	raw_spin_lock_irqsave(&p->pi_lock, flags);
 
 	p->state = TASK_RUNNING;
+
+	rq = task_preemptable_rq(p);
+	if (NULL == rq)
+		rq = task_rq(p);
 #ifdef CONFIG_SMP
 	/*
 	 * Fork balancing, do it here and not earlier because:
@@ -1960,70 +1997,18 @@ retry:
 	 * - any previously selected cpu might disappear through hotplug
 	 * Use __set_task_cpu() to avoid calling sched_class::migrate_task_rq,
 	 * as we're not fully set-up yet.
-	 *
-	 * For now, just set it to its original cpu
 	 */
-	__set_task_cpu(p, task_cpu(rq->curr));
+	__set_task_cpu(p, cpu_of(rq));
 #endif
-	/*
-	 * Reinit new task deadline as its creator deadline could have changed
-	 * since call to dup_task_struct().
-	 */
-	p->deadline = rq->rq_deadline;
 
-	/*
-	 * Make sure we do not leak PI boosting priority to the child.
-	 */
-	p->prio = rq->curr->normal_prio;
-
-	update_task_priodl(p);
-
-	trace_sched_wakeup_new(p);
-	if (unlikely(p->policy == SCHED_FIFO))
-		goto after_ts_init;
-
-	/*
-	 * Share the timeslice between parent and child, thus the
-	 * total amount of pending timeslices in the system doesn't change,
-	 * resulting in more scheduling fairness. If it's negative, it won't
-	 * matter since that's the same as being 0. current's time_slice is
-	 * actually in rq_time_slice when it's running, as is its last_ran
-	 * value. rq->rq_deadline is only modified within schedule() so it
-	 * is always equal to current->deadline.
-	 */
-	p->last_ran = rq->rq_last_ran;
-	if (likely(rq->rq_time_slice >= RESCHED_US * 2)) {
-		rq->rq_time_slice /= 2;
-		p->time_slice = rq->rq_time_slice;
-after_ts_init:
-		if (rq->curr == parent && !suitable_idle_cpus(p)) {
-			/*
-			 * The VM isn't cloned, so we're in a good position to
-			 * do child-runs-first in anticipation of an exec. This
-			 * usually avoids a lot of COW overhead.
-			 */
-			__set_tsk_resched(parent);
-		} else
-			prq = NULL;
-	} else {
-		if (rq->curr == parent) {
-			/*
-		 	* Forking task has run out of timeslice. Reschedule it and
-		 	* start its child with a new time slice and deadline. The
-		 	* child will end up running first because its deadline will
-		 	* be slightly earlier.
-		 	*/
-			rq->rq_time_slice = 0;
-			__set_tsk_resched(parent);
-		}
-		time_slice_expired(p, rq);
-	}
+	raw_spin_lock(&rq->lock);
 
 	activate_task(p, rq);
+	trace_sched_wakeup_new(p);
+	check_preempt_curr(rq, p);
 
-	raw_spin_unlock_irqrestore(&rq->lock, flags);
-
-	preempt_rq(prq);
+	raw_spin_unlock(&rq->lock);
+	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 }
 
 #ifdef CONFIG_PREEMPT_NOTIFIERS
@@ -5343,6 +5328,8 @@ SYSCALL_DEFINE2(sched_rr_get_interval, pid_t, pid,
 	struct timespec t;
 	raw_spinlock_t *lock;
 
+	printk(KERN_INFO "vrq: %d %d %d\n", bfs_test[0], bfs_test[1],
+	       bfs_test[2]);
 	/*
 	printk(KERN_INFO "vrq: 0x%02lu %lu %lu\n", sched_cpu_idle_mask.bits[0],
 	       cpu_rq(0)->nr_queued, cpu_rq(1)->nr_queued);
