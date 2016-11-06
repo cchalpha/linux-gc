@@ -3497,19 +3497,23 @@ found_middle:
  * till we find the first that does. Worst case here is no tasks with suitable
  * affinity and taking O(n).
  */
-static inline struct
-task_struct *earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *idle)
+static inline struct task_struct *
+earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *prefer)
 {
 	struct task_struct *edt;
 	struct skiplist_node *node = &rq->sl_header;
 
 	if ((node = node->next[0]) == &rq->sl_header)
-		return idle;
+		return prefer;
 
 	edt = skiplist_entry(node, struct task_struct, sl_node);
 
-	take_task(rq, cpu, edt);
-	return edt;
+	if (edt->priodl < prefer->priodl) {
+		take_task(rq, cpu, edt);
+		return edt;
+	}
+
+	return prefer;
 }
 
 /*
@@ -3633,7 +3637,7 @@ static inline void reset_rq_task(struct rq *rq, struct task_struct *p)
  */
 static void __sched notrace __schedule(bool preempt)
 {
-	struct task_struct *prev, *next, *idle;
+	struct task_struct *prev, *next, *idle, *prefer;
 	unsigned long *switch_count;
 	bool deactivate = false;
 	struct rq *rq;
@@ -3703,49 +3707,33 @@ static void __sched notrace __schedule(bool preempt)
 		check_deadline(prev, rq);
 		prev->last_ran = rq->clock_task;
 
-		if (deactivate)
+		if (deactivate) {
 			deactivate_task(prev, rq);
-		else {
-			if (rq->nr_queued) {
-				enqueue_task(prev, rq);
-				next = earliest_deadline_task(rq, cpu, idle);
-				if (likely(prev != next))
-					goto do_switch;
-				goto unlock_out;
-			} else {
-				/*
-				* We now know prev is the only thing that is
-				* awaiting CPU so we can bypass rechecking for
-				* the earliest deadline task and just run it
-				* again.
-				*/
-				set_rq_task(rq, prev);
-				goto unlock_out;
-			}
+			prefer = idle;
+		} else {
+			prefer = prev;
 		}
 	} else {
 		update_rq_clock(rq);
 		update_cpu_clock_switch_idle(rq, prev);
 		rq->dither = (rq->clock - rq->last_tick < HALF_JIFFY_NS);
+
+		prefer = idle;
 	}
 
-	if (likely(rq->nr_queued)) {
-		next = earliest_deadline_task(rq, cpu, idle);
-	} else {
-		/*
-		 * This CPU is now truly idle as opposed to when idle is
-		 * scheduled as a high priority task in its own right.
-		 */
-		next = idle;
-		schedstat_inc(rq->sched_goidle);
+	next = earliest_deadline_task(rq, cpu, prefer);
+	if (next != prefer) {
+		if (idle != prefer)
+			enqueue_task(prev, rq);
 	}
 
 	if (likely(prev != next)) {
-do_switch:
 		if (likely(next->prio != PRIO_LIMIT))
 			clear_cpuidle_map(cpu);
-		else
+		else {
 			set_cpuidle_map(cpu);
+			schedstat_inc(rq->sched_goidle);
+		}
 
 		set_rq_task(rq, next);
 
@@ -3762,7 +3750,7 @@ do_switch:
 		cpu = cpu_of(rq);
 		idle = rq->idle;
 	} else {
-unlock_out:
+		set_rq_task(rq, next);
 		raw_spin_unlock_irq(&rq->lock);
 	}
 }
