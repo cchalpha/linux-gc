@@ -140,6 +140,16 @@ void print_scheduler_version(void)
 #define TASK_ON_RQ_QUEUED	1
 #define TASK_ON_RQ_MIGRATING	2
 
+static inline int task_on_rq_queued(struct task_struct *p)
+{
+	return p->on_rq == TASK_ON_RQ_QUEUED;
+}
+
+static inline int task_on_rq_migrating(struct task_struct *p)
+{
+	return p->on_rq == TASK_ON_RQ_MIGRATING;
+}
+
 /*
  * This is the time all tasks within the same priority round robin.
  * Value is in ms and set to a minimum of 6ms. Scales with number of cpus.
@@ -415,12 +425,17 @@ static inline void prepare_lock_switch(struct rq *rq, struct task_struct *next)
 static inline void finish_lock_switch(struct rq *rq, struct task_struct *prev)
 {
 	/*
-	 * After ->on_cpu is cleared, the task would be locked on rq
-	 * lock or pi_lock, We must ensure this doesn't happen until the
-	 * switch is completely finished.
+	 * After ->on_cpu is cleared, the task can be moved to a different CPU.
+	 * We must ensure this doesn't happen until the switch is completely
+	 * finished.
+	 *
+	 * In particular, the load of prev->state in finish_task_switch() must
+	 * happen before this.
+	 *
+	 * Pairs with the smp_cond_load_acquire() in try_to_wake_up().
 	 */
-	smp_wmb();
-	prev->on_cpu = 0;
+	smp_store_release(&prev->on_cpu, 0);
+
 #ifdef CONFIG_DEBUG_SPINLOCK
 	/* this is a valid case when another task releases the spinlock */
 	rq->lock.owner = current;
@@ -1663,6 +1678,25 @@ ttwu_do_activate(struct rq *rq, struct task_struct *p, int wake_flags)
 	ttwu_do_wakeup(rq, p, 0);
 }
 
+static int ttwu_remote(struct task_struct *p, int wake_flags)
+{
+	struct rq *rq;
+	raw_spinlock_t *lock;
+	int ret = 0;
+
+	rq = __task_access_lock(p, &lock);
+	/*
+	if (task_running(p) || task_queued(p)) {
+	*/
+	if (task_on_rq_queued(p)) {
+		ttwu_do_wakeup(rq, p, wake_flags);
+		ret = 1;
+	}
+	__task_access_unlock(p, lock);
+
+	return ret;
+}
+
 /*
  * wake flags
  */
@@ -1689,8 +1723,7 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 			  int wake_flags)
 {
 	unsigned long flags;
-	struct rq *rq, *prq;
-	raw_spinlock_t *lock;
+	struct rq *prq;
 	int cpu, success = 0;
 
 	/*
@@ -1700,28 +1733,69 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 	 * set_current_state() the waiting thread does.
 	 */
 	smp_mb__before_spinlock();
-
-	/*
-	 * We only need to update the rq clock if we activate the task
-	 */
-	rq = task_access_lock_irqsave(p, &lock, &flags);
-
-	/* state is a volatile long, どうして、分からない */
-	if (!(p->state & state)) {
-		task_access_unlock_irqrestore(p, lock, &flags);
-		return 0;
-	}
+	raw_spin_lock_irqsave(&p->pi_lock, flags);
+	if (!(p->state & state))
+		goto out;
 
 	trace_sched_waking(p);
+	cpu = task_cpu(p);
 
 	success = 1;
-	if (task_queued(p) || task_running(p)) {
-		ttwu_do_wakeup(rq, p, 0);
-		cpu = task_cpu(p);
-		ttwu_stat(p, cpu, wake_flags);
-		task_access_unlock_irqrestore(p, lock, &flags);
-		return success;
-	}
+
+	/*
+	 * Ensure we load p->on_rq _after_ p->state, otherwise it would
+	 * be possible to, falsely, observe p->on_rq == 0 and get stuck
+	 * in smp_cond_load_acquire() below.
+	 *
+	 * sched_ttwu_pending()                 try_to_wake_up()
+	 *   [S] p->on_rq = 1;                  [L] P->state
+	 *       UNLOCK rq->lock  -----.
+	 *                              \
+	 *				 +---   RMB
+	 * schedule()                   /
+	 *       LOCK rq->lock    -----'
+	 *       UNLOCK rq->lock
+	 *
+	 * [task p]
+	 *   [S] p->state = UNINTERRUPTIBLE     [L] p->on_rq
+	 *
+	 * Pairs with the UNLOCK+LOCK on rq->lock from the
+	 * last wakeup of our task and the schedule that got our task
+	 * current.
+	 */
+	smp_rmb();
+	if (p->on_rq && ttwu_remote(p, wake_flags))
+		goto stat;
+
+	/*
+	 * Ensure we load p->on_cpu _after_ p->on_rq, otherwise it would be
+	 * possible to, falsely, observe p->on_cpu == 0.
+	 *
+	 * One must be running (->on_cpu == 1) in order to remove oneself
+	 * from the runqueue.
+	 *
+	 *  [S] ->on_cpu = 1;	[L] ->on_rq
+	 *      UNLOCK rq->lock
+	 *			RMB
+	 *      LOCK   rq->lock
+	 *  [S] ->on_rq = 0;    [L] ->on_cpu
+	 *
+	 * Pairs with the full barrier implied in the UNLOCK+LOCK on rq->lock
+	 * from the consecutive calls to schedule(); the first switching to our
+	 * task, the second putting it to sleep.
+	 */
+	smp_rmb();
+
+	/*
+	 * If the owning (remote) cpu is still in the middle of schedule() with
+	 * this task as prev, wait until its done referencing the task.
+	 *
+	 * Pairs with the smp_store_release() in finish_lock_switch().
+	 *
+	 * This ensures that tasks getting woken will be fully ordered against
+	 * their previous state and preserve Program Order.
+	 */
+	smp_cond_load_acquire(&p->on_cpu, !VAL);
 
 	p->sched_contributes_to_load = !!task_contributes_to_load(p);
 	p->state = TASK_WAKING;
@@ -1754,7 +1828,9 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 	check_preempt_curr(prq, p);
 	raw_spin_unlock(&prq->lock);
 
+stat:
 	ttwu_stat(p, cpu, wake_flags);
+out:
 	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 
 	return success;
