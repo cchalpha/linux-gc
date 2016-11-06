@@ -175,11 +175,6 @@ extern struct static_key_false sched_schedstats;
 
 static inline void sched_ttwu_pending(void) { }
 
-static inline int task_on_rq_queued(struct task_struct *p)
-{
-	return p->on_rq;
-}
-
 #ifdef CONFIG_CPU_IDLE
 static inline void idle_set_state(struct rq *rq,
 				  struct cpuidle_state *idle_state)
