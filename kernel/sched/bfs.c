@@ -504,7 +504,6 @@ static void dequeue_task(struct task_struct *p, struct rq *rq)
 		  task_cpu(p), cpu_of(rq));
 	skiplist_del_init(&rq->sl_header, &p->sl_node);
 	rq->nr_queued--;
-	rq->nr_running--;
 
 	sched_info_dequeued(task_rq(p), p);
 }
@@ -597,7 +596,6 @@ static void enqueue_task(struct task_struct *p, struct rq *rq)
 	p->sl_node.level = p->sl_level;
 	bfs_skiplist_insert(&rq->sl_header, &p->sl_node);
 	rq->nr_queued++;
-	rq->nr_running++;
 
 	sched_info_queued(rq, p);
 }
@@ -1011,8 +1009,8 @@ static void activate_task(struct task_struct *p, struct rq *rq)
 	if (task_contributes_to_load(p))
 		rq->nr_uninterruptible--;
 	enqueue_task(p, rq);
-	p->on_rq = 1;
 	rq->nr_running++;
+	p->on_rq = 1;
 	cpufreq_update_this_cpu(rq, 0);
 }
 
@@ -1109,6 +1107,7 @@ static struct rq *move_queued_task(struct rq *rq, struct task_struct *p, int
 
 	p->on_rq = TASK_ON_RQ_MIGRATING;
 	dequeue_task(p, rq);
+	rq->nr_running--;
 	set_task_cpu(p, new_cpu);
 	raw_spin_unlock(&rq->lock);
 
@@ -1117,6 +1116,7 @@ static struct rq *move_queued_task(struct rq *rq, struct task_struct *p, int
 	raw_spin_lock(&rq->lock);
 	BUG_ON(task_cpu(p) != new_cpu);
 	enqueue_task(p, rq);
+	rq->nr_running++;
 	p->on_rq = TASK_ON_RQ_QUEUED;
 	check_preempt_curr(rq, p);
 
@@ -3516,6 +3516,48 @@ earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *prefer)
 	return prefer;
 }
 
+
+static inline struct task_struct *
+take_other_rq_task(int cpu)
+{
+	struct cpumask chk_mask;
+	struct task_struct *p;
+	int tcpu;
+
+	cpumask_copy(&chk_mask, cpu_active_mask);
+	cpumask_clear_cpu(cpu, &chk_mask);
+
+	for_each_cpu(tcpu, &chk_mask) {
+		struct rq *trq;
+		struct skiplist_node *node;
+
+		trq = cpu_rq(tcpu);
+
+		if (trq->nr_queued == 0)
+			continue;
+
+		raw_spin_lock_nested(&trq->lock, SINGLE_DEPTH_NESTING);
+		node = trq->sl_header.next[0];
+		if (unlikely(node == &trq->sl_header)) {
+			raw_spin_unlock(&trq->lock);
+			continue;
+		}
+		/* need go through checking for cpu affinity */
+		p = skiplist_entry(node, struct task_struct, sl_node);
+		if (!cpumask_test_cpu(cpu, tsk_cpus_allowed(p))) {
+			raw_spin_unlock(&trq->lock);
+			continue;
+		}
+		take_task(trq, tcpu, p);
+		trq->nr_running--;
+		set_task_cpu(p, cpu);
+		raw_spin_unlock(&trq->lock);
+
+		return p;
+	}
+	return NULL;
+}
+
 /*
  * Print scheduling while atomic bug:
  */
@@ -3722,6 +3764,14 @@ static void __sched notrace __schedule(bool preempt)
 	}
 
 	next = earliest_deadline_task(rq, cpu, prefer);
+	if (idle == next) {
+		struct task_struct *other_rq_tsk;
+		other_rq_tsk = take_other_rq_task(cpu);
+		if (NULL != other_rq_tsk) {
+			next = other_rq_tsk;
+			rq->nr_running++;
+		}
+	}
 	if (next != prefer) {
 		if (idle != prefer)
 			enqueue_task(prev, rq);
@@ -5426,15 +5476,15 @@ SYSCALL_DEFINE2(sched_rr_get_interval, pid_t, pid,
 	struct timespec t;
 	raw_spinlock_t *lock;
 
+	/*
 	printk(KERN_INFO "vrq: %d %d %d\n", bfs_test[0], bfs_test[1],
 	       bfs_test[2]);
-	/*
 	printk(KERN_INFO "vrq: 0x%02lu %lu %lu\n", sched_cpu_idle_mask.bits[0],
 	       cpu_rq(0)->nr_queued, cpu_rq(1)->nr_queued);
-	printk(KERN_INFO "bfs: %d [%d]=%d [%d]=%d\n", ISO_PERIOD,
-	       cpu_rq(0)->iso_refractory, cpu_rq(0)->iso_ticks,
-	       cpu_rq(1)->iso_refractory, cpu_rq(1)->iso_ticks);
 	*/
+	printk(KERN_INFO "bfs: [0]=%lu %lu [1]=%lu %lu\n",
+	       cpu_rq(0)->nr_running, cpu_rq(0)->nr_uninterruptible,
+	       cpu_rq(1)->nr_running, cpu_rq(1)->nr_uninterruptible);
 
 	if (pid < 0)
 		return -EINVAL;
