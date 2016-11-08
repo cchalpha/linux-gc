@@ -191,6 +191,18 @@ static inline int timeslice(void)
 #ifdef CONFIG_SMP
 static cpumask_t sched_cpu_idle_mask ____cacheline_aligned_in_smp;
 static cpumask_t sched_cpu_non_scaled_mask ____cacheline_aligned_in_smp;
+
+#ifdef CONFIG_SCHED_SMT
+static cpumask_t sched_topo_exc_sibling_mask[NR_CPUS];
+#endif
+
+#ifdef CONFIG_SCHED_MC
+static cpumask_t sched_topo_exc_coregroup_mask[NR_CPUS];
+#endif
+
+static cpumask_t sched_topo_exc_core_mask[NR_CPUS];
+static cpumask_t sched_topo_exc_others_mask[NR_CPUS];
+
 #ifndef CONFIG_64BIT
 static raw_spinlock_t sched_cpu_priodls_lock ____cacheline_aligned_in_smp;
 #endif
@@ -3518,16 +3530,12 @@ earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *prefer)
 
 
 static inline struct task_struct *
-take_other_rq_task(int cpu)
+take_queued_task_cpumask(int cpu, struct cpumask *chk_mask)
 {
-	struct cpumask chk_mask;
 	struct task_struct *p;
 	int tcpu;
 
-	cpumask_copy(&chk_mask, cpu_active_mask);
-	cpumask_clear_cpu(cpu, &chk_mask);
-
-	for_each_cpu(tcpu, &chk_mask) {
+	for_each_cpu(tcpu, chk_mask) {
 		struct rq *trq;
 		struct skiplist_node *node;
 
@@ -3556,6 +3564,17 @@ take_other_rq_task(int cpu)
 		return p;
 	}
 	return NULL;
+}
+
+static inline struct task_struct *
+take_other_rq_task(int cpu)
+{
+	struct cpumask chk_mask;
+
+	cpumask_copy(&chk_mask, cpu_active_mask);
+	cpumask_clear_cpu(cpu, &chk_mask);
+
+	return take_queued_task_cpumask(cpu, &chk_mask);
 }
 
 /*
@@ -7226,6 +7245,39 @@ static const cpumask_t *thread_cpumask(int cpu)
 }
 #endif
 
+static void sched_init_topology_cpumask(void)
+{
+#ifdef CONFIG_SMP
+	int cpu;
+
+	for_each_online_cpu(cpu) {
+#ifdef CONFIG_SCHED_SMT
+		cpumask_copy(&sched_topo_exc_sibling_mask[cpu],
+			     topology_sibling_cpumask(cpu));
+		cpumask_clear_cpu(cpu, &sched_topo_exc_sibling_mask[cpu]);
+#endif
+#ifdef CONFIG_SCHED_MC
+		cpumask_complement(&sched_topo_exc_coregroup_mask[cpu],
+				   topology_sibling_cpumask(cpu));
+		cpumask_and(&sched_topo_exc_coregroup_mask[cpu],
+			    &sched_topo_exc_coregroup_mask[cpu],
+			    cpu_coregroup_mask(cpu));
+#endif
+		cpumask_complement(&sched_topo_exc_core_mask[cpu],
+				   cpu_coregroup_mask(cpu));
+		cpumask_and(&sched_topo_exc_core_mask[cpu],
+			    &sched_topo_exc_core_mask[cpu],
+			    topology_core_cpumask(cpu));
+
+		cpumask_complement(&sched_topo_exc_others_mask[cpu],
+				   topology_core_cpumask(cpu));
+		cpumask_and(&sched_topo_exc_others_mask[cpu],
+			    &sched_topo_exc_others_mask[cpu],
+			    cpu_possible_mask);
+	}
+#endif
+}
+
 enum sched_domain_level {
 	SD_LV_NONE = 0,
 	SD_LV_SIBLING,
@@ -7314,6 +7366,7 @@ void __init sched_init_smp(void)
 			printk(KERN_DEBUG "BFS LOCALITY CPU %d to %d: %d\n", cpu, other_cpu, rq->cpu_locality[other_cpu]);
 		}
 	}
+	sched_init_topology_cpumask();
 	sched_smp_initialized = true;
 }
 #else
@@ -7386,7 +7439,7 @@ void __init sched_init(void)
 		rq->nr_switches = 0;
 		atomic_set(&rq->nr_iowait, 0);
 		rq->iso_ticks = 0;
-		rq->iso_ticks = 0;
+		rq->iso_refractory = 0;
 	}
 
 #ifdef CONFIG_SMP
