@@ -192,6 +192,8 @@ static inline int timeslice(void)
 static cpumask_t sched_cpu_idle_mask ____cacheline_aligned_in_smp;
 static cpumask_t sched_cpu_non_scaled_mask ____cacheline_aligned_in_smp;
 
+static cpumask_t sched_queued_task_mask ____cacheline_aligned_in_smp;
+
 #ifdef CONFIG_SCHED_SMT
 static cpumask_t sched_topo_exc_sibling_mask[NR_CPUS];
 #endif
@@ -523,6 +525,8 @@ static void dequeue_task(struct task_struct *p, struct rq *rq)
 		  task_cpu(p), cpu_of(rq));
 	skiplist_del_init(&rq->sl_header, &p->sl_node);
 	rq->nr_queued--;
+	if (unlikely(skiplist_empty(&rq->sl_header)))
+		cpumask_clear_cpu(cpu_of(rq), &sched_queued_task_mask);
 
 	sched_info_dequeued(task_rq(p), p);
 }
@@ -615,6 +619,7 @@ static void enqueue_task(struct task_struct *p, struct rq *rq)
 	p->sl_node.level = p->sl_level;
 	bfs_skiplist_insert(&rq->sl_header, &p->sl_node);
 	rq->nr_queued++;
+	cpumask_set_cpu(cpu_of(rq), &sched_queued_task_mask);
 
 	sched_info_queued(rq, p);
 }
@@ -3563,7 +3568,7 @@ take_other_rq_task(int cpu)
 {
 	struct cpumask chk_mask;
 
-	cpumask_copy(&chk_mask, cpu_active_mask);
+	cpumask_and(&chk_mask, &sched_queued_task_mask, cpu_active_mask);
 	cpumask_clear_cpu(cpu, &chk_mask);
 
 	return take_queued_task_cpumask(cpu, &chk_mask);
@@ -7389,6 +7394,7 @@ void __init sched_init(void)
 #ifdef CONFIG_SMP
 	init_defrootdomain();
 	cpumask_clear(&sched_cpu_idle_mask);
+	cpumask_clear(&sched_queued_task_mask);
 #ifndef CONFIG_64BIT
 	raw_spin_lock_init(&sched_cpu_priodls_lock);
 #endif
