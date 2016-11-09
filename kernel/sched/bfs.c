@@ -240,6 +240,13 @@ struct root_domain {
  */
 static struct root_domain def_root_domain;
 
+/*
+ * Keep a unique ID per domain (we use the first cpu number in the cpumask of
+ * the domain), this allows us to quickly tell if two cpus are in the same cache
+ * domain, see cpus_share_cache().
+ */
+DEFINE_PER_CPU(int, sd_llc_id);
+
 #endif /* CONFIG_SMP */
 
 static DEFINE_MUTEX(sched_hotcpu_mutex);
@@ -875,13 +882,6 @@ out:
 	rcu_read_unlock();
 }
 
-bool cpus_share_cache(int this_cpu, int that_cpu)
-{
-	struct rq *this_rq = cpu_rq(this_cpu);
-
-	return (this_rq->cpu_locality[that_cpu] < 3);
-}
-
 static inline struct rq *task_best_idle_rq(struct task_struct *p)
 {
         cpumask_t check_cpumask;
@@ -918,10 +918,6 @@ static inline bool scaling_rq(struct rq *rq)
 	return rq->scaling;
 }
 
-static inline int locality_diff(int cpu, struct rq *rq)
-{
-	return rq->cpu_locality[cpu];
-}
 #else /* CONFIG_SMP */
 static inline void set_cpuidle_map(int cpu)
 {
@@ -958,10 +954,6 @@ static inline bool scaling_rq(struct rq *rq)
 	return false;
 }
 
-static inline int locality_diff(int cpu, struct rq *rq)
-{
-	return 0;
-}
 #endif /* CONFIG_SMP */
 EXPORT_SYMBOL_GPL(cpu_scaling);
 EXPORT_SYMBOL_GPL(cpu_nonscaling);
@@ -5495,15 +5487,18 @@ SYSCALL_DEFINE2(sched_rr_get_interval, pid_t, pid,
 	struct timespec t;
 	raw_spinlock_t *lock;
 
+
+	printk(KERN_INFO "vrq: [%d]=%d [%d]=%d\n", 0, per_cpu(sd_llc_id,0),
+	       1, per_cpu(sd_llc_id, 1));
 	/*
 	printk(KERN_INFO "vrq: %d %d %d\n", bfs_test[0], bfs_test[1],
 	       bfs_test[2]);
 	printk(KERN_INFO "vrq: 0x%02lu %lu %lu\n", sched_cpu_idle_mask.bits[0],
 	       cpu_rq(0)->nr_queued, cpu_rq(1)->nr_queued);
-	*/
 	printk(KERN_INFO "bfs: [0]=%lu %lu [1]=%lu %lu\n",
 	       cpu_rq(0)->nr_running, cpu_rq(0)->nr_uninterruptible,
 	       cpu_rq(1)->nr_running, cpu_rq(1)->nr_uninterruptible);
+	*/
 
 	if (pid < 0)
 		return -EINVAL;
@@ -6243,6 +6238,39 @@ static void destroy_sched_domains(struct sched_domain *sd)
 		call_rcu(&sd->rcu, destroy_sched_domains_rcu);
 }
 
+static inline struct sched_domain *highest_flag_domain(int cpu, int flag)
+{
+	struct sched_domain *sd, *hsd = NULL;
+
+	for_each_domain(cpu, sd) {
+		if (!(sd->flags & flag))
+			break;
+		hsd = sd;
+	}
+
+	return hsd;
+}
+
+#ifdef CONFIG_SMP
+bool cpus_share_cache(int this_cpu, int that_cpu)
+{
+	return per_cpu(sd_llc_id, this_cpu) == per_cpu(sd_llc_id, that_cpu);
+}
+#endif
+
+static void update_top_cache_domain(int cpu)
+{
+	struct sched_domain *sd;
+	int id = cpu;
+
+	sd = highest_flag_domain(cpu, SD_SHARE_PKG_RESOURCES);
+	if (sd) {
+		id = cpumask_first(sched_domain_span(sd));
+	}
+
+	per_cpu(sd_llc_id, cpu) = id;
+}
+
 /*
  * Attach the domain 'sd' to 'cpu' as its base domain. Callers must
  * hold the hotplug lock.
@@ -6289,6 +6317,8 @@ cpu_attach_domain(struct sched_domain *sd, struct root_domain *rd, int cpu)
 	tmp = rq->sd;
 	rcu_assign_pointer(rq->sd, sd);
 	destroy_sched_domains(tmp);
+
+	update_top_cache_domain(cpu);
 }
 
 /* Setup the mask of cpus configured for isolated domains */
@@ -7291,9 +7321,6 @@ enum sched_domain_level {
 
 void __init sched_init_smp(void)
 {
-	struct sched_domain *sd;
-	int cpu, other_cpu;
-
 	cpumask_var_t non_isolated_cpus;
 
 	alloc_cpumask_var(&non_isolated_cpus, GFP_KERNEL);
@@ -7319,53 +7346,7 @@ void __init sched_init_smp(void)
 	free_cpumask_var(non_isolated_cpus);
 
 	mutex_lock(&sched_domains_mutex);
-	/*
-	 * Set up the relative cache distance of each online cpu from each
-	 * other in a simple array for quick lookup. Locality is determined
-	 * by the closest sched_domain that CPUs are separated by. CPUs with
-	 * shared cache in SMT and MC are treated as local. Separate CPUs
-	 * (within the same package or physically) within the same node are
-	 * treated as not local. CPUs not even in the same domain (different
-	 * nodes) are treated as very distant.
-	 */
-	for_each_online_cpu(cpu) {
-		struct rq *rq = cpu_rq(cpu);
 
-		raw_spin_lock_irq(&rq->lock);
-		/* First check if this cpu is in the same node */
-		for_each_domain(cpu, sd) {
-			if (sd->level > SD_LV_NODE)
-				continue;
-			/* Set locality to local node if not already found lower */
-			for_each_cpu(other_cpu, sched_domain_span(sd)) {
-				if (rq->cpu_locality[other_cpu] > 3)
-					rq->cpu_locality[other_cpu] = 3;
-			}
-		}
-
-#ifdef CONFIG_SCHED_MC
-		for_each_cpu(other_cpu, cpu_coregroup_mask(cpu)) {
-			if (rq->cpu_locality[other_cpu] > 2)
-				rq->cpu_locality[other_cpu] = 2;
-		}
-#endif
-#ifdef CONFIG_SCHED_SMT
-		for_each_cpu(other_cpu, thread_cpumask(cpu))
-			if (rq->cpu_locality[other_cpu] > 1)
-				rq->cpu_locality[other_cpu] = 1;
-#endif
-		raw_spin_unlock_irq(&rq->lock);
-	}
-	mutex_unlock(&sched_domains_mutex);
-
-	for_each_online_cpu(cpu) {
-		struct rq *rq = cpu_rq(cpu);
-		for_each_online_cpu(other_cpu) {
-			if (other_cpu <= cpu)
-				continue;
-			printk(KERN_DEBUG "BFS LOCALITY CPU %d to %d: %d\n", cpu, other_cpu, rq->cpu_locality[other_cpu]);
-		}
-	}
 	sched_init_topology_cpumask();
 	sched_smp_initialized = true;
 }
@@ -7397,9 +7378,6 @@ EXPORT_SYMBOL(bit_waitqueue);
 
 void __init sched_init(void)
 {
-#ifdef CONFIG_SMP
-	int cpu_ids;
-#endif
 	int i;
 	struct rq *rq;
 
@@ -7441,26 +7419,6 @@ void __init sched_init(void)
 		rq->iso_ticks = 0;
 		rq->iso_refractory = 0;
 	}
-
-#ifdef CONFIG_SMP
-	cpu_ids = i;
-	/*
-	 * Set the base locality for cpu cache distance calculation to
-	 * "distant" (3). Make sure the distance from a CPU to itself is 0.
-	 */
-	for_each_possible_cpu(i) {
-		int j;
-
-		rq = cpu_rq(i);
-		rq->cpu_locality = kmalloc(cpu_ids * sizeof(int *), GFP_ATOMIC);
-		for_each_possible_cpu(j) {
-			if (i == j)
-				rq->cpu_locality[j] = 0;
-			else
-				rq->cpu_locality[j] = 4;
-		}
-	}
-#endif
 
 	/*
 	 * The boot idle thread does lazy MMU switching as well:

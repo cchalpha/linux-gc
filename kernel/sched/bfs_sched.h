@@ -54,7 +54,6 @@ struct rq {
 
 	struct root_domain *rd;
 	struct sched_domain *sd;
-	int *cpu_locality; /* CPU relative cache distance */
 #endif /* CONFIG_SMP */
 #ifdef CONFIG_IRQ_TIME_ACCOUNTING
 	u64 prev_irq_time;
