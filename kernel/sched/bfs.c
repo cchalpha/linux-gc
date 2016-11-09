@@ -7345,8 +7345,6 @@ void __init sched_init_smp(void)
 		BUG();
 	free_cpumask_var(non_isolated_cpus);
 
-	mutex_lock(&sched_domains_mutex);
-
 	sched_init_topology_cpumask();
 	sched_smp_initialized = true;
 }
