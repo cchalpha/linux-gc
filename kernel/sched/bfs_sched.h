@@ -34,10 +34,6 @@ struct rq {
 	u64 rq_last_ran;
 	int rq_prio;
 	bool rq_running; /* There is a task running */
-#ifdef CONFIG_SMT_NICE
-	struct mm_struct *rq_mm;
-	int rq_smt_bias; /* Policy/nice level bias across smt siblings */
-#endif
 	/* Accurate timekeeping data */
 	u64 timekeep_clock;
 	unsigned long user_pc, nice_pc, irq_pc, softirq_pc, system_pc,
