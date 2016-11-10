@@ -3780,7 +3780,7 @@ static void __sched notrace __schedule(bool preempt)
 	}
 
 	next = earliest_deadline_task(rq, cpu, prefer);
-	if (idle == next) {
+	if (idle == next && !rq->scaling) {
 		struct task_struct *other_rq_tsk;
 		other_rq_tsk = take_other_rq_task(cpu);
 		if (NULL != other_rq_tsk) {
