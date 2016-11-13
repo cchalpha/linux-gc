@@ -131,6 +131,17 @@
 
 #define MIN_VISIBLE_DEADLINE	(1 << 8)
 
+enum {
+	BASE_CPU_AFFINITY_CHK_LEVEL = 1,
+#ifdef CONFIG_SCHED_SMT
+	SMT_CPU_AFFINITY_CHK_LEVEL_SPACE_HOLDER,
+#endif
+#ifdef CONFIG_SCHED_MC
+	MC_CPU_AFFINITY_CHK_LEVEL_SPACE_HOLDER,
+#endif
+	NR_CPU_AFFINITY_CHK_LEVEL
+};
+
 void print_scheduler_version(void)
 {
 	printk(KERN_INFO "BFS enhancement patchset VRQ 0.89a by Alfred Chen.\n");
@@ -194,16 +205,11 @@ static cpumask_t sched_cpu_non_scaled_mask ____cacheline_aligned_in_smp;
 
 static cpumask_t sched_queued_task_mask ____cacheline_aligned_in_smp;
 
-#ifdef CONFIG_SCHED_SMT
-static cpumask_t sched_topo_exc_sibling_mask[NR_CPUS];
-#endif
+static cpumask_t
+sched_cpu_affinity_chk_masks[NR_CPUS][NR_CPU_AFFINITY_CHK_LEVEL]
+____cacheline_aligned_in_smp;
 
-#ifdef CONFIG_SCHED_MC
-static cpumask_t sched_topo_exc_coregroup_mask[NR_CPUS];
-#endif
-
-static cpumask_t sched_topo_exc_core_mask[NR_CPUS];
-static cpumask_t sched_topo_exc_others_mask[NR_CPUS];
+static int sched_cpu_affinity_chk_levels[NR_CPUS] ____cacheline_aligned_in_smp;
 
 #ifndef CONFIG_64BIT
 static raw_spinlock_t sched_cpu_priodls_lock ____cacheline_aligned_in_smp;
@@ -3563,15 +3569,21 @@ take_queued_task_cpumask(int cpu, struct cpumask *chk_mask)
 	return NULL;
 }
 
-static inline struct task_struct *
-take_other_rq_task(int cpu)
+static inline struct task_struct * take_other_rq_task(int cpu)
 {
-	struct cpumask chk_mask;
+	int level;
+	struct cpumask chk_mask, tmp;
+	struct task_struct *p;
 
 	cpumask_and(&chk_mask, &sched_queued_task_mask, cpu_active_mask);
-	cpumask_clear_cpu(cpu, &chk_mask);
+	for (level = 0; level < sched_cpu_affinity_chk_levels[cpu]; level++)
+		if (cpumask_and(&tmp, &chk_mask,
+				&sched_cpu_affinity_chk_masks[cpu][level])) {
+			if ((p = take_queued_task_cpumask(cpu, &tmp)))
+				return p;
+		}
 
-	return take_queued_task_cpumask(cpu, &chk_mask);
+	return NULL;
 }
 
 /*
@@ -5493,7 +5505,9 @@ SYSCALL_DEFINE2(sched_rr_get_interval, pid_t, pid,
 	raw_spinlock_t *lock;
 
 
-	printk(KERN_INFO "vrq: [%d]=%d [%d]=%d\n", 0, per_cpu(sd_llc_id,0),
+	printk(KERN_INFO "vrq: %d [%d]=%d [%d]=%d\n",
+	       NR_CPU_AFFINITY_CHK_LEVEL,
+	       0, per_cpu(sd_llc_id,0),
 	       1, per_cpu(sd_llc_id, 1));
 	/*
 	printk(KERN_INFO "vrq: %d %d %d\n", bfs_test[0], bfs_test[1],
@@ -7273,42 +7287,64 @@ int sched_cpu_dying(unsigned int cpu)
 }
 #endif
 
-#ifdef CONFIG_SCHED_SMT
-static const cpumask_t *thread_cpumask(int cpu)
+static void sched_init_topology_cpumask_early(void)
 {
-	return topology_sibling_cpumask(cpu);
+	int cpu, level;
+	cpumask_t *tmp;
+
+	for_each_possible_cpu(cpu) {
+		for (level = 0; level < NR_CPU_AFFINITY_CHK_LEVEL; level++) {
+			tmp = &sched_cpu_affinity_chk_masks[cpu][level];
+			cpumask_copy(tmp, cpu_possible_mask);
+			cpumask_clear_cpu(cpu, tmp);
+		}
+		sched_cpu_affinity_chk_levels[cpu] = 1;
+	}
 }
-#endif
 
 static void sched_init_topology_cpumask(void)
 {
 #ifdef CONFIG_SMP
 	int cpu;
+	cpumask_t *tmp;
 
 	for_each_online_cpu(cpu) {
+		tmp = &sched_cpu_affinity_chk_masks[cpu][0];
 #ifdef CONFIG_SCHED_SMT
-		cpumask_copy(&sched_topo_exc_sibling_mask[cpu],
-			     topology_sibling_cpumask(cpu));
-		cpumask_clear_cpu(cpu, &sched_topo_exc_sibling_mask[cpu]);
+		cpumask_copy(tmp, topology_sibling_cpumask(cpu));
+		cpumask_clear_cpu(cpu, tmp);
+		if (cpumask_weight(tmp)) {
+			printk(KERN_INFO "vrq: sched_cpu_affinity_chk_masks[%d] smt 0x%02lu",
+			       cpu, tmp->bits[0]);
+			tmp++;
+		}
 #endif
 #ifdef CONFIG_SCHED_MC
-		cpumask_complement(&sched_topo_exc_coregroup_mask[cpu],
-				   topology_sibling_cpumask(cpu));
-		cpumask_and(&sched_topo_exc_coregroup_mask[cpu],
-			    &sched_topo_exc_coregroup_mask[cpu],
-			    cpu_coregroup_mask(cpu));
+		cpumask_complement(tmp, topology_sibling_cpumask(cpu));
+		if (cpumask_and(tmp, tmp, cpu_coregroup_mask(cpu))) {
+			printk(KERN_INFO "vrq: sched_cpu_affinity_chk_masks[%d] coregroup 0x%02lu",
+			       cpu, tmp->bits[0]);
+			tmp++;
+		}
 #endif
-		cpumask_complement(&sched_topo_exc_core_mask[cpu],
-				   cpu_coregroup_mask(cpu));
-		cpumask_and(&sched_topo_exc_core_mask[cpu],
-			    &sched_topo_exc_core_mask[cpu],
-			    topology_core_cpumask(cpu));
+		cpumask_complement(tmp, cpu_coregroup_mask(cpu));
+		if (cpumask_and(tmp, tmp, topology_core_cpumask(cpu))) {
+			printk(KERN_INFO "vrq: sched_cpu_affinity_chk_masks[%d] core 0x%02lu",
+			       cpu, tmp->bits[0]);
+			tmp++;
+		}
 
-		cpumask_complement(&sched_topo_exc_others_mask[cpu],
-				   topology_core_cpumask(cpu));
-		cpumask_and(&sched_topo_exc_others_mask[cpu],
-			    &sched_topo_exc_others_mask[cpu],
-			    cpu_possible_mask);
+		cpumask_complement(tmp, topology_core_cpumask(cpu));
+		if (cpumask_and(tmp, tmp, cpu_possible_mask)) {
+			printk(KERN_INFO "vrq: sched_cpu_affinity_chk_masks[%d] others 0x%02lu",
+			       cpu, tmp->bits[0]);
+			tmp++;
+		}
+
+		sched_cpu_affinity_chk_levels[cpu] = tmp -
+			&sched_cpu_affinity_chk_masks[cpu][0];
+		printk(KERN_INFO "vrq: sched_cpu_affinity_chk_levels[%d] = %d\n",
+		       cpu, sched_cpu_affinity_chk_levels[cpu]);
 	}
 #endif
 }
@@ -7446,6 +7482,7 @@ void __init sched_init(void)
 	idle_thread_set_boot_cpu();
 #endif /* SMP */
 
+	sched_init_topology_cpumask_early();
 	init_schedstats();
 }
 
