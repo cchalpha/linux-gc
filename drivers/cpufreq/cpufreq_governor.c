@@ -549,6 +549,8 @@ void cpufreq_dbs_governor_stop(struct cpufreq_policy *policy)
 	cancel_work_sync(&policy_dbs->work);
 	atomic_set(&policy_dbs->work_count, 0);
 	policy_dbs->work_in_progress = false;
+
+	cpu_nonscaling(policy->cpu);
 }
 EXPORT_SYMBOL_GPL(cpufreq_dbs_governor_stop);
 
