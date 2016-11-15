@@ -5505,10 +5505,9 @@ SYSCALL_DEFINE2(sched_rr_get_interval, pid_t, pid,
 	raw_spinlock_t *lock;
 
 
-	printk(KERN_INFO "vrq: %d [%d]=%d [%d]=%d\n",
-	       NR_CPU_AFFINITY_CHK_LEVEL,
-	       0, per_cpu(sd_llc_id,0),
-	       1, per_cpu(sd_llc_id, 1));
+	printk(KERN_INFO "vrq: [%d]=%d [%d]=%d\n",
+	       0, cpu_rq(0)->scaling,
+	       1, cpu_rq(1)->scaling);
 	/*
 	printk(KERN_INFO "vrq: %d %d %d\n", bfs_test[0], bfs_test[1],
 	       bfs_test[2]);
@@ -7436,6 +7435,7 @@ void __init sched_init(void)
 	init_defrootdomain();
 	cpumask_clear(&sched_cpu_idle_mask);
 	cpumask_clear(&sched_queued_task_mask);
+	cpumask_setall(&sched_cpu_non_scaled_mask);
 #ifndef CONFIG_64BIT
 	raw_spin_lock_init(&sched_cpu_priodls_lock);
 #endif
@@ -7445,6 +7445,7 @@ void __init sched_init(void)
 	for_each_possible_cpu(i) {
 		rq = cpu_rq(i);
 		FULL_INIT_SKIPLIST_NODE(&rq->sl_header);
+		rq->scaling = 0;
 		rq->nr_queued = 0;
 		rq->try_preempt_tsk = NULL;
 		raw_spin_lock_init(&rq->lock);
