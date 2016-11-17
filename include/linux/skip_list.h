@@ -109,13 +109,15 @@ static inline int skiplist_empty(const struct skiplist_node *head)
  * function, which takes two parameters, first one is the header node of the
  * skip list, second one is the skip list node to be inserted
  * @func_name: the customized skip list insert function name
- * @search_func: the compare function to be used, which takes two parameters,
+ * @search_func: the search function to be used, which takes two parameters,
  * 1st one is the itrator of skiplist_node in the list, the 2nd is the skip list
  * node to be inserted, the function should return true if search should be
  * continued, otherwise return false.
+ * Returns 1 if @node is inserted as the first item of skip list at level zero,
+ * otherwise 0
  */
 #define DEFINE_SKIPLIST_INSERT_FUNC(func_name, search_func)\
-static inline void func_name(struct skiplist_node *head, struct skiplist_node *node)\
+static inline int func_name(struct skiplist_node *head, struct skiplist_node *node)\
 {\
 	struct skiplist_node *update[NUM_SKIPLIST_LEVEL];\
 	struct skiplist_node *p, *q;\
@@ -142,6 +144,8 @@ static inline void func_name(struct skiplist_node *head, struct skiplist_node *n
 		node->prev[k] = p;\
 		q->prev[k] = node;\
 	} while (--k >= 0);\
+\
+	return (p == head);\
 }
 
 /**
@@ -150,8 +154,9 @@ static inline void func_name(struct skiplist_node *head, struct skiplist_node *n
  * @head: the header node of the skip list to be deleted from.
  * @node: the skip list node to be deleted, the caller need to ensure @node is
  * in skip list which @head represent.
+ * Returns 1 if @node is the first item of skip level at level zero, otherwise 0
  */
-static inline void
+static inline int
 skiplist_del_init(struct skiplist_node *head, struct skiplist_node *node)
 {
 	int l, m = node->level;
@@ -166,5 +171,7 @@ skiplist_del_init(struct skiplist_node *head, struct skiplist_node *node)
 		head->level = m;
 	}
 	INIT_SKIPLIST_NODE(node);
+
+	return (node->prev[0] == head);
 }
 #endif /* _LINUX_SKIP_LIST_H */
