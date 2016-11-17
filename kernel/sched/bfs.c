@@ -203,7 +203,16 @@ static inline int timeslice(void)
 static cpumask_t sched_cpu_idle_mask ____cacheline_aligned_in_smp;
 static cpumask_t sched_cpu_non_scaled_mask ____cacheline_aligned_in_smp;
 
-static cpumask_t sched_queued_task_mask ____cacheline_aligned_in_smp;
+#define	SCHED_RQ_RT_QUEUED			0
+#define	SCHED_RQ_NORMAL_QUEUED			1
+#define	SCHED_RQ_IDLE_QUEUED			2
+#define	SCHED_RQ_EMPTY_QUEUED			3
+#define	NR_SCHED_RQ_QUEUED_LEVEL		4
+
+static cpumask_t sched_rq_queued_masks[NR_SCHED_RQ_QUEUED_LEVEL]
+____cacheline_aligned_in_smp;
+
+static int sched_rq_queued_check_level ____cacheline_aligned_in_smp;
 
 static cpumask_t
 sched_cpu_affinity_chk_masks[NR_CPUS][NR_CPU_AFFINITY_CHK_LEVEL]
@@ -388,7 +397,8 @@ static inline struct rq
 			raw_spin_unlock(&rq->lock);
 		} else if (task_queued(p)) {
 			raw_spin_lock(&rq->lock);
-			if (likely(!p->on_cpu && task_queued(p) && rq == task_rq(p))) {
+			if (likely(!p->on_cpu && task_queued(p) &&
+				   rq == task_rq(p))) {
 				*plock = &rq->lock;
 				return rq;
 			}
@@ -408,7 +418,8 @@ __task_access_unlock(struct task_struct *p, raw_spinlock_t *lock)
 }
 
 static inline struct rq
-*task_access_lock_irqsave(struct task_struct *p, raw_spinlock_t **plock, unsigned long *flags)
+*task_access_lock_irqsave(struct task_struct *p, raw_spinlock_t **plock,
+			  unsigned long *flags)
 {
 	struct rq *rq;
 	for (;;) {
@@ -422,14 +433,16 @@ static inline struct rq
 			raw_spin_unlock_irqrestore(&rq->lock, *flags);
 		} else if (task_queued(p)) {
 			raw_spin_lock_irqsave(&rq->lock, *flags);
-			if (likely(!p->on_cpu && task_queued(p) && rq == task_rq(p))) {
+			if (likely(!p->on_cpu && task_queued(p) &&
+				   rq == task_rq(p))) {
 				*plock = &rq->lock;
 				return rq;
 			}
 			raw_spin_unlock_irqrestore(&rq->lock, *flags);
 		} else {
 			raw_spin_lock_irqsave(&p->pi_lock, *flags);
-			if (likely(!p->on_cpu && !task_queued(p) && rq == task_rq(p))) {
+			if (likely(!p->on_cpu && !task_queued(p) &&
+				   rq == task_rq(p))) {
 				*plock = &p->pi_lock;
 				return rq;
 			}
@@ -439,7 +452,8 @@ static inline struct rq
 }
 
 static inline void
-task_access_unlock_irqrestore(struct task_struct *p, raw_spinlock_t *lock, unsigned long *flags)
+task_access_unlock_irqrestore(struct task_struct *p, raw_spinlock_t *lock,
+			      unsigned long *flags)
 {
 	raw_spin_unlock_irqrestore(lock, *flags);
 }
@@ -515,6 +529,47 @@ static inline void sched_cpu_priodls_unlock(void)
 }
 #endif
 
+static inline int task_rq_queued_level(const struct task_struct *p)
+{
+	int prio;
+
+	if (NULL == p)
+		return SCHED_RQ_EMPTY_QUEUED;
+
+	prio = p->prio;
+	if (prio <= ISO_PRIO)
+		return SCHED_RQ_RT_QUEUED;
+	return prio - ISO_PRIO;
+}
+
+static inline struct task_struct *
+rq_first_queued_task(struct rq *rq)
+{
+	struct skiplist_node *node = &rq->sl_header;
+
+	if ((node = node->next[0]) == &rq->sl_header)
+		return NULL;
+
+	return skiplist_entry(node, struct task_struct, sl_node);
+}
+
+static inline void update_sched_rq_queued_masks(struct rq *rq)
+{
+	int cpu = cpu_of(rq);
+	int level = task_rq_queued_level(rq_first_queued_task(rq));
+	int last_level = rq->last_tagged_queued_level;
+
+	if (last_level != level) {
+		cpumask_clear_cpu(cpu, &sched_rq_queued_masks[last_level]);
+		cpumask_set_cpu(cpu, &sched_rq_queued_masks[level]);
+		rq->last_tagged_queued_level = level;
+		if (unlikely(SCHED_RQ_RT_QUEUED == level))
+			sched_rq_queued_check_level = SCHED_RQ_RT_QUEUED;
+		if (unlikely(SCHED_RQ_RT_QUEUED == last_level))
+			sched_rq_queued_check_level = SCHED_RQ_RT_QUEUED + 1;
+	}
+}
+
 /*
  * Removing from the global runqueue. Deleting a task from the skip list is done
  * via the stored node reference in the task struct and does not require a full
@@ -529,10 +584,9 @@ static void dequeue_task(struct task_struct *p, struct rq *rq)
 
 	WARN_ONCE(task_rq(p) != rq, "bfs: dequeue task reside on cpu%d from cpu%d\n",
 		  task_cpu(p), cpu_of(rq));
-	skiplist_del_init(&rq->sl_header, &p->sl_node);
+	if (skiplist_del_init(&rq->sl_header, &p->sl_node))
+		update_sched_rq_queued_masks(rq);
 	rq->nr_queued--;
-	if (unlikely(skiplist_empty(&rq->sl_header)))
-		cpumask_clear_cpu(cpu_of(rq), &sched_queued_task_mask);
 
 	sched_info_dequeued(task_rq(p), p);
 }
@@ -623,9 +677,9 @@ static void enqueue_task(struct task_struct *p, struct rq *rq)
 		  task_cpu(p), cpu_of(rq));
 
 	p->sl_node.level = p->sl_level;
-	bfs_skiplist_insert(&rq->sl_header, &p->sl_node);
+	if (bfs_skiplist_insert(&rq->sl_header, &p->sl_node))
+		update_sched_rq_queued_masks(rq);
 	rq->nr_queued++;
-	cpumask_set_cpu(cpu_of(rq), &sched_queued_task_mask);
 
 	sched_info_queued(rq, p);
 }
@@ -3573,15 +3627,21 @@ static inline struct task_struct * take_other_rq_task(int cpu)
 {
 	int level;
 	struct cpumask chk_mask, tmp;
+	struct cpumask *queued_mask;
 	struct task_struct *p;
 
-	cpumask_and(&chk_mask, &sched_queued_task_mask, cpu_active_mask);
-	for (level = 0; level < sched_cpu_affinity_chk_levels[cpu]; level++)
-		if (cpumask_and(&tmp, &chk_mask,
-				&sched_cpu_affinity_chk_masks[cpu][level])) {
-			if ((p = take_queued_task_cpumask(cpu, &tmp)))
-				return p;
-		}
+	for (queued_mask = &sched_rq_queued_masks[sched_rq_queued_check_level];
+	     queued_mask < &sched_rq_queued_masks[SCHED_RQ_EMPTY_QUEUED];
+	     queued_mask++) {
+		if (!cpumask_and(&chk_mask, queued_mask, cpu_active_mask))
+			continue;
+		for (level = 0; level < sched_cpu_affinity_chk_levels[cpu]; level++)
+			if (cpumask_and(&tmp, &chk_mask,
+					&sched_cpu_affinity_chk_masks[cpu][level])) {
+				if ((p = take_queued_task_cpumask(cpu, &tmp)))
+					return p;
+			}
+	}
 
 	return NULL;
 }
@@ -5504,10 +5564,14 @@ SYSCALL_DEFINE2(sched_rr_get_interval, pid_t, pid,
 	struct timespec t;
 	raw_spinlock_t *lock;
 
-
-	printk(KERN_INFO "vrq: [%d]=%d [%d]=%d\n",
-	       0, cpu_rq(0)->scaling,
-	       1, cpu_rq(1)->scaling);
+	printk(KERN_INFO "vrq: %d 0-%d/1-%d = 0x%02lu 0x%02lu 0x%02lu 0x%02lu\n",
+	       sched_rq_queued_check_level,
+	       cpu_rq(0)->last_tagged_queued_level,
+	       cpu_rq(1)->last_tagged_queued_level,
+	       sched_rq_queued_masks[0].bits[0],
+	       sched_rq_queued_masks[1].bits[0],
+	       sched_rq_queued_masks[2].bits[0],
+	       sched_rq_queued_masks[3].bits[0]);
 	/*
 	printk(KERN_INFO "vrq: %d %d %d\n", bfs_test[0], bfs_test[1],
 	       bfs_test[2]);
@@ -7434,8 +7498,11 @@ void __init sched_init(void)
 #ifdef CONFIG_SMP
 	init_defrootdomain();
 	cpumask_clear(&sched_cpu_idle_mask);
-	cpumask_clear(&sched_queued_task_mask);
 	cpumask_setall(&sched_cpu_non_scaled_mask);
+
+	for (i = 0; i < NR_SCHED_RQ_QUEUED_LEVEL; i++)
+		cpumask_clear(&sched_rq_queued_masks[i]);
+	sched_rq_queued_check_level = SCHED_RQ_RT_QUEUED + 1;
 #ifndef CONFIG_64BIT
 	raw_spin_lock_init(&sched_cpu_priodls_lock);
 #endif
@@ -7459,6 +7526,7 @@ void __init sched_init(void)
 		rq->online = false;
 		rq->cpu = i;
 		rq_attach_root(rq, &def_root_domain);
+		rq->last_tagged_queued_level = 3;
 #endif
 		rq->nr_switches = 0;
 		atomic_set(&rq->nr_iowait, 0);
