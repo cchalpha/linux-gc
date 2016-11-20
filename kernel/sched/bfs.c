@@ -218,7 +218,8 @@ static cpumask_t
 sched_cpu_affinity_chk_masks[NR_CPUS][NR_CPU_AFFINITY_CHK_LEVEL]
 ____cacheline_aligned_in_smp;
 
-static int sched_cpu_affinity_chk_levels[NR_CPUS] ____cacheline_aligned_in_smp;
+static cpumask_t *
+sched_cpu_affinity_chk_masks_end[NR_CPUS] ____cacheline_aligned_in_smp;
 
 #ifndef CONFIG_64BIT
 static raw_spinlock_t sched_cpu_priodls_lock ____cacheline_aligned_in_smp;
@@ -3625,9 +3626,8 @@ take_queued_task_cpumask(int cpu, struct cpumask *chk_mask)
 
 static inline struct task_struct * take_other_rq_task(int cpu)
 {
-	int level;
 	struct cpumask chk_mask, tmp;
-	struct cpumask *queued_mask;
+	struct cpumask *queued_mask, *affinity_mask, *end;
 	struct task_struct *p;
 
 	for (queued_mask = &sched_rq_queued_masks[sched_rq_queued_check_level];
@@ -3635,9 +3635,10 @@ static inline struct task_struct * take_other_rq_task(int cpu)
 	     queued_mask++) {
 		if (!cpumask_and(&chk_mask, queued_mask, cpu_active_mask))
 			continue;
-		for (level = 0; level < sched_cpu_affinity_chk_levels[cpu]; level++)
-			if (cpumask_and(&tmp, &chk_mask,
-					&sched_cpu_affinity_chk_masks[cpu][level])) {
+		affinity_mask = &sched_cpu_affinity_chk_masks[cpu][0];
+		end = sched_cpu_affinity_chk_masks_end[cpu];
+		for (;affinity_mask < end; affinity_mask++)
+			if (cpumask_and(&tmp, &chk_mask, affinity_mask)) {
 				if ((p = take_queued_task_cpumask(cpu, &tmp)))
 					return p;
 			}
@@ -7361,7 +7362,8 @@ static void sched_init_topology_cpumask_early(void)
 			cpumask_copy(tmp, cpu_possible_mask);
 			cpumask_clear_cpu(cpu, tmp);
 		}
-		sched_cpu_affinity_chk_levels[cpu] = 1;
+		sched_cpu_affinity_chk_masks_end[cpu] =
+			&sched_cpu_affinity_chk_masks[cpu][1];
 	}
 }
 
@@ -7409,10 +7411,7 @@ static void sched_init_topology_cpumask(void)
 			chk++;
 		}
 
-		sched_cpu_affinity_chk_levels[cpu] = chk -
-			&sched_cpu_affinity_chk_masks[cpu][0];
-		printk(KERN_INFO "vrq: sched_cpu_affinity_chk_levels[%d] = %d\n",
-		       cpu, sched_cpu_affinity_chk_levels[cpu]);
+		sched_cpu_affinity_chk_masks_end[cpu] = chk;
 	}
 #endif
 }
