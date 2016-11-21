@@ -2037,9 +2037,9 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 	 * value. rq->rq_deadline is only modified within schedule() so it
 	 * is always equal to current->deadline.
 	 */
-	if (unlikely(p->policy == SCHED_FIFO)) {
+	if (likely(p->policy != SCHED_FIFO)) {
 		raw_spin_lock(&rq->lock);
-		rq->rq_time_slice /=2;
+		rq->rq_time_slice /= 2;
 		p->time_slice = rq->rq_time_slice;
 		if (p->time_slice < RESCHED_US)
 			time_slice_expired(p, rq);
