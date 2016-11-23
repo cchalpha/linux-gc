@@ -2038,14 +2038,14 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 	 * is always equal to current->deadline.
 	 */
 	if (likely(p->policy != SCHED_FIFO)) {
-		raw_spin_lock(&rq->lock);
+		raw_spin_lock_irqsave(&rq->lock, flags);
 		rq->rq_time_slice /= 2;
 		p->time_slice = rq->rq_time_slice;
 		if (p->time_slice < RESCHED_US)
 			time_slice_expired(p, rq);
 		else
 			update_task_priodl(p);
-		raw_spin_unlock(&rq->lock);
+		raw_spin_unlock_irqrestore(&rq->lock, flags);
 	}
 
 	/*
