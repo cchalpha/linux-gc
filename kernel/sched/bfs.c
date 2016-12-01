@@ -2031,21 +2031,27 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 	/*
 	 * Share the timeslice between parent and child, thus the
 	 * total amount of pending timeslices in the system doesn't change,
-	 * resulting in more scheduling fairness. If it's negative, it won't
-	 * matter since that's the same as being 0. current's time_slice is
-	 * actually in rq_time_slice when it's running, as is its last_ran
-	 * value. rq->rq_deadline is only modified within schedule() so it
-	 * is always equal to current->deadline.
+	 * resulting in more scheduling fairness. But this limited the fork
+	 * boost in one time slice. So punishment for run queue time slice only
+	 * apply to IDLE and BATCH policy tasks.
+	 * If it's negative, it won't matter since that's the same as being 0.
+	 * current's time_slice is actually in rq_time_slice when it's running,
+	 * as is its last_ran value. rq->rq_deadline is only modified within
+	 * schedule() so it is always equal to current->deadline.
 	 */
 	if (likely(p->policy != SCHED_FIFO)) {
-		raw_spin_lock_irqsave(&rq->lock, flags);
-		rq->rq_time_slice /= 2;
-		p->time_slice = rq->rq_time_slice;
+		local_irq_disable();
+		if (idleprio_task(p) || batch_task(p)) {
+			rq->rq_time_slice /= 2;
+			p->time_slice = rq->rq_time_slice;
+		} else
+			p->time_slice = rq->rq_time_slice / 2;
+		local_irq_enable();
+
 		if (p->time_slice < RESCHED_US)
 			time_slice_expired(p, rq);
 		else
 			update_task_priodl(p);
-		raw_spin_unlock_irqrestore(&rq->lock, flags);
 	}
 
 	/*
