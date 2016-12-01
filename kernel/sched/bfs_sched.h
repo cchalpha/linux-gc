@@ -69,6 +69,7 @@ struct rq {
 	unsigned long nr_uninterruptible;
 
 	int last_tagged_queued_level;
+	int last_running_policy_level;
 
 #ifdef CONFIG_SCHEDSTATS
 
