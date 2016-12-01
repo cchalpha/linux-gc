@@ -943,18 +943,6 @@ out:
 	rcu_read_unlock();
 }
 
-static inline struct rq *task_best_idle_rq(struct task_struct *p)
-{
-	cpumask_t check;
-
-	if (cpumask_and(&check, &p->cpus_allowed,
-			&sched_rq_running_masks[SCHED_RQ_IDLE_TSK])) {
-		int best_cpu = best_mask_cpu(task_cpu(p), &check);
-		return cpu_rq(best_cpu);
-	}
-
-	return NULL;
-}
 
 /*
  * Flags to tell us whether this CPU is running a CPU frequency governor that
@@ -979,11 +967,6 @@ static inline bool scaling_rq(struct rq *rq)
 }
 
 #else /* CONFIG_SMP */
-static inline struct rq *task_best_idle_rq(struct task_struct *p)
-{
-	return NULL;
-}
-
 void cpu_scaling(int __unused)
 {
 }
@@ -2414,7 +2397,6 @@ context_switch(struct rq *rq, struct task_struct *prev,
 	       struct task_struct *next)
 {
 	struct mm_struct *mm, *oldmm;
-	struct rq *prq;
 
 	prepare_task_switch(rq, prev, next);
 
@@ -2450,23 +2432,7 @@ context_switch(struct rq *rq, struct task_struct *prev,
 	switch_to(prev, next, prev);
 	barrier();
 
-	/*
-	 * Before unlock rq, record rq which need to be rescheduled in the stack
-	 */
-	rq = this_rq();
-	if (rq->try_preempt_tsk) {
-		prq = (current == rq->try_preempt_tsk)?
-			NULL:
-			task_best_idle_rq(rq->try_preempt_tsk);
-		rq->try_preempt_tsk = NULL;
-	} else
-		prq = NULL;
-
-	rq = finish_task_switch(prev);
-
-	preempt_rq(prq);
-
-	return rq;
+	return finish_task_switch(prev);
 }
 
 /*
@@ -3811,10 +3777,8 @@ static void __sched notrace __schedule(bool preempt)
 					/* This shouldn't happen, but does */
 					if (unlikely(to_wakeup == prev))
 						deactivate = false;
-					else {
+					else
 						try_to_wake_up_local(to_wakeup);
-						rq->try_preempt_tsk = to_wakeup;
-					}
 				}
 			}
 		}
@@ -7511,7 +7475,6 @@ void __init sched_init(void)
 		FULL_INIT_SKIPLIST_NODE(&rq->sl_header);
 		rq->scaling = 0;
 		rq->nr_queued = 0;
-		rq->try_preempt_tsk = NULL;
 		raw_spin_lock_init(&rq->lock);
 		rq->user_pc = rq->nice_pc = rq->softirq_pc = rq->system_pc =
 			      rq->iowait_pc = rq->idle_pc = 0;
