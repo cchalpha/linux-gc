@@ -200,14 +200,17 @@ static inline int timeslice(void)
 }
 
 #ifdef CONFIG_SMP
-static cpumask_t sched_cpu_idle_mask ____cacheline_aligned_in_smp;
 static cpumask_t sched_cpu_non_scaled_mask ____cacheline_aligned_in_smp;
 
-#define	SCHED_RQ_RT_QUEUED			0
-#define	SCHED_RQ_NORMAL_QUEUED			1
-#define	SCHED_RQ_IDLE_QUEUED			2
+#define	SCHED_RQ_RT_PL				0
+#define	SCHED_RQ_NORMAL_PL			1
+#define	SCHED_RQ_IDLE_PL			2
+#define	SCHED_RQ_IDLE_TSK			3
 #define	SCHED_RQ_EMPTY_QUEUED			3
 #define	NR_SCHED_RQ_QUEUED_LEVEL		4
+
+static cpumask_t sched_rq_running_masks[NR_SCHED_RQ_QUEUED_LEVEL]
+____cacheline_aligned_in_smp;
 
 static cpumask_t sched_rq_queued_masks[NR_SCHED_RQ_QUEUED_LEVEL]
 ____cacheline_aligned_in_smp;
@@ -530,7 +533,7 @@ static inline void sched_cpu_priodls_unlock(void)
 }
 #endif
 
-static inline int task_rq_queued_level(const struct task_struct *p)
+static inline int task_running_policy_level(const struct task_struct *p)
 {
 	int prio;
 
@@ -539,7 +542,7 @@ static inline int task_rq_queued_level(const struct task_struct *p)
 
 	prio = p->prio;
 	if (prio <= ISO_PRIO)
-		return SCHED_RQ_RT_QUEUED;
+		return SCHED_RQ_RT_PL;
 	return prio - ISO_PRIO;
 }
 
@@ -554,20 +557,34 @@ rq_first_queued_task(struct rq *rq)
 	return skiplist_entry(node, struct task_struct, sl_node);
 }
 
+static inline void
+update_sched_rq_running_masks(struct rq *rq, struct task_struct *p)
+{
+	int cpu = cpu_of(rq);
+	int policy = task_running_policy_level(p);
+	int last_policy = rq->last_running_policy_level;
+
+	if (last_policy != policy) {
+		cpumask_clear_cpu(cpu, &sched_rq_running_masks[last_policy]);
+		cpumask_set_cpu(cpu, &sched_rq_running_masks[policy]);
+		rq->last_running_policy_level = policy;
+	}
+}
+
 static inline void update_sched_rq_queued_masks(struct rq *rq)
 {
 	int cpu = cpu_of(rq);
-	int level = task_rq_queued_level(rq_first_queued_task(rq));
+	int level = task_running_policy_level(rq_first_queued_task(rq));
 	int last_level = rq->last_tagged_queued_level;
 
 	if (last_level != level) {
 		cpumask_clear_cpu(cpu, &sched_rq_queued_masks[last_level]);
 		cpumask_set_cpu(cpu, &sched_rq_queued_masks[level]);
 		rq->last_tagged_queued_level = level;
-		if (unlikely(SCHED_RQ_RT_QUEUED == level))
-			sched_rq_queued_check_level = SCHED_RQ_RT_QUEUED;
-		if (unlikely(SCHED_RQ_RT_QUEUED == last_level))
-			sched_rq_queued_check_level = SCHED_RQ_RT_QUEUED + 1;
+		if (unlikely(SCHED_RQ_RT_PL == level))
+			sched_rq_queued_check_level = SCHED_RQ_RT_PL;
+		if (unlikely(SCHED_RQ_RT_PL == last_level))
+			sched_rq_queued_check_level = SCHED_RQ_RT_PL + 1;
 	}
 }
 
@@ -792,28 +809,6 @@ static inline void preempt_rq(struct rq * rq)
 }
 
 #ifdef CONFIG_SMP
-/*
- * The sched_cpu_idle_mask stores a bitmap of all the CPUs currently idle to
- * allow easy lookup of whether any suitable idle CPUs are available.
- * It's cheaper to maintain a binary yes/no if there are any idle CPUs on the
- * idle_cpus variable than to do a full bitmask check when we are busy.
- */
-static inline void set_cpuidle_map(int cpu)
-{
-	if (likely(cpu_online(cpu)))
-		cpumask_set_cpu(cpu, &sched_cpu_idle_mask);
-}
-
-static inline void clear_cpuidle_map(int cpu)
-{
-	cpumask_clear_cpu(cpu, &sched_cpu_idle_mask);
-}
-
-static inline bool suitable_idle_cpus(struct task_struct *p)
-{
-	return (cpumask_intersects(tsk_cpus_allowed(p), &sched_cpu_idle_mask));
-}
-
 static inline bool scaling_rq(struct rq *rq);
 
 /*
@@ -950,12 +945,11 @@ out:
 
 static inline struct rq *task_best_idle_rq(struct task_struct *p)
 {
-        cpumask_t check_cpumask;
+	cpumask_t check;
 
-        if (cpumask_and(&check_cpumask, &p->cpus_allowed, &sched_cpu_idle_mask)) {
-		int best_cpu;
-
-                best_cpu = best_mask_cpu(task_cpu(p), &check_cpumask);
+	if (cpumask_and(&check, &p->cpus_allowed,
+			&sched_rq_running_masks[SCHED_RQ_IDLE_TSK])) {
+		int best_cpu = best_mask_cpu(task_cpu(p), &check);
 		return cpu_rq(best_cpu);
 	}
 
@@ -985,22 +979,9 @@ static inline bool scaling_rq(struct rq *rq)
 }
 
 #else /* CONFIG_SMP */
-static inline void set_cpuidle_map(int cpu)
-{
-}
-
-static inline void clear_cpuidle_map(int cpu)
-{
-}
-
 static inline struct rq *task_best_idle_rq(struct task_struct *p)
 {
 	return NULL;
-}
-
-static inline bool suitable_idle_cpus(struct task_struct *p)
-{
-	return uprq->curr == uprq->idle;
 }
 
 void cpu_scaling(int __unused)
@@ -1582,30 +1563,41 @@ static inline bool needs_other_cpu(struct task_struct *p, int cpu)
 /*
  * task_preemptible_rq - return the rq which the given task can preempt on
  * @p: task wants to preempt cpu
- * @only_preempt_idle: indicate only preempt idle rq or not
+ * @only_preempt_low_policy: indicate only preempt rq running low policy than @p
  */
 static struct rq*
-task_preemptible_rq(struct task_struct *p, int only_preempt_idle)
+task_preemptible_rq(struct task_struct *p, int only_preempt_low_policy)
 {
 	int cpu;
 	cpumask_t tmp, check;
+	cpumask_t *mask, *preempt_mask;
 
 	if (unlikely(!cpumask_and(&check, tsk_cpus_allowed(p),
 				  cpu_online_mask)))
 		return NULL;
 
-	/* check idle rq */
-	if(likely(cpumask_and(&tmp, &check, &sched_cpu_idle_mask))) {
-		cpu = best_mask_cpu(task_cpu(p), &tmp);
-		return cpu_rq(cpu);
+	preempt_mask = &sched_rq_running_masks[task_running_policy_level(p)];
+	mask = &sched_rq_running_masks[SCHED_RQ_IDLE_TSK];
+	while (mask > preempt_mask) {
+		if(cpumask_and(&tmp, &check, mask)) {
+			cpu = best_mask_cpu(task_cpu(p), &tmp);
+			return cpu_rq(cpu);
+		}
+		mask--;
 	}
 
-	/* idle_preempt indicate just preempt idle rq */
-	if (unlikely(only_preempt_idle != 0))
+	/*
+	 * only_preempt_low_policy indicate just preempt rq running low policy
+	 * task than p
+	 */
+	if (unlikely(only_preempt_low_policy))
 		return NULL;
 
 	/* IDLEPRIO tasks never preempt anything but idle */
 	if (p->policy == SCHED_IDLEPRIO)
+		return NULL;
+
+	if (!cpumask_and(&check, &check, preempt_mask))
 		return NULL;
 
 	sched_cpu_priodls_lock();
@@ -3873,12 +3865,9 @@ static void __sched notrace __schedule(bool preempt)
 	}
 
 	if (likely(prev != next)) {
-		if (likely(next->prio != PRIO_LIMIT))
-			clear_cpuidle_map(cpu);
-		else {
-			set_cpuidle_map(cpu);
+		update_sched_rq_running_masks(rq, next);
+		if (unlikely(next->prio == PRIO_LIMIT))
 			schedstat_inc(rq->sched_goidle);
-		}
 
 		set_rq_task(rq, next);
 
@@ -5571,14 +5560,13 @@ SYSCALL_DEFINE2(sched_rr_get_interval, pid_t, pid,
 	struct timespec t;
 	raw_spinlock_t *lock;
 
-	printk(KERN_INFO "vrq: %d 0-%d/1-%d = 0x%02lu 0x%02lu 0x%02lu 0x%02lu\n",
-	       sched_rq_queued_check_level,
-	       cpu_rq(0)->last_tagged_queued_level,
-	       cpu_rq(1)->last_tagged_queued_level,
-	       sched_rq_queued_masks[0].bits[0],
-	       sched_rq_queued_masks[1].bits[0],
-	       sched_rq_queued_masks[2].bits[0],
-	       sched_rq_queued_masks[3].bits[0]);
+	printk(KERN_INFO "vrq: 0-%d/1-%d = 0x%02lu 0x%02lu 0x%02lu 0x%02lu\n",
+	       cpu_rq(0)->last_running_policy_level,
+	       cpu_rq(1)->last_running_policy_level,
+	       sched_rq_running_masks[0].bits[0],
+	       sched_rq_running_masks[1].bits[0],
+	       sched_rq_running_masks[2].bits[0],
+	       sched_rq_running_masks[3].bits[0]);
 	/*
 	printk(KERN_INFO "vrq: %d %d %d\n", bfs_test[0], bfs_test[1],
 	       bfs_test[2]);
@@ -7282,8 +7270,8 @@ int sched_cpu_activate(unsigned int cpu)
 	}
 	raw_spin_unlock_irqrestore(&rq->lock, flags);
 
-	/* set sched_cpu_idle_mask when cpu is online */
-	cpumask_set_cpu(cpu, &sched_cpu_idle_mask);
+	/* set sched_rq_running_masks[SCHED_RQ_IDLE_TSK] when cpu is online */
+	cpumask_set_cpu(cpu, &sched_rq_running_masks[SCHED_RQ_IDLE_TSK]);
 
 	return 0;
 }
@@ -7344,8 +7332,11 @@ int sched_cpu_dying(unsigned int cpu)
 	}
 	migrate_tasks(rq);
 
-	/* clear sched_cpu_idle_mask when cpu is offline, let it looks *busy* */
-	cpumask_clear_cpu(cpu, &sched_cpu_idle_mask);
+	/*
+	 * clear sched_rq_running_masks[SCHED_RQ_IDLE_TSK]when cpu is offline,
+	 * let it looks *busy*
+	 */
+	cpumask_clear_cpu(cpu, &sched_rq_running_masks[SCHED_RQ_IDLE_TSK]);
 	/*
 	 * VRQ: TODO debug load to test still need set rq to idle?
 	 */
@@ -7502,12 +7493,13 @@ void __init sched_init(void)
 
 #ifdef CONFIG_SMP
 	init_defrootdomain();
-	cpumask_clear(&sched_cpu_idle_mask);
 	cpumask_setall(&sched_cpu_non_scaled_mask);
 
 	for (i = 0; i < NR_SCHED_RQ_QUEUED_LEVEL; i++)
+		cpumask_clear(&sched_rq_running_masks[i]);
+	for (i = 0; i < NR_SCHED_RQ_QUEUED_LEVEL; i++)
 		cpumask_clear(&sched_rq_queued_masks[i]);
-	sched_rq_queued_check_level = SCHED_RQ_RT_QUEUED + 1;
+	sched_rq_queued_check_level = SCHED_RQ_RT_PL + 1;
 #ifndef CONFIG_64BIT
 	raw_spin_lock_init(&sched_cpu_priodls_lock);
 #endif
@@ -7532,6 +7524,9 @@ void __init sched_init(void)
 		rq->cpu = i;
 		rq_attach_root(rq, &def_root_domain);
 		rq->last_tagged_queued_level = 3;
+
+		cpumask_set_cpu(i, &sched_rq_running_masks[SCHED_RQ_IDLE_TSK]);
+		rq->last_running_policy_level = SCHED_RQ_IDLE_TSK;
 #endif
 		rq->nr_switches = 0;
 		atomic_set(&rq->nr_iowait, 0);
