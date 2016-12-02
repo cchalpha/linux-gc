@@ -186,11 +186,6 @@ int sched_iso_cpu __read_mostly = 70;
 static int prio_ratios[NICE_WIDTH] __read_mostly;
 
 /*
- * vrq debug
- */
-static int bfs_test[20];
-
-/*
  * The quota handed out to tasks of all priority levels when refilling their
  * time_slice.
  */
@@ -5525,23 +5520,6 @@ SYSCALL_DEFINE2(sched_rr_get_interval, pid_t, pid,
 	int retval;
 	struct timespec t;
 	raw_spinlock_t *lock;
-
-	printk(KERN_INFO "vrq: 0-%d/1-%d = 0x%02lu 0x%02lu 0x%02lu 0x%02lu\n",
-	       cpu_rq(0)->last_running_policy_level,
-	       cpu_rq(1)->last_running_policy_level,
-	       sched_rq_running_masks[0].bits[0],
-	       sched_rq_running_masks[1].bits[0],
-	       sched_rq_running_masks[2].bits[0],
-	       sched_rq_running_masks[3].bits[0]);
-	/*
-	printk(KERN_INFO "vrq: %d %d %d\n", bfs_test[0], bfs_test[1],
-	       bfs_test[2]);
-	printk(KERN_INFO "vrq: 0x%02lu %lu %lu\n", sched_cpu_idle_mask.bits[0],
-	       cpu_rq(0)->nr_queued, cpu_rq(1)->nr_queued);
-	printk(KERN_INFO "bfs: [0]=%lu %lu [1]=%lu %lu\n",
-	       cpu_rq(0)->nr_running, cpu_rq(0)->nr_uninterruptible,
-	       cpu_rq(1)->nr_running, cpu_rq(1)->nr_uninterruptible);
-	*/
 
 	if (pid < 0)
 		return -EINVAL;
