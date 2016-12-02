@@ -537,9 +537,6 @@ static inline int task_running_policy_level(const struct task_struct *p)
 {
 	int prio;
 
-	if (NULL == p)
-		return SCHED_RQ_EMPTY_QUEUED;
-
 	prio = p->prio;
 	if (prio <= ISO_PRIO)
 		return SCHED_RQ_RT_PL;
@@ -574,8 +571,13 @@ update_sched_rq_running_masks(struct rq *rq, struct task_struct *p)
 static inline void update_sched_rq_queued_masks(struct rq *rq)
 {
 	int cpu = cpu_of(rq);
-	int level = task_running_policy_level(rq_first_queued_task(rq));
-	int last_level = rq->last_tagged_queued_level;
+	int level, last_level = rq->last_tagged_queued_level;
+	struct task_struct *p;
+
+	if ((p = rq_first_queued_task(rq)) == NULL)
+		level = SCHED_RQ_EMPTY_QUEUED;
+	else
+		level = task_running_policy_level(p);
 
 	if (last_level != level) {
 		cpumask_clear_cpu(cpu, &sched_rq_queued_masks[last_level]);
