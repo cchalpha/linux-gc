@@ -3326,6 +3326,7 @@ void scheduler_tick(void)
 
 	update_rq_clock(rq);
 	update_cpu_clock_tick(rq, rq->curr);
+	cpufreq_update_util(rq, 0);
 	if (!rq_idle(rq))
 		task_running_tick(rq);
 	else
