@@ -1056,7 +1056,8 @@ static void activate_task(struct task_struct *p, struct rq *rq)
 	enqueue_task(p, rq);
 	rq->nr_running++;
 	p->on_rq = 1;
-	cpufreq_trigger(rq->clock, rq->nr_running + rq->nr_uninterruptible);
+	if (cpu_of(rq) == smp_processor_id())
+		cpufreq_trigger(rq->clock, rq->nr_running);
 }
 
 /*
@@ -1071,7 +1072,8 @@ static inline void deactivate_task(struct task_struct *p, struct rq *rq)
 		rq->nr_uninterruptible++;
 	p->on_rq = 0;
 	rq->nr_running--;
-	cpufreq_trigger(rq->clock, rq->nr_running + rq->nr_uninterruptible);
+	if (cpu_of(rq) == smp_processor_id())
+		cpufreq_trigger(rq->clock, rq->nr_running);
 }
 
 #ifdef CONFIG_SMP
@@ -3333,6 +3335,7 @@ void scheduler_tick(void)
 
 	update_rq_clock(rq);
 	update_cpu_clock_tick(rq, rq->curr);
+	cpufreq_trigger(rq->clock, rq->nr_running);
 	if (!rq_idle(rq))
 		task_running_tick(rq);
 	else

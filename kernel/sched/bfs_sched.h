@@ -201,11 +201,12 @@ DECLARE_PER_CPU(struct update_util_data *, cpufreq_update_util_data);
 
 static inline void cpufreq_trigger(u64 time, unsigned long util)
 {
-       struct update_util_data *data;
+	struct update_util_data *data;
+	unsigned long max = (util)? util:1UL;
 
-       data = rcu_dereference_sched(*this_cpu_ptr(&cpufreq_update_util_data));
-       if (data)
-               data->func(data, time, util, 0);
+	data = rcu_dereference_sched(*this_cpu_ptr(&cpufreq_update_util_data));
+	if (data)
+		data->func(data, time, util, max);
 }
 #else
 static inline void cpufreq_trigger(u64 time, unsigned long util)
