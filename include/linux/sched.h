@@ -2491,7 +2491,7 @@ static inline int set_cpus_allowed_ptr(struct task_struct *p,
 }
 #endif
 
-#if defined(CONFIG_NO_HZ_COMMON) && !defined(CONFIG_SCHED_BFS)
+#ifdef CONFIG_NO_HZ_COMMON
 void calc_load_enter_idle(void);
 void calc_load_exit_idle(void);
 #else
