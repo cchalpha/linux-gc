@@ -22,7 +22,7 @@ static inline void nohz_balance_enter_idle(int cpu) { }
 static inline void set_cpu_sd_state_idle(void) { }
 #endif
 
-#if defined(CONFIG_NO_HZ_COMMON) && !defined(CONFIG_SCHED_BFS)
+#ifdef CONFIG_NO_HZ_COMMON
 void calc_load_enter_idle(void);
 void calc_load_exit_idle(void);
 #else
