@@ -1,3 +1,6 @@
+#ifdef CONFIG_SCHED_BFS
+#include "bfs_sched.h"
+#else
 
 #include <linux/sched.h>
 #include <linux/sched/sysctl.h>
@@ -1813,3 +1816,5 @@ static inline void cpufreq_trigger_update(u64 time) {}
 #else /* arch_scale_freq_capacity */
 #define arch_scale_freq_invariant()	(false)
 #endif
+
+#endif /* CONFIG_SCHED_BFS */
