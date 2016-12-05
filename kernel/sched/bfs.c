@@ -2494,20 +2494,6 @@ unsigned long nr_iowait_cpu(int cpu)
 	return atomic_read(&this->nr_iowait);
 }
 
-static unsigned long nr_active(void)
-{
-	int i;
-	unsigned long long sum = 0;
-	struct rq *rq;
-
-	for_each_possible_cpu(i) {
-		rq = cpu_rq(i);
-		sum += rq->nr_running + rq->nr_uninterruptible;
-	}
-
-	return sum;
-}
-
 /* Beyond a task running on this CPU, load is equal everywhere on BFS, so we
  * base it on the number of running or queued tasks with their ->rq pointer
  * set to this cpu as being the CPU they're more likely to run on. */
@@ -2517,56 +2503,6 @@ void get_iowait_load(unsigned long *nr_waiters, unsigned long *load)
 
 	*nr_waiters = atomic_read(&rq->nr_iowait);
 	*load = rq->nr_running;
-}
-
-/* Variables and functions for calc_load */
-static unsigned long calc_load_update;
-unsigned long avenrun[3];
-EXPORT_SYMBOL(avenrun);
-
-/**
- * get_avenrun - get the load average array
- * @loads:	pointer to dest load array
- * @offset:	offset to add
- * @shift:	shift count to shift the result left
- *
- * These values are estimates at best, so no need for locking.
- */
-void get_avenrun(unsigned long *loads, unsigned long offset, int shift)
-{
-	loads[0] = (avenrun[0] + offset) << shift;
-	loads[1] = (avenrun[1] + offset) << shift;
-	loads[2] = (avenrun[2] + offset) << shift;
-}
-
-static unsigned long
-calc_load(unsigned long load, unsigned long exp, unsigned long active)
-{
-	unsigned long newload;
-
-	newload = load * exp + active * (FIXED_1 - exp);
-	if (active >= load)
-		newload += FIXED_1-1;
-
-	return newload / FIXED_1;
-}
-
-/*
- * calc_load - update the avenrun load estimates every LOAD_FREQ seconds.
- */
-void calc_global_load(unsigned long ticks)
-{
-	long active;
-
-	if (time_before(jiffies, calc_load_update))
-		return;
-	active = nr_active() * FIXED_1;
-
-	avenrun[0] = calc_load(avenrun[0], EXP_1, active);
-	avenrun[1] = calc_load(avenrun[1], EXP_5, active);
-	avenrun[2] = calc_load(avenrun[2], EXP_15, active);
-
-	calc_load_update = jiffies + LOAD_FREQ;
 }
 
 DEFINE_PER_CPU(struct kernel_stat, kstat);
@@ -3331,6 +3267,7 @@ void scheduler_tick(void)
 		task_running_tick(rq);
 	else
 		no_iso_tick(rq);
+	calc_global_load_tick(rq);
 	rq->last_tick = rq->clock;
 	raw_spin_unlock(&rq->lock);
 
@@ -7253,14 +7190,20 @@ int sched_cpu_deactivate(unsigned int cpu)
 	return 0;
 }
 
+static void sched_rq_cpu_starting(unsigned int cpu)
+{
+	struct rq *rq = cpu_rq(cpu);
+
+	rq->calc_load_update = calc_load_update;
+}
+
 int sched_cpu_starting(unsigned int cpu)
 {
 	/*
 	 * BFS doesn't have rq start time record
 	 * set_cpu_rq_start_time(cpu);
-	 * And do nothing in sched_rq_cpu_starting()
-	 * sched_rq_cpu_starting(cpu);
 	 */
+	sched_rq_cpu_starting(cpu);
 	return 0;
 }
 
@@ -7461,6 +7404,8 @@ void __init sched_init(void)
 			      rq->iowait_pc = rq->idle_pc = 0;
 		rq->dither = false;
 		rq->nr_running = rq->nr_uninterruptible = 0;
+		rq->calc_load_active = 0;
+		rq->calc_load_update = jiffies + LOAD_FREQ;
 #ifdef CONFIG_SMP
 		rq->sd = NULL;
 		rq->rd = NULL;
@@ -7491,6 +7436,8 @@ void __init sched_init(void)
 	 * when this runqueue becomes "idle".
 	 */
 	init_idle(current, smp_processor_id());
+
+	calc_load_update = jiffies + LOAD_FREQ;
 
 #ifdef CONFIG_SMP
 	zalloc_cpumask_var(&sched_domains_tmpmask, GFP_NOWAIT);

@@ -16,17 +16,17 @@ CFLAGS_core.o := $(PROFILING) -fno-omit-frame-pointer
 endif
 
 ifdef CONFIG_SCHED_BFS
-obj-y += bfs.o clock.o
+obj-y += bfs.o
 obj-$(CONFIG_SCHED_DEBUG) += bfs_debug.o
 else
-obj-y += core.o loadavg.o clock.o cputime.o
+obj-y += core.o cputime.o
 obj-y += idle_task.o fair.o rt.o deadline.o stop_task.o
 obj-$(CONFIG_SMP) += cpudeadline.o topology.o
 obj-$(CONFIG_SCHED_AUTOGROUP) += autogroup.o
 obj-$(CONFIG_SCHED_DEBUG) += debug.o
 obj-$(CONFIG_CGROUP_CPUACCT) += cpuacct.o
 endif
-obj-y += wait.o swait.o completion.o idle.o
+obj-y += wait.o swait.o completion.o idle.o clock.o loadavg.o
 obj-$(CONFIG_SMP) += cpupri.o
 obj-$(CONFIG_SCHEDSTATS) += stats.o
 obj-$(CONFIG_CPU_FREQ) += cpufreq.o

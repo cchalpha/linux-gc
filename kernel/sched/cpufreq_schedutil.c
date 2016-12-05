@@ -17,11 +17,7 @@
 #include <linux/slab.h>
 #include <trace/events/power.h>
 
-#ifdef CONFIG_SCHED_BFS
-#include "bfs_sched.h"
-#else
 #include "sched.h"
-#endif
 
 #define SUGOV_KTHREAD_PRIORITY	50
 
