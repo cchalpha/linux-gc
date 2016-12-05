@@ -60,6 +60,10 @@ struct rq {
 	u64 prev_steal_time_rq;
 #endif /* CONFIG_PARAVIRT_TIME_ACCOUNTING */
 
+	/* calc_load related fields */
+	unsigned long calc_load_update;
+	long calc_load_active;
+
 	u64 clock, last_tick;
 	u64 clock_task;
 	bool dither;
@@ -94,6 +98,12 @@ struct rq {
 	struct cpuidle_state *idle_state;
 #endif
 };
+
+extern unsigned long calc_load_update;
+extern atomic_long_t calc_load_tasks;
+
+extern void calc_global_load_tick(struct rq *this_rq);
+extern long calc_load_fold_active(struct rq *this_rq, long adjust);
 
 #ifdef CONFIG_SMP
 struct rq *cpu_rq(int cpu);
