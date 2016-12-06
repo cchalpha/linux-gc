@@ -217,7 +217,10 @@ sched_cpu_affinity_chk_masks[NR_CPUS][NR_CPU_AFFINITY_CHK_LEVEL]
 ____cacheline_aligned_in_smp;
 
 static cpumask_t *
-sched_cpu_affinity_chk_masks_end[NR_CPUS] ____cacheline_aligned_in_smp;
+sched_cpu_affinity_llc_end_masks[NR_CPUS] ____cacheline_aligned_in_smp;
+
+static cpumask_t *
+sched_cpu_affinity_chk_end_masks[NR_CPUS] ____cacheline_aligned_in_smp;
 
 #ifndef CONFIG_64BIT
 static raw_spinlock_t sched_cpu_priodls_lock ____cacheline_aligned_in_smp;
@@ -824,40 +827,24 @@ static inline bool scaling_rq(struct rq *rq);
  * All cpus avariable
  */
 
-static inline int llc_cpu_check(int cpu, cpumask_t *cpumask, cpumask_t *res_mask)
-{
-	return (
-#ifdef CONFIG_SCHED_SMT
-	/* SMT of the cpu */
-	cpumask_and(res_mask, cpumask, topology_sibling_cpumask(cpu)) ||
-#endif
+#define BEST_LLC_CPU(cpu, cpumask)	\
+	if (cpumask_test_cpu((cpu), (cpumask)))\
+		return (cpu);\
+\
+	mask = &sched_cpu_affinity_chk_masks[(cpu)][0];\
+	for (; mask < sched_cpu_affinity_llc_end_masks[(cpu)]; mask++)\
+		if (cpumask_and(&tmp, (cpumask), mask))\
+			return cpumask_any(&tmp);
 
-#ifdef CONFIG_SCHED_MC
-	/* Cores shares last level cache */
-	cpumask_and(res_mask, cpumask, cpu_coregroup_mask(cpu))
-#else
-	0
-#endif
-	);
-}
-
-static inline int nonllc_cpu_check(int cpu, cpumask_t *cpumask, cpumask_t *res_mask)
-{
-	return (
-#ifdef CONFIG_SCHED_MC
-	/* Cores within the same physical cpu */
-	cpumask_and(res_mask, cpumask, topology_core_cpumask(cpu)) ||
-#endif
-
-	/* Cpus/Cores within the local NODE */
-	cpumask_and(res_mask, cpumask, cpu_cpu_mask(cpu))
-	);
-}
+#define BEST_NONLLC_CPU(cpu, cpumask)	\
+	mask = sched_cpu_affinity_llc_end_masks[(cpu)];\
+	for (; mask < sched_cpu_affinity_chk_end_masks[(cpu)]; mask++)\
+		if (cpumask_and(&tmp, (cpumask), mask))\
+			return cpumask_any(&tmp);
 
 static inline int best_mask_cpu(const int cpu, cpumask_t *cpumask)
 {
-	cpumask_t tmpmask, non_scaled_mask;
-	cpumask_t *res_mask = &tmpmask;
+	struct cpumask non_scaled_mask, tmp, *mask;
 
 	if (cpumask_weight(cpumask) == 1)
 		return cpumask_first(cpumask);
@@ -866,53 +853,36 @@ static inline int best_mask_cpu(const int cpu, cpumask_t *cpumask)
 		/*
 		 * non_scaled llc cpus checking
 		 */
-		if (llc_cpu_check(cpu, &non_scaled_mask, res_mask)) {
-			if (cpumask_test_cpu(cpu, res_mask))
-				return cpu;
-			return cpumask_first(res_mask);
-		}
+		BEST_LLC_CPU(cpu, &non_scaled_mask);
 		/*
 		 * scaling llc cpus checking
 		 */
-		if (llc_cpu_check(cpu, cpumask, res_mask)) {
-			if (cpumask_test_cpu(cpu, res_mask))
-				return cpu;
-			return cpumask_first(res_mask);
-		}
+		BEST_LLC_CPU(cpu, cpumask);
 
 		/*
 		 * non_scaled non_llc cpus checking
 		 */
-		if (nonllc_cpu_check(cpu, &non_scaled_mask, res_mask))
-			return cpumask_first(res_mask);
+		BEST_NONLLC_CPU(cpu, &non_scaled_mask);
 		/*
 		 * scaling non_llc cpus checking
 		 */
-		if (nonllc_cpu_check(cpu, cpumask, res_mask))
-			return cpumask_first(res_mask);
+		BEST_NONLLC_CPU(cpu, cpumask);
 
 		/* All cpus avariable */
-
 		return cpumask_first(cpumask);
 	}
 
 	/*
 	 * scaling llc cpus checking
 	 */
-	if (llc_cpu_check(cpu, cpumask, res_mask)) {
-		if (cpumask_test_cpu(cpu, res_mask))
-			return cpu;
-		return cpumask_first(res_mask);
-	}
+	BEST_LLC_CPU(cpu, cpumask);
 
 	/*
 	 * scaling non_llc cpus checking
 	 */
-	if (nonllc_cpu_check(cpu, cpumask, res_mask))
-		return cpumask_first(res_mask);
+	BEST_NONLLC_CPU(cpu, cpumask);
 
 	/* All cpus avariable */
-
 	return cpumask_first(cpumask);
 }
 
@@ -3535,7 +3505,7 @@ static inline struct task_struct * take_other_rq_task(int cpu)
 		if (!cpumask_and(&chk_mask, queued_mask, cpu_active_mask))
 			continue;
 		affinity_mask = &sched_cpu_affinity_chk_masks[cpu][0];
-		end = sched_cpu_affinity_chk_masks_end[cpu];
+		end = sched_cpu_affinity_chk_end_masks[cpu];
 		for (;affinity_mask < end; affinity_mask++)
 			if (cpumask_and(&tmp, &chk_mask, affinity_mask)) {
 				if ((p = take_queued_task_cpumask(cpu, &tmp)))
@@ -7247,7 +7217,8 @@ static void sched_init_topology_cpumask_early(void)
 			cpumask_copy(tmp, cpu_possible_mask);
 			cpumask_clear_cpu(cpu, tmp);
 		}
-		sched_cpu_affinity_chk_masks_end[cpu] =
+		sched_cpu_affinity_chk_end_masks[cpu] =
+		sched_cpu_affinity_llc_end_masks[cpu] =
 			&sched_cpu_affinity_chk_masks[cpu][1];
 	}
 }
@@ -7280,6 +7251,8 @@ static void sched_init_topology_cpumask(void)
 			chk++;
 		}
 #endif
+		sched_cpu_affinity_llc_end_masks[cpu] = chk;
+
 		cpumask_complement(&tmp, cpu_coregroup_mask(cpu));
 		if (cpumask_and(&tmp, &tmp, topology_core_cpumask(cpu))) {
 			printk(KERN_INFO "vrq: sched_cpu_affinity_chk_masks[%d] core 0x%02lu",
@@ -7296,7 +7269,7 @@ static void sched_init_topology_cpumask(void)
 			chk++;
 		}
 
-		sched_cpu_affinity_chk_masks_end[cpu] = chk;
+		sched_cpu_affinity_chk_end_masks[cpu] = chk;
 	}
 #endif
 }
