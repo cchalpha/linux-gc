@@ -1610,14 +1610,14 @@ ttwu_stat(struct task_struct *p, int cpu, int wake_flags)
 	int this_cpu = smp_processor_id();
 
 	if (cpu == this_cpu)
-		schedstat_inc(rq, ttwu_local);
+		schedstat_inc(rq->ttwu_local);
 	else {
 		struct sched_domain *sd;
 
 		rcu_read_lock();
 		for_each_domain(this_cpu, sd) {
 			if (cpumask_test_cpu(cpu, sched_domain_span(sd))) {
-				schedstat_inc(sd, ttwu_wake_remote);
+				schedstat_inc(sd->ttwu_wake_remote);
 				break;
 			}
 		}
@@ -1626,7 +1626,7 @@ ttwu_stat(struct task_struct *p, int cpu, int wake_flags)
 
 #endif /* CONFIG_SMP */
 
-	schedstat_inc(rq, ttwu_count);
+	schedstat_inc(rq->ttwu_count);
 #endif /* CONFIG_SCHEDSTATS */
 }
 
@@ -3524,7 +3524,7 @@ static inline void schedule_debug(struct task_struct *prev)
 
 	profile_hit(SCHED_PROFILING, __builtin_return_address(0));
 
-	schedstat_inc(this_rq(), sched_count);
+	schedstat_inc(this_rq()->sched_count);
 }
 
 /*
@@ -3758,7 +3758,7 @@ static void __sched notrace __schedule(bool preempt)
 		 * scheduled as a high priority task in its own right.
 		 */
 		next = idle;
-		schedstat_inc(rq, sched_goidle);
+		schedstat_inc(rq->sched_goidle);
 		set_cpuidle_map(cpu);
 	} else {
 		next = earliest_deadline_task(rq, cpu, idle);
@@ -5155,7 +5155,7 @@ SYSCALL_DEFINE0(sched_yield)
 
 	p = current;
 	grq_lock_irq();
-	schedstat_inc(task_rq(p), yld_count);
+	schedstat_inc(task_rq(p)->yld_count);
 	requeue_task(p);
 
 	/*
