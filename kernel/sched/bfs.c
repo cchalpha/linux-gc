@@ -7323,10 +7323,6 @@ void __init sched_init(void)
 	}
 #endif
 
-#ifdef CONFIG_PREEMPT_NOTIFIERS
-	INIT_HLIST_HEAD(&init_task.preempt_notifiers);
-#endif
-
 	/*
 	 * The boot idle thread does lazy MMU switching as well:
 	 */
