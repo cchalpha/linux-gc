@@ -1603,19 +1603,21 @@ static void try_preempt(struct task_struct *p, struct rq *this_rq)
 static void
 ttwu_stat(struct task_struct *p, int cpu, int wake_flags)
 {
-#ifdef CONFIG_SCHEDSTATS
-	struct rq *rq = this_rq();
+	struct rq *rq;
+
+	if (!schedstat_enabled())
+		return;
+
+	rq= this_rq();
 
 #ifdef CONFIG_SMP
-	int this_cpu = smp_processor_id();
-
-	if (cpu == this_cpu)
+	if (cpu == rq->cpu)
 		schedstat_inc(rq->ttwu_local);
 	else {
 		struct sched_domain *sd;
 
 		rcu_read_lock();
-		for_each_domain(this_cpu, sd) {
+		for_each_domain(rq->cpu, sd) {
 			if (cpumask_test_cpu(cpu, sched_domain_span(sd))) {
 				schedstat_inc(sd->ttwu_wake_remote);
 				break;
@@ -1623,11 +1625,9 @@ ttwu_stat(struct task_struct *p, int cpu, int wake_flags)
 		}
 		rcu_read_unlock();
 	}
-
 #endif /* CONFIG_SMP */
 
 	schedstat_inc(rq->ttwu_count);
-#endif /* CONFIG_SCHEDSTATS */
 }
 
 #ifdef CONFIG_SMP
@@ -1732,13 +1732,9 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 	ttwu_activate(p, rq, wake_flags & WF_SYNC);
 out_wakeup:
 	ttwu_do_wakeup(rq, p, 0);
-	if (schedstat_enabled())
-		ttwu_stat(p, cpu, wake_flags);
+	ttwu_stat(p, cpu, wake_flags);
 out_unlock:
 	task_grq_unlock(&flags);
-
-	if (schedstat_enabled())
-		ttwu_stat(p, cpu, wake_flags);
 
 	return success;
 }
@@ -1764,12 +1760,9 @@ static void try_to_wake_up_local(struct task_struct *p)
 
 	if (!task_queued(p)) {
 		ttwu_activate(p, rq, false);
-		if (schedstat_enabled())
-			ttwu_stat(p, smp_processor_id(), 0);
 	}
 	ttwu_do_wakeup(rq, p, 0);
-	if (schedstat_enabled())
-		ttwu_stat(p, smp_processor_id(), 0);
+	ttwu_stat(p, smp_processor_id(), 0);
 }
 
 /**
