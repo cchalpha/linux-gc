@@ -6111,22 +6111,26 @@ static struct root_domain *alloc_rootdomain(void)
 	return rd;
 }
 
-static void free_sched_domain(struct rcu_head *rcu)
+static void destroy_sched_domain(struct sched_domain *sd)
 {
-	struct sched_domain *sd = container_of(rcu, struct sched_domain, rcu);
-
 	kfree(sd);
 }
 
-static void destroy_sched_domain(struct sched_domain *sd, int cpu)
+static void destroy_sched_domains_rcu(struct rcu_head *rcu)
 {
-	call_rcu(&sd->rcu, free_sched_domain);
+	struct sched_domain *sd = container_of(rcu, struct sched_domain, rcu);
+
+	while (sd) {
+		struct sched_domain *parent = sd->parent;
+		destroy_sched_domain(sd);
+		sd = parent;
+	}
 }
 
-static void destroy_sched_domains(struct sched_domain *sd, int cpu)
+static void destroy_sched_domains(struct sched_domain *sd)
 {
-	for (; sd; sd = sd->parent)
-		destroy_sched_domain(sd, cpu);
+	if (sd)
+		call_rcu(&sd->rcu, destroy_sched_domains_rcu);
 }
 
 /*
@@ -6156,7 +6160,7 @@ cpu_attach_domain(struct sched_domain *sd, struct root_domain *rd, int cpu)
 			 */
 			if (parent->flags & SD_PREFER_SIBLING)
 				tmp->flags |= SD_PREFER_SIBLING;
-			destroy_sched_domain(parent, cpu);
+			destroy_sched_domain(parent);
 		} else
 			tmp = tmp->parent;
 	}
@@ -6164,7 +6168,7 @@ cpu_attach_domain(struct sched_domain *sd, struct root_domain *rd, int cpu)
 	if (sd && sd_degenerate(sd)) {
 		tmp = sd;
 		sd = sd->parent;
-		destroy_sched_domain(tmp, cpu);
+		destroy_sched_domain(tmp);
 		if (sd)
 			sd->child = NULL;
 	}
@@ -6174,7 +6178,7 @@ cpu_attach_domain(struct sched_domain *sd, struct root_domain *rd, int cpu)
 	rq_attach_root(rq, rd);
 	tmp = rq->sd;
 	rcu_assign_pointer(rq->sd, sd);
-	destroy_sched_domains(tmp, cpu);
+	destroy_sched_domains(tmp);
 }
 
 /* Setup the mask of cpus configured for isolated domains */
