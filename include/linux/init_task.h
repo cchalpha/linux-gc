@@ -231,8 +231,9 @@ extern struct cred init_cred;
 #define INIT_TASK_COMM "BFS"
 #define INIT_TASK(tsk)	\
 {									\
+	INIT_TASK_TI(tsk)						\
 	.state		= 0,						\
-	.stack		= &init_thread_info,				\
+	.stack		= init_stack,					\
 	.usage		= ATOMIC_INIT(2),				\
 	.flags		= PF_KTHREAD,					\
 	.prio		= NORMAL_PRIO,					\
