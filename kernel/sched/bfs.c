@@ -285,11 +285,6 @@ static inline void niffy_diff(s64 *niff_diff, int jiff_diff)
 }
 
 #ifdef CONFIG_SMP
-static inline int cpu_of(struct rq *rq)
-{
-	return rq->cpu;
-}
-
 /*
  * Niffies are a globally increasing nanosecond counter. Whenever a runqueue
  * clock is updated with the grq.lock held, it is an opportunity to update the
@@ -1132,7 +1127,7 @@ static void activate_task(struct task_struct *p, struct rq *rq)
 	p->on_rq = 1;
 	grq.nr_running++;
 	inc_qnr();
-	cpufreq_trigger(grq.niffies, rq->soft_affined);
+	cpufreq_update_this_cpu(rq, 0);
 }
 
 static inline void clear_sticky(struct task_struct *p);
@@ -1149,7 +1144,7 @@ static inline void deactivate_task(struct task_struct *p, struct rq *rq)
 	p->on_rq = 0;
 	grq.nr_running--;
 	clear_sticky(p);
-	cpufreq_trigger(grq.niffies, rq->soft_affined);
+	cpufreq_update_this_cpu(rq, 0);
 }
 
 #ifdef CONFIG_SMP
