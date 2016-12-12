@@ -3778,7 +3778,6 @@ rerun_prev_unlocked:
 		grq_unlock_irq();
 	}
 }
-STACK_FRAME_NON_STANDARD(__schedule); /* switch_to() */
 
 void __noreturn do_task_dead(void)
 {
