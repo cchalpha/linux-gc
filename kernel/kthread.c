@@ -403,6 +403,24 @@ void kthread_bind(struct task_struct *p, unsigned int cpu)
 }
 EXPORT_SYMBOL(kthread_bind);
 
+static void kthread_create_bind(struct task_struct *p, unsigned int cpu)
+{
+	unsigned long flags;
+
+	if (!wait_task_inactive(p, TASK_UNINTERRUPTIBLE)) {
+		WARN_ON(1);
+		return;
+	}
+
+	/* It's safe because the task is inactive. */
+	raw_spin_lock_irqsave(&p->pi_lock, flags);
+	/*
+	do_set_cpus_allowed(p, cpumask_of(cpu));
+	*/
+	p->flags |= PF_NO_SETAFFINITY;
+	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
+}
+
 /**
  * kthread_create_on_cpu - Create a cpu bound kthread
  * @threadfn: the function to run until signal_pending(current).
@@ -424,7 +442,7 @@ struct task_struct *kthread_create_on_cpu(int (*threadfn)(void *data),
 				   cpu);
 	if (IS_ERR(p))
 		return p;
-	kthread_bind(p, cpu);
+	kthread_create_bind(p, cpu);
 	/* CPU hotplug need to bind once again when unparking the thread. */
 	set_bit(KTHREAD_IS_PER_CPU, &to_kthread(p)->flags);
 	to_kthread(p)->cpu = cpu;
