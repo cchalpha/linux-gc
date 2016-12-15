@@ -1567,7 +1567,7 @@ task_preemptible_rq(struct task_struct *p, int only_preempt_low_policy)
 static struct rq* task_balance_rq(struct task_struct *p)
 {
 	cpumask_t tmp;
-	int cpu, target_cpu;
+	int cpu, target_cpu = 0;
 	unsigned int min_nr_queued = ~0;
 	unsigned int nr_queued;
 
