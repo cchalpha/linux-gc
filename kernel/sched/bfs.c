@@ -1828,11 +1828,6 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 
 	prq = select_task_rq(p, wake_flags);
 
-	if (!cpumask_test_cpu(cpu_of(prq), cpu_online_mask))
-		printk(KERN_INFO "vrq: task %d affinity %lu ttwu cpu %d, online_mask %lu",
-		       p->pid, tsk_cpus_allowed(p)->bits[0],
-		       cpu_of(prq), cpu_online_mask->bits[0]);
-
 	raw_spin_lock(&prq->lock);
 
 #ifdef CONFIG_SMP
