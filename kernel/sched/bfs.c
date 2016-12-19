@@ -531,6 +531,7 @@ static inline void sched_cpu_priodls_unlock(void)
 }
 #endif
 
+#ifdef	CONFIG_SMP
 static inline int task_running_policy_level(const struct task_struct *p)
 {
 	int prio;
@@ -587,6 +588,12 @@ static inline void update_sched_rq_queued_masks(struct rq *rq)
 			sched_rq_queued_check_level = SCHED_RQ_RT_PL + 1;
 	}
 }
+#else
+static inline void
+update_sched_rq_running_masks(struct rq *rq, struct task_struct *p){}
+
+static inline void update_sched_rq_queued_masks(struct rq *rq){}
+#endif
 
 /*
  * Removing from the global runqueue. Deleting a task from the skip list is done
@@ -806,6 +813,12 @@ static inline void preempt_rq(struct rq * rq)
 		resched_curr(rq);
 		raw_spin_unlock_irqrestore(&rq->lock, flags);
 	}
+}
+
+void check_preempt_curr(struct rq *rq, struct task_struct *p)
+{
+	if (p->priodl < rq->curr->priodl)
+		resched_curr(rq);
 }
 
 #ifdef CONFIG_SMP
@@ -1030,9 +1043,9 @@ static inline void deactivate_task(struct task_struct *p, struct rq *rq)
 	cpufreq_update_this_cpu(rq, 0);
 }
 
-#ifdef CONFIG_SMP
 static inline void __set_task_cpu(struct task_struct *p, unsigned int cpu)
 {
+#ifdef CONFIG_SMP
 	/*
 	 * After ->cpu is set up to a new value, task_access_lock(p, ...) can be
 	 * successfully executed on another CPU. We must ensure that updates of
@@ -1045,8 +1058,10 @@ static inline void __set_task_cpu(struct task_struct *p, unsigned int cpu)
 #else
 	task_thread_info(p)->cpu = cpu;
 #endif
+#endif
 }
 
+#ifdef CONFIG_SMP
 void set_task_cpu(struct task_struct *p, unsigned int cpu)
 {
 #ifdef CONFIG_SCHED_DEBUG
@@ -1089,12 +1104,6 @@ void set_task_cpu(struct task_struct *p, unsigned int cpu)
  * 5) stopper completes and stop_one_cpu() returns and the migration
  *    is done.
  */
-
-void check_preempt_curr(struct rq *rq, struct task_struct *p)
-{
-	if (p->priodl < rq->curr->priodl)
-		resched_curr(rq);
-}
 
 /*
  * move_queued_task - move a queued task to new rq.
@@ -1587,29 +1596,41 @@ static struct rq* task_balance_rq(struct task_struct *p)
 
 	return cpu_rq(target_cpu);
 }
+
+/*
+ * wake flags
+ */
+#define WF_SYNC		0x01		/* waker goes to sleep after wakeup */
+#define WF_FORK		0x02		/* child wakeup after fork */
+#define WF_MIGRATED	0x04		/* internal use, task got migrated */
+
+static inline struct rq *
+select_task_rq(struct task_struct *p, int wake_flags)
+{
+	struct rq *rq;
+
+	/*
+	 * Sync wakeups (i.e. those types of wakeups where the waker
+	 * has indicated that it will leave the CPU in short order)
+	 * don't trigger a preemption if there are no idle cpus,
+	 * instead waiting for current to deschedule.
+	 */
+	rq = task_preemptible_rq(p, wake_flags & WF_SYNC);
+	if (NULL == rq)
+		rq = task_balance_rq(p);
+
+	return rq;
+}
 #else /* CONFIG_SMP */
 static inline bool needs_other_cpu(struct task_struct *p, int cpu)
 {
 	return false;
 }
 
-static struct rq*
-task_preemptible_rq(struct task_struct *p, int only_preempt_idle)
+static inline struct rq *
+select_task_rq(struct task_struct *p, int wake_flags)
 {
-	if(idle_queue(uprq))
-		return uprq;
-
-	/* idle_preempt indicate just preempt idle rq */
-	if (unlikely(only_preempt_idle != 0))
-		return NULL;
-
-	/* IDLEPRIO tasks never preempt anything but idle */
-	if (p->policy == SCHED_IDLEPRIO)
-		return NULL;
-
-	if (can_preempt(p, sched_rq_priodls[0]))
-		return uprq;
-	return NULL;
+	return uprq;
 }
 #endif /* CONFIG_SMP */
 
@@ -1709,13 +1730,6 @@ static int ttwu_remote(struct task_struct *p, int wake_flags)
 	return ret;
 }
 
-/*
- * wake flags
- */
-#define WF_SYNC		0x01		/* waker goes to sleep after wakeup */
-#define WF_FORK		0x02		/* child wakeup after fork */
-#define WF_MIGRATED	0x04		/* internal use, task got migrated */
-
 /***
  * try_to_wake_up - wake up a thread
  * @p: the thread to be awakened
@@ -1812,15 +1826,7 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 	p->sched_contributes_to_load = !!task_contributes_to_load(p);
 	p->state = TASK_WAKING;
 
-	/*
-	 * Sync wakeups (i.e. those types of wakeups where the waker
-	 * has indicated that it will leave the CPU in short order)
-	 * don't trigger a preemption if there are no idle cpus,
-	 * instead waiting for current to deschedule.
-	 */
-	prq = task_preemptible_rq(p, wake_flags & WF_SYNC);
-	if (NULL == prq)
-		prq = task_balance_rq(p);
+	prq = select_task_rq(p, wake_flags);
 
 	if (!cpumask_test_cpu(cpu_of(prq), cpu_online_mask))
 		printk(KERN_INFO "vrq: task %d affinity %lu ttwu cpu %d, online_mask %lu",
@@ -1828,12 +1834,14 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 		       cpu_of(prq), cpu_online_mask->bits[0]);
 
 	raw_spin_lock(&prq->lock);
-	cpu = cpu_of(prq);
 
+#ifdef CONFIG_SMP
+	cpu = cpu_of(prq);
 	if (cpu != task_cpu(p)) {
 		wake_flags |= WF_MIGRATED;
 		set_task_cpu(p, cpu);
 	}
+#endif
 
 	ttwu_do_activate(prq, p, wake_flags);
 
@@ -2115,9 +2123,7 @@ void wake_up_new_task(struct task_struct *p)
 
 	p->state = TASK_RUNNING;
 
-	rq = task_preemptible_rq(p, 0);
-	if (NULL == rq)
-		rq = task_balance_rq(p);
+	rq = select_task_rq(p, 0);
 #ifdef CONFIG_SMP
 	/*
 	 * Fork balancing, do it here and not earlier because:
@@ -3455,7 +3461,7 @@ earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *prefer)
 	return prefer;
 }
 
-
+#ifdef	CONFIG_SMP
 static inline struct task_struct *
 take_queued_task_cpumask(int cpu, struct cpumask *chk_mask)
 {
@@ -3514,6 +3520,24 @@ static inline struct task_struct * take_other_rq_task(int cpu)
 	}
 
 	return NULL;
+}
+#endif
+
+static inline struct task_struct *
+choose_next_task(struct rq *rq, int cpu, struct task_struct *prefer)
+{
+	struct task_struct *next = earliest_deadline_task(rq, cpu, prefer);
+#ifdef	CONFIG_SMP
+	if (rq->idle == next && !rq->scaling) {
+		struct task_struct *other_rq_tsk;
+		other_rq_tsk = take_other_rq_task(cpu);
+		if (NULL != other_rq_tsk) {
+			next = other_rq_tsk;
+			rq->nr_running++;
+		}
+	}
+#endif
+	return next;
 }
 
 /*
@@ -3719,15 +3743,7 @@ static void __sched notrace __schedule(bool preempt)
 		prefer = idle;
 	}
 
-	next = earliest_deadline_task(rq, cpu, prefer);
-	if (idle == next && !rq->scaling) {
-		struct task_struct *other_rq_tsk;
-		other_rq_tsk = take_other_rq_task(cpu);
-		if (NULL != other_rq_tsk) {
-			next = other_rq_tsk;
-			rq->nr_running++;
-		}
-	}
+	next = choose_next_task(rq, cpu, prefer);
 	if (next != prefer) {
 		if (idle != prefer)
 			enqueue_task(prev, rq);
@@ -7418,9 +7434,10 @@ void __init sched_init(void)
 	if (cpu_isolated_map == NULL)
 		zalloc_cpumask_var(&cpu_isolated_map, GFP_NOWAIT);
 	idle_thread_set_boot_cpu();
-#endif /* SMP */
 
 	sched_init_topology_cpumask_early();
+#endif /* SMP */
+
 	init_schedstats();
 }
 
