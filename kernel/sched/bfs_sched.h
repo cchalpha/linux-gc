@@ -42,10 +42,11 @@ struct rq {
 	int iso_ticks;
 	bool iso_refractory;
 
+	bool scaling; /* This CPU is managed by a scaling CPU freq governor */
+
 #ifdef CONFIG_SMP
 	int cpu;		/* cpu of this runqueue */
 	bool online;
-	bool scaling; /* This CPU is managed by a scaling CPU freq governor */
 
 	struct root_domain *rd;
 	struct sched_domain *sd;
@@ -105,9 +106,11 @@ extern atomic_long_t calc_load_tasks;
 extern void calc_global_load_tick(struct rq *this_rq);
 extern long calc_load_fold_active(struct rq *this_rq, long adjust);
 
+/*
 #ifdef CONFIG_SMP
 struct rq *cpu_rq(int cpu);
 #endif
+*/
 
 #ifndef CONFIG_SMP
 extern struct rq *uprq;
@@ -206,12 +209,14 @@ static inline struct cpuidle_state *idle_get_state(struct rq *rq)
 }
 #endif
 
-#ifdef CONFIG_SMP
 static inline int cpu_of(struct rq *rq)
 {
+#ifdef CONFIG_SMP
 	return rq->cpu;
-}
+#else
+	return 0;
 #endif
+}
 
 #ifdef CONFIG_CPU_FREQ
 DECLARE_PER_CPU(struct update_util_data *, cpufreq_update_util_data);
@@ -257,6 +262,7 @@ static inline void cpufreq_update_util(struct rq *rq, unsigned int flags) {}
 static inline void cpufreq_update_this_cpu(struct rq *rq, unsigned int flags) {}
 #endif /* CONFIG_CPU_FREQ */
 
+#ifdef CONFIG_SMP
 #ifndef arch_scale_cpu_capacity
 static __always_inline
 unsigned long arch_scale_cpu_capacity(struct sched_domain *sd, int cpu)
@@ -266,8 +272,9 @@ unsigned long arch_scale_cpu_capacity(struct sched_domain *sd, int cpu)
 
 	return SCHED_CAPACITY_SCALE;
 }
-
 #endif
+#endif
+
 #ifdef arch_scale_freq_capacity
 #ifndef arch_scale_freq_invariant
 #define arch_scale_freq_invariant()	(true)
