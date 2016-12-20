@@ -3457,44 +3457,68 @@ earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *prefer)
 }
 
 #ifdef	CONFIG_SMP
+/**
+ * best queued task in @rq for given @cpu
+ * The most likey cache cool task with highest prio in queue
+ */
 static inline struct task_struct *
-take_queued_task_cpumask(int cpu, struct cpumask *chk_mask)
+rq_best_queued_task(struct rq *rq, int cpu)
+{
+	struct task_struct *p, *best = NULL;
+	struct skiplist_node *node;
+	int prio;
+	u64 last_ran = ~0ULL;
+
+	node = rq->sl_header.next[0];
+	if (unlikely(node == &rq->sl_header))
+		return NULL;
+	p = skiplist_entry(node, struct task_struct, sl_node);
+	prio = p->prio;
+
+	do {
+		/* need go through checking for cpu affinity */
+		if (cpumask_test_cpu(cpu, tsk_cpus_allowed(p)) &&
+		    p->last_ran < last_ran) {
+			best = p;
+			last_ran = p->last_ran;
+		}
+		node = node->next[0];
+		if (node == &rq->sl_header)
+			break;
+		p = skiplist_entry(node, struct task_struct, sl_node);
+	} while (p->prio == prio);
+
+	return best;
+}
+
+static inline struct task_struct *
+take_queued_task_cpumask(int cpu, struct cpumask *chk_mask, int queued_len)
 {
 	struct task_struct *p;
 	int tcpu;
 
 	for_each_cpu(tcpu, chk_mask) {
 		struct rq *trq;
-		struct skiplist_node *node;
 
 		trq = cpu_rq(tcpu);
-
-		if (trq->nr_queued == 0)
+		if (trq->nr_queued <= queued_len)
 			continue;
 
 		raw_spin_lock_nested(&trq->lock, SINGLE_DEPTH_NESTING);
-		node = trq->sl_header.next[0];
-		if (unlikely(node == &trq->sl_header)) {
+		if((p = rq_best_queued_task(trq, cpu))) {
+			take_task(trq, tcpu, p);
+			trq->nr_running--;
+			set_task_cpu(p, cpu);
 			raw_spin_unlock(&trq->lock);
-			continue;
-		}
-		/* need go through checking for cpu affinity */
-		p = skiplist_entry(node, struct task_struct, sl_node);
-		if (!cpumask_test_cpu(cpu, tsk_cpus_allowed(p))) {
-			raw_spin_unlock(&trq->lock);
-			continue;
-		}
-		take_task(trq, tcpu, p);
-		trq->nr_running--;
-		set_task_cpu(p, cpu);
-		raw_spin_unlock(&trq->lock);
 
-		return p;
+			return p;
+		}
+		raw_spin_unlock(&trq->lock);
 	}
 	return NULL;
 }
 
-static inline struct task_struct * take_other_rq_task(int cpu)
+static inline struct task_struct * take_other_rq_task(int cpu, int queued_len)
 {
 	struct cpumask chk_mask, tmp;
 	struct cpumask *queued_mask, *affinity_mask, *end;
@@ -3509,7 +3533,8 @@ static inline struct task_struct * take_other_rq_task(int cpu)
 		end = sched_cpu_affinity_chk_end_masks[cpu];
 		for (;affinity_mask < end; affinity_mask++)
 			if (cpumask_and(&tmp, &chk_mask, affinity_mask)) {
-				if ((p = take_queued_task_cpumask(cpu, &tmp)))
+				if ((p = take_queued_task_cpumask(cpu, &tmp,
+								  queued_len)))
 					return p;
 			}
 	}
@@ -3523,9 +3548,9 @@ choose_next_task(struct rq *rq, int cpu, struct task_struct *prefer)
 {
 	struct task_struct *next = earliest_deadline_task(rq, cpu, prefer);
 #ifdef	CONFIG_SMP
-	if (rq->idle == next && !rq->scaling) {
+	if (rq->idle == next) {
 		struct task_struct *other_rq_tsk;
-		other_rq_tsk = take_other_rq_task(cpu);
+		other_rq_tsk = take_other_rq_task(cpu, rq->scaling);
 		if (NULL != other_rq_tsk) {
 			next = other_rq_tsk;
 			rq->nr_running++;
@@ -7381,7 +7406,6 @@ void __init sched_init(void)
 	for_each_possible_cpu(i) {
 		rq = cpu_rq(i);
 		FULL_INIT_SKIPLIST_NODE(&rq->sl_header);
-		rq->scaling = 0;
 		rq->nr_queued = 0;
 		raw_spin_lock_init(&rq->lock);
 		rq->user_pc = rq->nice_pc = rq->softirq_pc = rq->system_pc =
@@ -7391,6 +7415,7 @@ void __init sched_init(void)
 		rq->calc_load_active = 0;
 		rq->calc_load_update = jiffies + LOAD_FREQ;
 #ifdef CONFIG_SMP
+		rq->scaling = 0;
 		rq->sd = NULL;
 		rq->rd = NULL;
 		rq->online = false;
