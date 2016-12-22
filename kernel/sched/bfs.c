@@ -687,11 +687,6 @@ static void enqueue_task(struct task_struct *p, struct rq *rq)
 	sched_info_queued(rq, p);
 }
 
-static inline void requeue_task(struct task_struct *p)
-{
-	sched_info_queued(task_rq(p), p);
-}
-
 /*
  * Returns the relative length of deadline all compared to the shortest
  * deadline which is that of nice -20.
@@ -3185,7 +3180,6 @@ static void task_running_tick(struct rq *rq)
 	 */
 	p = rq->curr;
 
-	requeue_task(p);
 	__set_tsk_resched(p);
 }
 
@@ -5186,7 +5180,6 @@ SYSCALL_DEFINE0(sched_yield)
 	struct rq *rq = this_rq_lock();
 
 	schedstat_inc(rq->yld_count);
-	requeue_task(rq->curr);
 
 	/*
 	 * Since we are going to call schedule() anyway, there's
