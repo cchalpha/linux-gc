@@ -366,12 +366,7 @@ static inline void double_rq_unlock(struct rq *rq1, struct rq *rq2)
 		__release(rq2->lock);
 }
 
-/*
- * A task that is not running or queued will have an empty skip list node.
- * A task that is queued but not running will be on the grq skip list.
- * A task that is currently running will have ->on_cpu set but has an empty skip
- * list.
- *
+/**
  * A task that is not running or queued will not have a node set.
  * A task that is queued but not running will have a node set.
  * A task that is currently running will have ->on_cpu set but no node set.
@@ -493,16 +488,6 @@ static inline void finish_lock_switch(struct rq *rq, struct task_struct *prev)
 	raw_spin_unlock_irq(&rq->lock);
 }
 
-static inline bool deadline_before(u64 deadline, u64 time)
-{
-	return (deadline < time);
-}
-
-static inline bool deadline_after(u64 deadline, u64 time)
-{
-	return (deadline > time);
-}
-
 static inline void update_task_priodl(struct task_struct *p)
 {
 	if (p->prio <= ISO_PRIO)
@@ -522,21 +507,14 @@ static inline void sched_cpu_priodls_unlock(void)
 	raw_spin_unlock(&sched_cpu_priodls_lock);
 }
 #else
-static inline void sched_cpu_priodls_lock(void)
-{
-}
-
-static inline void sched_cpu_priodls_unlock(void)
-{
-}
+static inline void sched_cpu_priodls_lock(void) {}
+static inline void sched_cpu_priodls_unlock(void) {}
 #endif
 
 #ifdef	CONFIG_SMP
 static inline int task_running_policy_level(const struct task_struct *p)
 {
-	int prio;
-
-	prio = p->prio;
+	int prio = p->prio;
 	if (prio <= ISO_PRIO)
 		return SCHED_RQ_RT_PL;
 	return prio - ISO_PRIO;
@@ -590,9 +568,9 @@ static inline void update_sched_rq_queued_masks(struct rq *rq)
 }
 #else
 static inline void
-update_sched_rq_running_masks(struct rq *rq, struct task_struct *p){}
+update_sched_rq_running_masks(struct rq *rq, struct task_struct *p) {}
 
-static inline void update_sched_rq_queued_masks(struct rq *rq){}
+static inline void update_sched_rq_queued_masks(struct rq *rq) {}
 #endif
 
 /*
@@ -802,7 +780,35 @@ static bool set_nr_if_polling(struct task_struct *p)
 #endif
 #endif
 
-static void resched_curr(struct rq *rq);
+/*
+ * resched_curr - mark rq's current task 'to be rescheduled now'.
+ *
+ * On UP this means the setting of the need_resched flag, on SMP it
+ * might also involve a cross-CPU call to trigger the scheduler on
+ * the target CPU.
+ */
+void resched_curr(struct rq *rq)
+{
+	struct task_struct *curr = rq->curr;
+	int cpu;
+
+	lockdep_assert_held(&rq->lock);
+
+	if (test_tsk_need_resched(curr))
+		return;
+
+	cpu = cpu_of(rq);
+	if (cpu == smp_processor_id()) {
+		set_tsk_need_resched(curr);
+		set_preempt_need_resched();
+		return;
+	}
+
+	if (set_nr_and_not_polling(curr))
+		smp_send_reschedule(cpu);
+	else
+		trace_sched_wake_idle_without_ipi(cpu);
+}
 
 static inline void preempt_rq(struct rq * rq)
 {
@@ -947,13 +953,8 @@ static inline bool scaling_rq(struct rq *rq)
 }
 
 #else /* CONFIG_SMP */
-void cpu_scaling(int __unused)
-{
-}
-
-void cpu_nonscaling(int __unused)
-{
-}
+void cpu_scaling(int __unused) {}
+void cpu_nonscaling(int __unused) {}
 
 /*
  * Although CPUs can scale in UP, there is nowhere else for tasks to go so this
@@ -1228,36 +1229,6 @@ static inline void __set_tsk_resched(struct task_struct *p)
 {
 	set_tsk_need_resched(p);
 	set_preempt_need_resched();
-}
-
-/*
- * resched_curr - mark rq's current task 'to be rescheduled now'.
- *
- * On UP this means the setting of the need_resched flag, on SMP it
- * might also involve a cross-CPU call to trigger the scheduler on
- * the target CPU.
- */
-void resched_curr(struct rq *rq)
-{
-	struct task_struct *curr = rq->curr;
-	int cpu;
-
-	lockdep_assert_held(&rq->lock);
-
-	if (test_tsk_need_resched(curr))
-		return;
-
-	cpu = cpu_of(rq);
-	if (cpu == smp_processor_id()) {
-		set_tsk_need_resched(curr);
-		set_preempt_need_resched();
-		return;
-	}
-
-	if (set_nr_and_not_polling(curr))
-		smp_send_reschedule(cpu);
-	else
-		trace_sched_wake_idle_without_ipi(cpu);
 }
 
 /**
