@@ -806,17 +806,6 @@ void resched_curr(struct rq *rq)
 		trace_sched_wake_idle_without_ipi(cpu);
 }
 
-static inline void preempt_rq(struct rq * rq)
-{
-	unsigned long flags;
-
-	if (rq) {
-		raw_spin_lock_irqsave(&rq->lock, flags);
-		resched_curr(rq);
-		raw_spin_unlock_irqrestore(&rq->lock, flags);
-	}
-}
-
 void check_preempt_curr(struct rq *rq, struct task_struct *p)
 {
 	if (p->priodl < rq->curr->priodl)
@@ -3981,7 +3970,7 @@ int default_wake_function(wait_queue_t *curr, unsigned mode, int wake_flags,
 }
 EXPORT_SYMBOL(default_wake_function);
 
-static inline struct rq *
+static inline void
 check_task_changed(struct rq *rq, struct task_struct *p, int oldprio)
 {
 	/*
@@ -3998,8 +3987,6 @@ check_task_changed(struct rq *rq, struct task_struct *p, int oldprio)
 		dequeue_task(p, rq);
 		enqueue_task(p, rq);
 	}
-
-	return NULL;
 }
 
 #ifdef CONFIG_RT_MUTEXES
@@ -4018,7 +4005,7 @@ check_task_changed(struct rq *rq, struct task_struct *p, int oldprio)
 void rt_mutex_setprio(struct task_struct *p, int prio)
 {
 	int oldprio;
-	struct rq *rq, *prq = NULL;
+	struct rq *rq;
 	raw_spinlock_t *lock;
 
 	BUG_ON(prio < 0 || prio > MAX_PRIO);
@@ -4048,12 +4035,10 @@ void rt_mutex_setprio(struct task_struct *p, int prio)
 	p->prio = prio;
 	update_task_priodl(p);
 
-	prq = check_task_changed(rq, p, oldprio);
+	check_task_changed(rq, p, oldprio);
 
 out_unlock:
 	__task_access_unlock(p, lock);
-
-	preempt_rq(prq);
 }
 
 #endif
@@ -4071,7 +4056,7 @@ void set_user_nice(struct task_struct *p, long nice)
 {
 	int queued, new_static, old_static;
 	unsigned long flags;
-	struct rq *rq, *prq = NULL;
+	struct rq *rq;
 	raw_spinlock_t *lock;
 
 	if (task_nice(p) == nice || nice < MIN_NICE || nice > MAX_NICE)
@@ -4117,8 +4102,6 @@ void set_user_nice(struct task_struct *p, long nice)
 out_unlock:
 	__task_access_unlock(p, lock);
 	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
-
-	preempt_rq(prq);
 }
 EXPORT_SYMBOL(set_user_nice);
 
@@ -4414,7 +4397,7 @@ __sched_setscheduler(struct task_struct *p,
 	int retval, oldprio, oldpolicy = -1;
 	int policy = attr->sched_policy;
 	unsigned long flags;
-	struct rq *rq, *prq;
+	struct rq *rq;
 	int reset_on_fork;
 	raw_spinlock_t *lock;
 
@@ -4570,15 +4553,13 @@ recheck:
 
 	__setscheduler(rq, p, attr, pi);
 
-	prq = check_task_changed(rq, p, oldprio);
+	check_task_changed(rq, p, oldprio);
 
 	__task_access_unlock(p, lock);
 	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 
 	if (pi)
 		rt_mutex_adjust_pi(p);
-
-	preempt_rq(prq);
 out:
 	return 0;
 }
