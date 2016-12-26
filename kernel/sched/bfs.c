@@ -180,6 +180,14 @@ int sched_interactive __read_mostly = 1;
  */
 int sched_iso_cpu __read_mostly = 70;
 
+/**
+ * sched_yield_type - Choose what sort of yield sched_yield will perform.
+ * 0: No yield.
+ * 1: Yield only to better priority/deadline tasks. (default)
+ * 2: Expire timeslice and recalculate deadline.
+ */
+int sched_yield_type __read_mostly = 1;
+
 /*
  * The relative length of deadline for each priority(nice) level.
  */
@@ -5158,8 +5166,15 @@ static struct rq *this_rq_lock(void)
  */
 SYSCALL_DEFINE0(sched_yield)
 {
-	struct rq *rq = this_rq_lock();
+	struct rq *rq;
 
+	if (unlikely(!sched_yield_type))
+		return 0;
+
+	rq = this_rq_lock();
+
+	if (unlikely(sched_yield_type > 1))
+		time_slice_expired(current, rq);
 	schedstat_inc(rq->yld_count);
 
 	/*
