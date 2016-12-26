@@ -132,6 +132,7 @@ static int __read_mostly one_thousand = 1000;
 extern int rr_interval;
 extern int sched_interactive;
 extern int sched_iso_cpu;
+extern int sched_yield_type;
 #endif
 #ifdef CONFIG_PRINTK
 static int ten_thousand = 10000;
@@ -1034,6 +1035,15 @@ static struct ctl_table kern_table[] = {
 		.proc_handler	= &proc_dointvec_minmax,
 		.extra1		= &zero,
 		.extra2		= &one_hundred,
+	},
+	{
+		.procname	= "yield_type",
+		.data		= &sched_yield_type,
+		.maxlen		= sizeof (int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec_minmax,
+		.extra1		= &zero,
+		.extra2		= &two,
 	},
 #endif
 #if defined(CONFIG_S390) && defined(CONFIG_SMP)
