@@ -1022,7 +1022,7 @@ static void activate_task(struct task_struct *p, struct rq *rq)
 }
 
 /*
- * deactivate_task - If it's running, it's not on the grq and we can just
+ * deactivate_task - If it's running, it's not on the rq and we can just
  * decrement the nr_running.
  *
  * Context: rq->lock
@@ -1280,14 +1280,10 @@ unsigned long wait_task_inactive(struct task_struct *p, long match_state)
 		}
 
 		/*
-		 * Ok, time to look more closely! We need the grq
+		 * Ok, time to look more closely! We need the rq
 		 * lock now, to be *sure*. If we're wrong, we'll
 		 * just go back and repeat.
 		 */
-		/* Only access p, task_access_lock...() is good enough,
-		 * most likely p already stops running and will lock
-		 * on grq; if not, it will lock on it's rq and running
-		 * will be false*/
 		task_access_lock_irqsave(p, &lock, &flags);
 		trace_sched_wait_task(p);
 		running = task_running(p);
@@ -1819,8 +1815,7 @@ out:
  * @p: the thread to be awakened
  *
  * Put @p on the run-queue if it's not already there. The caller must
- * ensure that grq is locked and, @p is not the current task.
- * grq stays locked over invocation.
+ * ensure that local rq is locked and, @p is not the current task.
  */
 static void try_to_wake_up_local(struct task_struct *p)
 {
