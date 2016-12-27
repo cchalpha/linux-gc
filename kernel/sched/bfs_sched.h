@@ -28,7 +28,6 @@ struct rq {
 	 * TODO still need these local data?!
 	 */
 	u64 rq_deadline;
-	unsigned int rq_policy;
 	int rq_time_slice;
 	int rq_prio;
 	bool rq_running; /* There is a task running */
