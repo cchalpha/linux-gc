@@ -103,8 +103,6 @@
 /* is_iso_policy() and iso_task() are defined in include/linux/sched.h */
 #define task_running_iso(p)	unlikely((p)->prio == ISO_PRIO)
 
-#define rq_idle(rq)		((rq)->rq_prio == PRIO_LIMIT)
-
 #define ISO_PERIOD		((5 * HZ) + 1)
 
 #define SCHED_PRIO(p)		((p) + MAX_RT_PRIO)
@@ -3186,7 +3184,7 @@ void scheduler_tick(void)
 	update_rq_clock(rq);
 	update_cpu_clock_tick(rq, rq->curr);
 	cpufreq_update_util(rq, 0);
-	if (!rq_idle(rq))
+	if (rq->curr != rq->idle)
 		task_running_tick(rq);
 	else
 		no_iso_tick(rq);
@@ -3571,7 +3569,6 @@ static inline void set_rq_task(struct rq *rq, struct task_struct *p)
 	rq->rq_time_slice = p->time_slice;
 	rq->rq_deadline = p->deadline;
 	p->last_ran = rq->clock_task;
-	rq->rq_prio = p->prio;
 
 	sched_cpu_priodls_lock();
 	sched_rq_priodls[cpu_of(rq)] = p->priodl;
@@ -3582,7 +3579,6 @@ static inline void set_rq_task(struct rq *rq, struct task_struct *p)
 
 static inline void reset_rq_task(struct rq *rq, struct task_struct *p)
 {
-	rq->rq_prio = p->prio;
 	rq->rq_deadline = p->deadline;
 
 	sched_cpu_priodls_lock();
