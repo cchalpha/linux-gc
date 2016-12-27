@@ -30,7 +30,6 @@ struct rq {
 	u64 rq_deadline;
 	unsigned int rq_policy;
 	int rq_time_slice;
-	u64 rq_last_ran;
 	int rq_prio;
 	bool rq_running; /* There is a task running */
 	/* Accurate timekeeping data */
