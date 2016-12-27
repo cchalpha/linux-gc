@@ -1932,17 +1932,16 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 	 * boost in one time slice. So punishment for run queue time slice only
 	 * apply to IDLE and BATCH policy tasks.
 	 * If it's negative, it won't matter since that's the same as being 0.
-	 * current's time_slice is actually in rq_time_slice when it's running,
 	 * as is its last_ran value. rq->rq_deadline is only modified within
 	 * schedule() so it is always equal to current->deadline.
 	 */
 	if (likely(p->policy != SCHED_FIFO)) {
 		local_irq_disable();
 		if (idleprio_task(p) || batch_task(p)) {
-			rq->rq_time_slice /= 2;
-			p->time_slice = rq->rq_time_slice;
+			rq->curr->time_slice /= 2;
+			p->time_slice = rq->curr->time_slice;
 		} else
-			p->time_slice = rq->rq_time_slice / 2;
+			p->time_slice = rq->curr->time_slice / 2;
 		local_irq_enable();
 
 		if (p->time_slice < RESCHED_US)
@@ -2842,7 +2841,7 @@ ts_account:
 	if (p->policy != SCHED_FIFO && p != idle) {
 		s64 time_diff = rq->clock - rq->timekeep_clock;
 
-		rq->rq_time_slice -= NS_TO_US(time_diff);
+		p->time_slice -= NS_TO_US(time_diff);
 	}
 
 	p->last_ran = rq->clock_task;
@@ -2873,7 +2872,7 @@ ts_account:
 	if (p->policy != SCHED_FIFO) {
 		s64 time_diff = rq->clock - rq->timekeep_clock;
 
-		rq->rq_time_slice -= NS_TO_US(time_diff);
+		p->time_slice -= NS_TO_US(time_diff);
 	}
 
 	p->last_ran = rq->clock_task;
@@ -3139,7 +3138,7 @@ static void task_running_tick(struct rq *rq)
 				 * has been hit. Force it to reschedule as
 				 * SCHED_NORMAL by zeroing its time_slice
 				 */
-				rq->rq_time_slice = 0;
+				p->time_slice = 0;
 			}
 		}
 	}
@@ -3154,11 +3153,11 @@ static void task_running_tick(struct rq *rq)
 	 * less than RESCHED_US μs of time slice left they will be rescheduled.
 	 */
 	if (rq->dither) {
-		if (rq->rq_time_slice > HALF_JIFFY_US)
+		if (p->time_slice > HALF_JIFFY_US)
 			return;
 		else
-			rq->rq_time_slice = 0;
-	} else if (rq->rq_time_slice >= RESCHED_US)
+			p->time_slice = 0;
+	} else if (p->time_slice >= RESCHED_US)
 			return;
 
 	/**
@@ -3566,7 +3565,6 @@ static inline void schedule_debug(struct task_struct *prev)
  */
 static inline void set_rq_task(struct rq *rq, struct task_struct *p)
 {
-	rq->rq_time_slice = p->time_slice;
 	rq->rq_deadline = p->deadline;
 	p->last_ran = rq->clock_task;
 
@@ -3690,8 +3688,6 @@ static void __sched notrace __schedule(bool preempt)
 
 		update_cpu_clock_switch_nonidle(rq, prev);
 		rq->dither = (rq->clock - rq->last_tick < HALF_JIFFY_NS);
-		/* Update all the information stored on struct rq */
-		prev->time_slice = rq->rq_time_slice;
 		check_deadline(prev, rq);
 		prev->last_ran = rq->clock_task;
 
@@ -5292,8 +5288,8 @@ int __sched yield_to(struct task_struct *p, bool preempt)
 		p->deadline = rq->rq_deadline;
 		update_task_priodl(p);
 	}
-	p->time_slice += rq->rq_time_slice;
-	rq->rq_time_slice = 0;
+	p->time_slice += rq->curr->time_slice;
+	rq->curr->time_slice = 0;
 	if (p->time_slice > timeslice())
 		p->time_slice = timeslice();
 	if (preempt && rq != p_rq)
