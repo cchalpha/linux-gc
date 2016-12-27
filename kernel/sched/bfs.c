@@ -91,7 +91,6 @@
 
 #define rt_prio(prio)		unlikely((prio) < MAX_RT_PRIO)
 #define rt_task(p)		rt_prio((p)->prio)
-#define rt_queue(rq)		rt_prio((rq)->rq_prio)
 #define batch_task(p)		(unlikely((p)->policy == SCHED_BATCH))
 #define is_rt_policy(policy)	((policy) == SCHED_FIFO || \
 					(policy) == SCHED_RR)
@@ -100,12 +99,9 @@
 #define is_idle_policy(policy)	((policy) == SCHED_IDLEPRIO)
 #define idleprio_task(p)	unlikely(is_idle_policy((p)->policy))
 #define task_running_idle(p)	unlikely((p)->prio == IDLE_PRIO)
-#define idle_queue(rq)		(unlikely(is_idle_policy((rq)->rq_policy)))
 
 /* is_iso_policy() and iso_task() are defined in include/linux/sched.h */
-#define iso_queue(rq)		unlikely(is_iso_policy((rq)->rq_policy))
 #define task_running_iso(p)	unlikely((p)->prio == ISO_PRIO)
-#define rq_running_iso(rq)	((rq)->rq_prio == ISO_PRIO)
 
 #define rq_idle(rq)		((rq)->rq_prio == PRIO_LIMIT)
 
@@ -2845,7 +2841,7 @@ update_cpu_clock_tick(struct rq *rq, struct task_struct *p)
 
 ts_account:
 	/* time_slice accounting is done in usecs to avoid overflow on 32bit */
-	if (rq->rq_policy != SCHED_FIFO && p != idle) {
+	if (p->policy != SCHED_FIFO && p != idle) {
 		s64 time_diff = rq->clock - rq->timekeep_clock;
 
 		rq->rq_time_slice -= NS_TO_US(time_diff);
@@ -2876,7 +2872,7 @@ update_cpu_clock_switch_nonidle(struct rq *rq, struct task_struct *p)
 
 ts_account:
 	/* time_slice accounting is done in usecs to avoid overflow on 32bit */
-	if (rq->rq_policy != SCHED_FIFO) {
+	if (p->policy != SCHED_FIFO) {
 		s64 time_diff = rq->clock - rq->timekeep_clock;
 
 		rq->rq_time_slice -= NS_TO_US(time_diff);
@@ -3124,22 +3120,22 @@ static inline void no_iso_tick(struct rq *rq)
 /* This manages tasks that have run out of timeslice during a scheduler_tick */
 static void task_running_tick(struct rq *rq)
 {
-	struct task_struct *p;
+	struct task_struct *p = rq->curr;
 
 	/*
 	 * If a SCHED_ISO task is running we increment the iso_ticks. In
 	 * order to prevent SCHED_ISO tasks from causing starvation in the
 	 * presence of true RT tasks we account those as iso_ticks as well.
 	 */
-	if ((rt_queue(rq) || (iso_queue(rq) && !rq->iso_refractory))) {
+	if (rt_task(p) || task_running_iso(p)) {
 		if (rq->iso_ticks <= (ISO_PERIOD * 128) - 128)
 			iso_tick(rq);
 	} else
 		no_iso_tick(rq);
 
-	if (iso_queue(rq)) {
+	if (iso_task(p)) {
 		if (unlikely(test_ret_isorefractory(rq))) {
-			if (rq_running_iso(rq)) {
+			if (task_running_iso(p)) {
 				/*
 				 * SCHED_ISO task is running as RT and limit
 				 * has been hit. Force it to reschedule as
@@ -3151,7 +3147,7 @@ static void task_running_tick(struct rq *rq)
 	}
 
 	/* SCHED_FIFO tasks never run out of timeslice. */
-	if (rq->rq_policy == SCHED_FIFO)
+	if (p->policy == SCHED_FIFO)
 		return;
 	/*
 	 * Tasks that were scheduled in the first half of a tick are not
@@ -3167,11 +3163,10 @@ static void task_running_tick(struct rq *rq)
 	} else if (rq->rq_time_slice >= RESCHED_US)
 			return;
 
-	/* p->time_slice < RESCHED_US. We will modify task_struct under 
+	/**
+	 * p->time_slice < RESCHED_US. We will modify task_struct under
 	 * rq lock as p is rq->curr
 	 */
-	p = rq->curr;
-
 	__set_tsk_resched(p);
 }
 
@@ -3576,7 +3571,6 @@ static inline void set_rq_task(struct rq *rq, struct task_struct *p)
 	rq->rq_time_slice = p->time_slice;
 	rq->rq_deadline = p->deadline;
 	p->last_ran = rq->clock_task;
-	rq->rq_policy = p->policy;
 	rq->rq_prio = p->prio;
 
 	sched_cpu_priodls_lock();
@@ -3588,7 +3582,6 @@ static inline void set_rq_task(struct rq *rq, struct task_struct *p)
 
 static inline void reset_rq_task(struct rq *rq, struct task_struct *p)
 {
-	rq->rq_policy = p->policy;
 	rq->rq_prio = p->prio;
 	rq->rq_deadline = p->deadline;
 
