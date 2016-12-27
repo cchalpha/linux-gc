@@ -2823,7 +2823,7 @@ static void pc_user_time(struct rq *rq, struct task_struct *p,
 static void
 update_cpu_clock_tick(struct rq *rq, struct task_struct *p)
 {
-	long account_ns = rq->clock_task - rq->rq_last_ran;
+	long account_ns = rq->clock_task - p->last_ran;
 	struct task_struct *idle = rq->idle;
 	unsigned long account_pc;
 
@@ -2852,7 +2852,7 @@ ts_account:
 		rq->rq_time_slice -= NS_TO_US(time_diff);
 	}
 
-	rq->rq_last_ran = rq->clock_task;
+	p->last_ran = rq->clock_task;
 	rq->timekeep_clock = rq->clock;
 }
 
@@ -2864,7 +2864,7 @@ ts_account:
 static inline void
 update_cpu_clock_switch_nonidle(struct rq *rq, struct task_struct *p)
 {
-	long account_ns = rq->clock_task - rq->rq_last_ran;
+	long account_ns = rq->clock_task - p->last_ran;
 	unsigned long account_pc;
 
 	if (unlikely(account_ns < 0))
@@ -2883,14 +2883,14 @@ ts_account:
 		rq->rq_time_slice -= NS_TO_US(time_diff);
 	}
 
-	rq->rq_last_ran = rq->clock_task;
+	p->last_ran = rq->clock_task;
 	rq->timekeep_clock = rq->clock;
 }
 
 static inline void
-update_cpu_clock_switch_idle(struct rq *rq, struct task_struct *idle)
+update_cpu_clock_switch_idle(struct rq *rq, struct task_struct *p)
 {
-	long account_ns = rq->clock_task - rq->rq_last_ran;
+	long account_ns = rq->clock_task - p->last_ran;
 	unsigned long account_pc;
 
 	if (unlikely(account_ns < 0))
@@ -2898,9 +2898,9 @@ update_cpu_clock_switch_idle(struct rq *rq, struct task_struct *idle)
 
 	account_pc = NS_TO_PC(account_ns);
 	/* Accurate subtick timekeeping */
-	pc_idle_time(rq, idle, account_pc);
+	pc_idle_time(rq, p, account_pc);
 ts_account:
-	rq->rq_last_ran = rq->clock_task;
+	p->last_ran = rq->clock_task;
 	rq->timekeep_clock = rq->clock;
 }
 
@@ -2940,7 +2940,7 @@ unsigned long long task_sched_runtime(struct task_struct *p)
 	 */
 	if (p == rq->curr && p->on_rq) {
 		update_rq_clock(rq);
-		ns = rq->clock_task - rq->rq_last_ran;
+		ns = rq->clock_task - p->last_ran;
 		if (unlikely((s64)ns < 0))
 			ns = 0;
 		p->sched_time += ns;
@@ -3576,7 +3576,7 @@ static inline void set_rq_task(struct rq *rq, struct task_struct *p)
 {
 	rq->rq_time_slice = p->time_slice;
 	rq->rq_deadline = p->deadline;
-	rq->rq_last_ran = p->last_ran = rq->clock_task;
+	p->last_ran = rq->clock_task;
 	rq->rq_policy = p->policy;
 	rq->rq_prio = p->prio;
 
