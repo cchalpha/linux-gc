@@ -3152,13 +3152,8 @@ static void task_running_tick(struct rq *rq)
 	 * run out of time slice in the interim. Otherwise, if they have
 	 * less than RESCHED_US μs of time slice left they will be rescheduled.
 	 */
-	if (rq->dither) {
-		if (p->time_slice > HALF_JIFFY_US)
-			return;
-		else
-			p->time_slice = 0;
-	} else if (p->time_slice >= RESCHED_US)
-			return;
+	if (p->time_slice - rq->dither >= RESCHED_US)
+		return;
 
 	/**
 	 * p->time_slice < RESCHED_US. We will modify task_struct under
@@ -3687,7 +3682,8 @@ static void __sched notrace __schedule(bool preempt)
 		update_rq_clock(rq);
 
 		update_cpu_clock_switch_nonidle(rq, prev);
-		rq->dither = (rq->clock - rq->last_tick < HALF_JIFFY_NS);
+		rq->dither = (rq->clock - rq->last_tick < HALF_JIFFY_NS)?
+			0:HALF_JIFFY_NS;
 		check_deadline(prev, rq);
 		prev->last_ran = rq->clock_task;
 
@@ -3700,7 +3696,8 @@ static void __sched notrace __schedule(bool preempt)
 	} else {
 		update_rq_clock(rq);
 		update_cpu_clock_switch_idle(rq, prev);
-		rq->dither = (rq->clock - rq->last_tick < HALF_JIFFY_NS);
+		rq->dither = (rq->clock - rq->last_tick < HALF_JIFFY_NS)?
+			0:HALF_JIFFY_NS;
 
 		prefer = idle;
 	}
@@ -7350,7 +7347,7 @@ void __init sched_init(void)
 		raw_spin_lock_init(&rq->lock);
 		rq->user_pc = rq->nice_pc = rq->softirq_pc = rq->system_pc =
 			      rq->iowait_pc = rq->idle_pc = 0;
-		rq->dither = false;
+		rq->dither = 0;
 		rq->nr_running = rq->nr_uninterruptible = 0;
 		rq->calc_load_active = 0;
 		rq->calc_load_update = jiffies + LOAD_FREQ;
