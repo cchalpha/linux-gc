@@ -5261,6 +5261,8 @@ EXPORT_SYMBOL(yield);
  * It's the caller's job to ensure that the target task struct
  * can't go away on us before we can do any checks.
  *
+ * In VRQ, only accelerate the thread toward the processor it's on.
+ *
  * Return:
  *	true (>0) if we indeed boosted the target task.
  *	false (0) if we failed to boost the target.
@@ -5268,34 +5270,32 @@ EXPORT_SYMBOL(yield);
  */
 int __sched yield_to(struct task_struct *p, bool preempt)
 {
-	struct rq *rq, *p_rq;
+	struct rq *rq;
+	raw_spinlock_t *lock;
 	unsigned long flags;
 	int yielded = 0;
 
-	rq = this_rq();
-	raw_spin_lock_irqsave(&rq->lock, flags);
+	rq = task_access_lock_irqsave(p, &lock, &flags);
+
 	if (task_running(p) || p->state) {
 		yielded = -ESRCH;
 		goto out_unlock;
 	}
 
-	p_rq = task_rq(p);
 	yielded = 1;
 	if (p->deadline > rq->rq_deadline) {
 		p->deadline = rq->rq_deadline;
 		update_task_priodl(p);
 	}
 	p->time_slice += rq->curr->time_slice;
-	rq->curr->time_slice = 0;
 	if (p->time_slice > timeslice())
 		p->time_slice = timeslice();
-	if (preempt && rq != p_rq)
-		resched_curr(p_rq);
+	time_slice_expired(rq->curr, rq);
+	if (preempt && cpu_of(rq) != smp_processor_id())
+		resched_curr(rq);
 out_unlock:
-	raw_spin_unlock_irqrestore(&rq->lock, flags);
+	task_access_unlock_irqrestore(p, lock, &flags);
 
-	if (yielded > 0)
-		schedule();
 	return yielded;
 }
 EXPORT_SYMBOL_GPL(yield_to);
