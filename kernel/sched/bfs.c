@@ -1932,8 +1932,7 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 	 * boost in one time slice. So punishment for run queue time slice only
 	 * apply to IDLE and BATCH policy tasks.
 	 * If it's negative, it won't matter since that's the same as being 0.
-	 * as is its last_ran value. rq->rq_deadline is only modified within
-	 * schedule() so it is always equal to current->deadline.
+	 * as is its last_ran value.
 	 */
 	if (likely(p->policy != SCHED_FIFO)) {
 		local_irq_disable();
@@ -3560,7 +3559,6 @@ static inline void schedule_debug(struct task_struct *prev)
  */
 static inline void set_rq_task(struct rq *rq, struct task_struct *p)
 {
-	rq->rq_deadline = p->deadline;
 	p->last_ran = rq->clock_task;
 
 	sched_cpu_priodls_lock();
@@ -3572,8 +3570,6 @@ static inline void set_rq_task(struct rq *rq, struct task_struct *p)
 
 static inline void reset_rq_task(struct rq *rq, struct task_struct *p)
 {
-	rq->rq_deadline = p->deadline;
-
 	sched_cpu_priodls_lock();
 	sched_rq_priodls[cpu_of(rq)] = p->priodl;
 	sched_cpu_priodls_unlock();
@@ -5271,6 +5267,7 @@ EXPORT_SYMBOL(yield);
 int __sched yield_to(struct task_struct *p, bool preempt)
 {
 	struct rq *rq;
+	struct task_struct *rq_curr;
 	raw_spinlock_t *lock;
 	unsigned long flags;
 	int yielded = 0;
@@ -5282,15 +5279,16 @@ int __sched yield_to(struct task_struct *p, bool preempt)
 		goto out_unlock;
 	}
 
+	rq_curr = rq->curr;
 	yielded = 1;
-	if (p->deadline > rq->rq_deadline) {
-		p->deadline = rq->rq_deadline;
+	if (p->deadline > rq_curr->deadline) {
+		p->deadline = rq_curr->deadline;
 		update_task_priodl(p);
 	}
-	p->time_slice += rq->curr->time_slice;
+	p->time_slice += rq_curr->time_slice;
 	if (p->time_slice > timeslice())
 		p->time_slice = timeslice();
-	time_slice_expired(rq->curr, rq);
+	time_slice_expired(rq_curr, rq);
 	if (preempt && cpu_of(rq) != smp_processor_id())
 		resched_curr(rq);
 out_unlock:
