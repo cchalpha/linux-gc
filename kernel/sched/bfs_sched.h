@@ -23,11 +23,6 @@ struct rq {
 	/* switch count */
 	u64 nr_switches;
 
-	/*
-	 * Stored data about rq->curr to work outside grq lock.
-	 * TODO still need these local data?!
-	 */
-	u64 rq_deadline;
 	bool rq_running; /* There is a task running */
 	/* Accurate timekeeping data */
 	u64 timekeep_clock;
