@@ -162,11 +162,6 @@ static inline int task_on_rq_migrating(struct task_struct *p)
  */
 int rr_interval __read_mostly = 6;
 
-/* Tunable to choose whether to prioritise latency or throughput, simple
- * binary yes or no */
-
-int sched_interactive __read_mostly = 1;
-
 /*
  * sched_iso_cpu - sysctl which determines the cpu percentage SCHED_ISO tasks
  * are allowed to run five seconds as real time tasks. This is the total over
