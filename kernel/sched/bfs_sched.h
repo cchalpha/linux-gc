@@ -25,7 +25,6 @@ struct rq {
 
 	bool rq_running; /* There is a task running */
 	/* Accurate timekeeping data */
-	u64 timekeep_clock;
 	unsigned long user_pc, nice_pc, irq_pc, softirq_pc, system_pc,
 		iowait_pc, idle_pc;
 	atomic_t nr_iowait;
