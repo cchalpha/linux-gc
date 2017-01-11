@@ -2785,13 +2785,12 @@ update_cpu_clock_tick(struct rq *rq, struct task_struct *p)
 ts_account:
 	/* time_slice accounting is done in usecs to avoid overflow on 32bit */
 	if (p->policy != SCHED_FIFO && p != idle) {
-		s64 time_diff = rq->clock - rq->timekeep_clock;
+		s64 time_diff = rq->clock_task - p->last_ran;
 
 		p->time_slice -= NS_TO_US(time_diff);
 	}
 
 	p->last_ran = rq->clock_task;
-	rq->timekeep_clock = rq->clock;
 }
 
 /*
@@ -2816,13 +2815,12 @@ update_cpu_clock_switch_nonidle(struct rq *rq, struct task_struct *p)
 ts_account:
 	/* time_slice accounting is done in usecs to avoid overflow on 32bit */
 	if (p->policy != SCHED_FIFO) {
-		s64 time_diff = rq->clock - rq->timekeep_clock;
+		s64 time_diff = rq->clock_task - p->last_ran;
 
 		p->time_slice -= NS_TO_US(time_diff);
 	}
 
 	p->last_ran = rq->clock_task;
-	rq->timekeep_clock = rq->clock;
 }
 
 static inline void
@@ -2839,7 +2837,6 @@ update_cpu_clock_switch_idle(struct rq *rq, struct task_struct *p)
 	pc_idle_time(rq, p, account_pc);
 ts_account:
 	p->last_ran = rq->clock_task;
-	rq->timekeep_clock = rq->clock;
 }
 
 /*
