@@ -568,7 +568,7 @@ static bool isoprio_suitable(struct rq *rq)
 }
 
 /*
- * bfs_skiplist_random_level -- Returns a pseudo-random level number for skip
+ * vrq_skiplist_random_level -- Returns a pseudo-random level number for skip
  * list node which is used in BFS run queue.
  *
  * In current implementation, based on testing, the first 8 bits in microseconds
@@ -581,17 +581,13 @@ static bool isoprio_suitable(struct rq *rq)
  * skiplist level is set to task's sl_node->level, the skiplist insert function
  * may change it based on current level of the skip lsit.
  */
-static inline int bfs_skiplist_random_level(const long unsigned int randseed)
+static inline int vrq_skiplist_random_level(const long unsigned int randseed)
 {
-	int level = find_first_bit(&randseed, sizeof(randseed));
-
-	if (unlikely(level >= NUM_SKIPLIST_LEVEL))
-		level = NUM_SKIPLIST_LEVEL - 1;
-	return level;
+	return find_first_bit(&randseed, NUM_SKIPLIST_LEVEL - 1);
 }
 
 /**
- * bfs_skiplist_task_search -- search function used in BFS run queue skip list
+ * vrq_skiplist_task_search -- search function used in BFS run queue skip list
  * node insert operation.
  * @it: iterator pointer to the node in the skip list
  * @node: pointer to the skiplist_node to be inserted
@@ -600,7 +596,7 @@ static inline int bfs_skiplist_random_level(const long unsigned int randseed)
  * false.
  */
 static inline bool
-bfs_skiplist_task_search(struct skiplist_node *it, struct skiplist_node *node)
+vrq_skiplist_task_search(struct skiplist_node *it, struct skiplist_node *node)
 {
 	return (skiplist_entry(it, struct task_struct, sl_node)->priodl <=
 		skiplist_entry(node, struct task_struct, sl_node)->priodl);
@@ -609,7 +605,7 @@ bfs_skiplist_task_search(struct skiplist_node *it, struct skiplist_node *node)
 /*
  * Define the skip list insert function for BFS
  */
-DEFINE_SKIPLIST_INSERT_FUNC(bfs_skiplist_insert, bfs_skiplist_task_search);
+DEFINE_SKIPLIST_INSERT_FUNC(bfs_skiplist_insert, vrq_skiplist_task_search);
 
 /*
  * Adding task to the runqueue.
@@ -1824,7 +1820,7 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 	 * Some architectures don't have better than microsecond resolution
 	 * so mask out ~microseconds as the random seed for skiplist insertion.
 	 */
-	p->sl_level = bfs_skiplist_random_level(task_rq(p)->clock >> 10);
+	p->sl_level = vrq_skiplist_random_level(task_rq(p)->clock >> 10);
 	INIT_SKIPLIST_NODE(&p->sl_node);
 
 	/*
