@@ -2,9 +2,11 @@
 #define BFS_SCHED_H
 
 #include <linux/sched.h>
+#include <linux/u64_stats_sync.h>
 #include <linux/cpuidle.h>
 #include <linux/stop_machine.h>
 #include <linux/skip_list.h>
+#include "cpuacct.h"
 
 /*
  * This is the main, per-CPU runqueue data structure.
@@ -24,9 +26,6 @@ struct rq {
 	u64 nr_switches;
 
 	bool rq_running; /* There is a task running */
-	/* Accurate timekeeping data */
-	unsigned long user_pc, nice_pc, irq_pc, softirq_pc, system_pc,
-		iowait_pc, idle_pc;
 	atomic_t nr_iowait;
 
 	int iso_ticks;
@@ -94,12 +93,6 @@ extern atomic_long_t calc_load_tasks;
 extern void calc_global_load_tick(struct rq *this_rq);
 extern long calc_load_fold_active(struct rq *this_rq, long adjust);
 
-/*
-#ifdef CONFIG_SMP
-struct rq *cpu_rq(int cpu);
-#endif
-*/
-
 #ifndef CONFIG_SMP
 extern struct rq *uprq;
 #define cpu_rq(cpu)	(uprq)
@@ -153,6 +146,8 @@ static inline u64 rq_clock_task(struct rq *rq)
 	 */
 	return rq->clock_task;
 }
+
+#include "stats.h"
 
 extern struct mutex sched_domains_mutex;
 extern struct static_key_false sched_schedstats;
@@ -208,6 +203,31 @@ static inline int cpu_of(struct rq *rq)
 
 #ifdef CONFIG_CPU_FREQ
 DECLARE_PER_CPU(struct update_util_data *, cpufreq_update_util_data);
+
+#ifdef CONFIG_IRQ_TIME_ACCOUNTING
+struct irqtime {
+	u64			hardirq_time;
+	u64			softirq_time;
+	u64			irq_start_time;
+	struct u64_stats_sync	sync;
+};
+
+DECLARE_PER_CPU(struct irqtime, cpu_irqtime);
+
+static inline u64 irq_time_read(int cpu)
+{
+	struct irqtime *irqtime = &per_cpu(cpu_irqtime, cpu);
+	unsigned int seq;
+	u64 total;
+
+	do {
+		seq = __u64_stats_fetch_begin(&irqtime->sync);
+		total = irqtime->softirq_time + irqtime->hardirq_time;
+	} while (__u64_stats_fetch_retry(&irqtime->sync, seq));
+
+	return total;
+}
+#endif /* CONFIG_IRQ_TIME_ACCOUNTING */
 
 /**
  * cpufreq_update_util - Take a note about CPU utilization changes.
@@ -270,18 +290,5 @@ unsigned long arch_scale_cpu_capacity(struct sched_domain *sd, int cpu)
 #else /* arch_scale_freq_capacity */
 #define arch_scale_freq_invariant()	(false)
 #endif
-
-static inline void account_reset_rq(struct rq *rq)
-{
-#ifdef CONFIG_IRQ_TIME_ACCOUNTING
-	rq->prev_irq_time = 0;
-#endif
-#ifdef CONFIG_PARAVIRT
-	rq->prev_steal_time = 0;
-#endif
-#ifdef CONFIG_PARAVIRT_TIME_ACCOUNTING
-	rq->prev_steal_time_rq = 0;
-#endif
-}
 
 #endif /* BFS_SCHED_H */
