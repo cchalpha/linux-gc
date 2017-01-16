@@ -140,7 +140,12 @@ void account_user_time(struct task_struct *p, cputime_t cputime,
 	p->utimescaled += cputime_scaled;
 	account_group_user_time(p, cputime);
 
+#ifdef	CONFIG_SCHED_BFS
+	index = (task_nice(p) > 0 || idleprio_task(p)) ? CPUTIME_NICE :
+		CPUTIME_USER;
+#else
 	index = (task_nice(p) > 0) ? CPUTIME_NICE : CPUTIME_USER;
+#endif
 
 	/* Add user time to cpustat. */
 	task_group_account_field(p, index, (__force u64) cputime);
@@ -167,7 +172,11 @@ static void account_guest_time(struct task_struct *p, cputime_t cputime,
 	p->gtime += cputime;
 
 	/* Add guest time to cpustat. */
+#ifdef	CONFIG_SCHED_BFS
+	if (task_nice(p) > 0 || idleprio_task(p)) {
+#else
 	if (task_nice(p) > 0) {
+#endif
 		cpustat[CPUTIME_NICE] += (__force u64) cputime;
 		cpustat[CPUTIME_GUEST_NICE] += (__force u64) cputime;
 	} else {
@@ -301,7 +310,7 @@ static inline cputime_t account_other_time(cputime_t max)
 #ifdef CONFIG_64BIT
 static inline u64 read_sum_exec_runtime(struct task_struct *t)
 {
-	return t->se.sum_exec_runtime;
+	return tsk_seruntime(t);
 }
 #else
 static u64 read_sum_exec_runtime(struct task_struct *t)
@@ -311,7 +320,7 @@ static u64 read_sum_exec_runtime(struct task_struct *t)
 	struct rq *rq;
 
 	rq = task_rq_lock(t, &rf);
-	ns = t->se.sum_exec_runtime;
+	ns = tsk_seruntime(t);
 	task_rq_unlock(rq, t, &rf);
 
 	return ns;
@@ -495,6 +504,7 @@ void thread_group_cputime_adjusted(struct task_struct *p, cputime_t *ut, cputime
 	*st = cputime.stime;
 }
 #else /* !CONFIG_VIRT_CPU_ACCOUNTING_NATIVE */
+
 /*
  * Account a single tick of cpu time.
  * @p: the process that the cpu time gets accounted to
@@ -694,7 +704,7 @@ out:
 void task_cputime_adjusted(struct task_struct *p, cputime_t *ut, cputime_t *st)
 {
 	struct task_cputime cputime = {
-		.sum_exec_runtime = p->se.sum_exec_runtime,
+		.sum_exec_runtime = tsk_seruntime(p),
 	};
 
 	task_cputime(p, &cputime.utime, &cputime.stime);

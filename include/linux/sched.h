@@ -2014,6 +2014,9 @@ void cpu_nonscaling(int cpu);
 
 void print_scheduler_version(void);
 
+#define is_idle_policy(policy)	((policy) == SCHED_IDLEPRIO)
+#define idleprio_task(p)	unlikely(is_idle_policy((p)->policy))
+
 #define is_iso_policy(policy)	((policy) == SCHED_ISO)
 #define iso_task(p)		unlikely(is_iso_policy((p)->policy))
 
