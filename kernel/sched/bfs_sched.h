@@ -25,7 +25,6 @@ struct rq {
 	/* switch count */
 	u64 nr_switches;
 
-	bool rq_running; /* There is a task running */
 	atomic_t nr_iowait;
 
 	int iso_ticks;

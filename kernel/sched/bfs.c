@@ -2972,26 +2972,21 @@ static inline void schedule_debug(struct task_struct *prev)
 	schedstat_inc(this_rq()->sched_count);
 }
 
-/*
- * The currently running task's information is all stored in rq local data
- * which is only modified by the local CPU.
- */
-static inline void set_rq_task(struct rq *rq, struct task_struct *p)
-{
-	p->last_ran = rq->clock_task;
-
-	sched_cpu_priodls_lock();
-	sched_rq_priodls[cpu_of(rq)] = p->priodl;
-	sched_cpu_priodls_unlock();
-
-	rq->rq_running = (p != rq->idle);
-}
-
 static inline void reset_rq_task(struct rq *rq, struct task_struct *p)
 {
 	sched_cpu_priodls_lock();
 	sched_rq_priodls[cpu_of(rq)] = p->priodl;
 	sched_cpu_priodls_unlock();
+}
+
+static inline void set_rq_task(struct rq *rq, struct task_struct *p)
+{
+	p->last_ran = rq->clock_task;
+
+	reset_rq_task(rq, p);
+
+	/* update rq->dither only switching to a new task */
+	rq->dither = (rq->clock - rq->last_tick < HALF_JIFFY_NS)? 0:HALF_JIFFY_NS;
 }
 
 /*
@@ -3113,10 +3108,6 @@ static void __sched notrace __schedule(bool preempt)
 	}
 
 	if (likely(prev != next)) {
-		/* update cpu dither only switching to a new task */
-		rq->dither = (rq->clock - rq->last_tick < HALF_JIFFY_NS)?
-			0:HALF_JIFFY_NS;
-
 		update_sched_rq_running_masks(rq, next);
 		if (unlikely(next->prio == PRIO_LIMIT))
 			schedstat_inc(rq->sched_goidle);
