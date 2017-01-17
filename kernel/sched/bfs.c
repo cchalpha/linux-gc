@@ -6860,7 +6860,7 @@ EXPORT_SYMBOL(___might_sleep);
 #endif
 
 #ifdef CONFIG_MAGIC_SYSRQ
-static inline void normalise_rt_tasks(void)
+void normalize_rt_tasks(void)
 {
 	struct task_struct *g, *p;
 	struct sched_attr attr = {
@@ -6880,25 +6880,14 @@ static inline void normalise_rt_tasks(void)
 			 * Renice negative nice level userspace
 			 * tasks back to 0:
 			 */
-			if (task_nice(p) < 0 && p->mm)
+			if (task_nice(p) < 0)
 				set_user_nice(p, 0);
 			continue;
 		}
 
-		/*
-		 * Only normalize user tasks:
-		 */
-		if (p->flags & PF_KTHREAD)
-			continue;
-
 		__sched_setscheduler(p, &attr, false, false);
 	}
 	read_unlock(&tasklist_lock);
-}
-
-void normalize_rt_tasks(void)
-{
-	normalise_rt_tasks();
 }
 #endif /* CONFIG_MAGIC_SYSRQ */
 
