@@ -5285,8 +5285,6 @@ static void migrate_tasks(struct rq *dead_rq)
 			cpumask_set_cpu(0, tsk_cpus_allowed(p));
 		p->nr_cpus_allowed = cpumask_weight(tsk_cpus_allowed(p));
 		dest_cpu = cpumask_any_and(tsk_cpus_allowed(p), cpu_online_mask);
-		printk(KERN_INFO "vrq: task %d affinity[%lu] will move to cpu %d.\n",
-			   p->pid, tsk_cpus_allowed(p)->bits[0], dest_cpu);
 
 		rq = __migrate_task(rq, p, dest_cpu);
 		raw_spin_unlock(&rq->lock);
