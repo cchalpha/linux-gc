@@ -285,6 +285,22 @@ static inline u64 read_sum_exec_runtime(struct task_struct *t)
 	return tsk_seruntime(t);
 }
 #else
+
+#ifdef	CONFIG_SCHED_BFS
+static u64 read_sum_exec_runtime(struct task_struct *t)
+{
+	u64 ns;
+	struct rq *rq;
+	raw_spinlock_t *lock;
+	unsigned long flags;
+
+	rq = task_access_lock_irqsave(t, &lock, &flags);
+	ns = tsk_seruntime(t);
+	task_access_unlock_irqrestore(t, lock, &flags);
+
+	return ns;
+}
+#else
 static u64 read_sum_exec_runtime(struct task_struct *t)
 {
 	u64 ns;
@@ -297,6 +313,8 @@ static u64 read_sum_exec_runtime(struct task_struct *t)
 
 	return ns;
 }
+#endif
+
 #endif
 
 /*
