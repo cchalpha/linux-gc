@@ -2567,6 +2567,73 @@ static inline void vrq_scheduler_task_tick(struct rq *rq, struct task_struct *p)
 	p->last_ran = rq->clock_task;
 }
 
+/**
+ * VRQ load balance function, be called in scheduler_tick()
+ *
+ * return: true if balance happened with rq->lock released, otherwise false.
+ * context: interrupt disabled, rq->lock
+ */
+static inline bool vrq_trigger_load_balance(struct rq *rq)
+{
+	int cpu;
+	struct task_struct *p;
+	cpumask_t check;
+	cpumask_t *preempt, *pend_mask;
+
+	/*
+	 * No task policy fairness is needed when there is no task or only IDLE
+	 * policy tasks in current rq queue.
+	 */
+	if (rq->last_tagged_queued_level >= SCHED_RQ_IDLE_PL)
+		return false;
+
+	pend_mask = &sched_rq_running_masks[rq->last_tagged_queued_level];
+	preempt = &sched_rq_running_masks[SCHED_RQ_IDLE_PL];
+
+	cpumask_copy(&check, preempt);
+	preempt--;
+
+	for (; preempt > pend_mask; preempt--)
+		cpumask_or(&check, &check, preempt);
+
+	cpu = cpu_of(rq);
+	/*
+	 * Only balance within same physical cpu
+	 */
+	if (likely(!cpumask_and(&check, &check, topology_core_cpumask(cpu))))
+		return false;
+
+	/*
+	 * @rq may have a higher priority task queued but not yet running, in
+	 * this case, no balance is needed.
+	 */
+	if (unlikely(cpumask_test_cpu(cpu, &check)))
+		return false;
+
+	p = rq_first_queued_task(rq);
+	if (unlikely(NULL == p))
+		return false;
+
+	if (unlikely(!cpumask_and(&check, &check, tsk_cpus_allowed(p))))
+		return false;
+
+	raw_spin_unlock(&rq->lock);
+	raw_spin_lock(&p->pi_lock);
+	raw_spin_lock(&rq->lock);
+
+	/*
+	 * _something_ may have changed the task, double check again
+	 */
+	if (likely(rq_first_queued_task(rq) == p &&
+		   rq == task_rq(p)))
+		rq = __migrate_task(rq, p, cpumask_any(&check));
+
+	raw_spin_unlock(&rq->lock);
+	raw_spin_unlock(&p->pi_lock);
+
+	return true;
+}
+
 /*
  * This function gets called by the timer code, with HZ frequency.
  * We call it with interrupts disabled.
@@ -2587,6 +2654,10 @@ void scheduler_tick(void)
 	task_running_tick(rq, curr);
 	calc_global_load_tick(rq);
 	rq->last_tick = rq->clock;
+
+#ifdef CONFIG_SMP
+	if (likely(!vrq_trigger_load_balance(rq)))
+#endif
 	raw_spin_unlock(&rq->lock);
 
 	perf_event_task_tick();
