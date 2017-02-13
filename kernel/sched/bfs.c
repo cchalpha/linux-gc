@@ -2559,6 +2559,7 @@ static inline void vrq_scheduler_task_tick(struct rq *rq, struct task_struct *p)
 	p->last_ran = rq->clock_task;
 }
 
+#ifdef CONFIG_SMP
 /**
  * VRQ load balance function, be called in scheduler_tick()
  *
@@ -2625,6 +2626,7 @@ static inline bool vrq_trigger_load_balance(struct rq *rq)
 
 	return true;
 }
+#endif
 
 /*
  * This function gets called by the timer code, with HZ frequency.
