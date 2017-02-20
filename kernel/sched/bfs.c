@@ -1799,9 +1799,7 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 	p->on_rq =
 	p->utime =
 	p->stime =
-	p->sched_time =
-	p->stime_pc =
-	p->utime_pc = 0;
+	p->sched_time = 0;
 
 	/*
 	 * Some architectures don't have better than microsecond resolution
