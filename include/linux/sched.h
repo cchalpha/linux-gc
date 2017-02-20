@@ -1686,9 +1686,6 @@ struct task_struct {
 #ifdef CONFIG_ARCH_HAS_SCALED_CPUTIME
 	cputime_t utimescaled, stimescaled;
 #endif
-#ifdef CONFIG_SCHED_BFS
-	unsigned long utime_pc, stime_pc;
-#endif
 	cputime_t gtime;
 	struct prev_cputime prev_cputime;
 #ifdef CONFIG_VIRT_CPU_ACCOUNTING_GEN
