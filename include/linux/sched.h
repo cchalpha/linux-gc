@@ -714,9 +714,6 @@ struct task_struct {
 	u64				utimescaled;
 	u64				stimescaled;
 #endif
-#ifdef CONFIG_SCHED_BFS
-	unsigned long			utime_pc, stime_pc;
-#endif
 	u64				gtime;
 	struct prev_cputime		prev_cputime;
 #ifdef CONFIG_VIRT_CPU_ACCOUNTING_GEN
