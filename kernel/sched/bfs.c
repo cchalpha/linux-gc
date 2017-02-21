@@ -2495,9 +2495,29 @@ static inline void no_iso_tick(struct rq *rq)
 	}
 }
 
-/* This manages tasks that have run out of timeslice during a scheduler_tick */
-static inline void task_running_tick(struct rq *rq, struct task_struct *p)
+static inline void vrq_update_curr(struct rq *rq, struct task_struct *p)
 {
+	s64 ns = rq->clock_task - p->last_ran;
+
+	p->sched_time += ns;
+	account_group_exec_runtime(p, ns);
+
+	/* time_slice accounting is done in usecs to avoid overflow on 32bit */
+	if (likely(p->policy != SCHED_FIFO)) {
+		p->time_slice -= NS_TO_US(ns);
+	}
+	p->last_ran = rq->clock_task;
+}
+
+/* This manages tasks that have run out of timeslice during a scheduler_tick */
+static inline void vrq_scheduler_task_tick(struct rq *rq)
+{
+	struct task_struct *p = rq->curr;
+
+	if (is_idle_task(p))
+		return;
+
+	vrq_update_curr(rq, p);
 	/*
 	 * If a SCHED_ISO task is running we increment the iso_ticks. In
 	 * order to prevent SCHED_ISO tasks from causing starvation in the
@@ -2539,20 +2559,6 @@ static inline void task_running_tick(struct rq *rq, struct task_struct *p)
 	 * rq lock as p is rq->curr
 	 */
 	__set_tsk_resched(p);
-}
-
-static inline void vrq_scheduler_task_tick(struct rq *rq, struct task_struct *p)
-{
-	s64 ns = rq->clock_task - p->last_ran;
-
-	p->sched_time += ns;
-	account_group_exec_runtime(p, ns);
-
-	/* time_slice accounting is done in usecs to avoid overflow on 32bit */
-	if (likely(p->policy != SCHED_FIFO && p->prio != PRIO_LIMIT)) {
-		p->time_slice -= NS_TO_US(ns);
-	}
-	p->last_ran = rq->clock_task;
 }
 
 #ifdef CONFIG_SMP
@@ -2632,16 +2638,14 @@ void scheduler_tick(void)
 {
 	int cpu __maybe_unused = smp_processor_id();
 	struct rq *rq = cpu_rq(cpu);
-	struct task_struct *curr = rq->curr;
 
 	sched_clock_tick();
 	/* update rq clock */
 	raw_spin_lock(&rq->lock);
 
 	update_rq_clock(rq);
-	vrq_scheduler_task_tick(rq, curr);
+	vrq_scheduler_task_tick(rq);
 	cpufreq_update_util(rq, 0);
-	task_running_tick(rq, curr);
 	calc_global_load_tick(rq);
 	rq->last_tick = rq->clock;
 
@@ -2785,13 +2789,7 @@ static void time_slice_expired(struct task_struct *p, struct rq *rq)
  */
 static inline void check_deadline(struct task_struct *p, struct rq *rq)
 {
-	/* time_slice accounting is done in usecs to avoid overflow on 32bit */
-	if (p->policy != SCHED_FIFO) {
-		s64 time_diff = rq->clock_task - p->last_ran;
-
-		p->time_slice -= NS_TO_US(time_diff);
-	}
-	p->last_ran = rq->clock_task;
+	vrq_update_curr(rq, p);
 
 	if (p->time_slice < RESCHED_US || batch_task(p))
 		time_slice_expired(p, rq);
