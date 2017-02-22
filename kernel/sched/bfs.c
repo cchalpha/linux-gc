@@ -71,11 +71,11 @@
 #include <linux/context_tracking.h>
 #include <linux/sched/prio.h>
 #include <linux/frame.h>
+#include <linux/mutex.h>
 
 #include <asm/switch_to.h>
 #include <asm/tlb.h>
 #include <asm/irq_regs.h>
-#include <asm/mutex.h>
 #ifdef CONFIG_PARAVIRT
 #include <asm/paravirt.h>
 #endif
@@ -1237,7 +1237,7 @@ unsigned long wait_task_inactive(struct task_struct *p, long match_state)
 		 * yield - it could be a while.
 		 */
 		if (unlikely(on_rq)) {
-			ktime_t to = ktime_set(0, NSEC_PER_SEC / HZ);
+			ktime_t to = NSEC_PER_SEC / HZ;
 
 			set_current_state(TASK_UNINTERRUPTIBLE);
 			schedule_hrtimeout(&to, HRTIMER_MODE_REL);
@@ -1799,8 +1799,6 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 	p->on_rq =
 	p->utime =
 	p->stime =
-	p->utimescaled =
-	p->stimescaled =
 	p->sched_time =
 	p->stime_pc =
 	p->utime_pc = 0;
@@ -4990,6 +4988,7 @@ void init_idle(struct task_struct *idle, int cpu)
 
 	idle->last_ran = rq->clock_task;
 	idle->state = TASK_RUNNING;
+	idle->flags |= PF_IDLE;
 	/* Setting prio to illegal value shouldn't matter when never queued */
 	idle->prio = PRIO_LIMIT;
 	idle->deadline = 0ULL;
