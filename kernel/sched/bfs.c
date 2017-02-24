@@ -279,12 +279,6 @@ DEFINE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
  */
 DEFINE_MUTEX(sched_domains_mutex);
 
-/*
- * By default the system creates a single root-domain with all cpus as
- * members (mimicking the global state we have today).
- */
-static struct root_domain def_root_domain;
-
 int __weak arch_sd_sibling_asym_packing(void)
 {
        return 0*SD_ASYM_PACKING;
