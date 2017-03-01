@@ -34,8 +34,6 @@ struct rq {
 	int cpu;		/* cpu of this runqueue */
 	bool online;
 
-	struct root_domain *rd;
-	struct sched_domain *sd;
 #endif /* CONFIG_SMP */
 #ifdef CONFIG_IRQ_TIME_ACCOUNTING
 	u64 prev_irq_time;
@@ -160,22 +158,7 @@ task_access_unlock_irqrestore(struct task_struct *p, raw_spinlock_t *lock,
 
 #include "stats.h"
 
-extern struct mutex sched_domains_mutex;
 extern struct static_key_false sched_schedstats;
-
-#define rcu_dereference_check_sched_domain(p) \
-	rcu_dereference_check((p), \
-			      lockdep_is_held(&sched_domains_mutex))
-
-/*
- * The domain tree (rq->sd) is protected by RCU's quiescent state transition.
- * See detach_destroy_domains: synchronize_sched for details.
- *
- * The domain tree of any CPU may only be accessed from within
- * preempt-disabled sections.
- */
-#define for_each_domain(cpu, __sd) \
-	for (__sd = rcu_dereference_check_sched_domain(cpu_rq(cpu)->sd); __sd; __sd = __sd->parent)
 
 static inline void sched_ttwu_pending(void) { }
 
