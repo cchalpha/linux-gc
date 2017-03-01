@@ -4,7 +4,7 @@
 #include <linux/seq_file.h>
 #include <linux/proc_fs.h>
 
-#include "bfs_sched.h"
+#include "sched.h"
 
 /*
  * bump this up when changing the output format or the meaning of an existing
@@ -22,8 +22,10 @@ static int show_schedstat(struct seq_file *seq, void *v)
 	} else {
 		struct rq *rq;
 #ifdef CONFIG_SMP
+#ifndef CONFIG_SCHED_BFS
 		struct sched_domain *sd;
 		int dcount = 0;
+#endif
 #endif
 		cpu = (unsigned long)(v - 2);
 		rq = cpu_rq(cpu);
@@ -40,6 +42,7 @@ static int show_schedstat(struct seq_file *seq, void *v)
 		seq_printf(seq, "\n");
 
 #ifdef CONFIG_SMP
+#ifndef CONFIG_SCHED_BFS
 		/* domain-specific stats */
 		rcu_read_lock();
 		for_each_domain(cpu, sd) {
@@ -68,6 +71,7 @@ static int show_schedstat(struct seq_file *seq, void *v)
 			    sd->ttwu_move_balance);
 		}
 		rcu_read_unlock();
+#endif
 #endif
 	}
 	return 0;
