@@ -59,6 +59,14 @@ struct rq {
 	int last_tagged_queued_level;
 	int last_running_policy_level;
 
+#ifdef CONFIG_SCHED_HRTICK
+#ifdef CONFIG_SMP
+	int hrtick_csd_pending;
+	struct call_single_data hrtick_csd;
+#endif
+	struct hrtimer hrtick_timer;
+#endif
+
 #ifdef CONFIG_SCHEDSTATS
 
 	/* latency stats */
