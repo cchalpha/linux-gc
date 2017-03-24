@@ -5346,6 +5346,13 @@ void set_sched_topology(struct sched_domain_topology_level *tl)
 }
 
 /*
+ * Initializers for schedule domains
+ * Non-inlined to reduce accumulated stack pressure in build_sched_domains()
+ */
+
+int sched_domain_level_max;
+
+/*
  * Partition sched domains as specified by the 'ndoms_new'
  * cpumasks in the array doms_new[] of cpumasks. This compares
  * doms_new[] to the current sched domain partitioning, doms_cur[].
