@@ -121,6 +121,7 @@
 #define MS_TO_US(TIME)		((TIME) << 10)
 #define NS_TO_MS(TIME)		((TIME) >> 20)
 #define NS_TO_US(TIME)		((TIME) >> 10)
+#define US_TO_NS(TIME)		((TIME) << 10)
 
 #define RESCHED_US	(100) /* Reschedule if less than this many μs left */
 
@@ -709,6 +710,167 @@ void check_preempt_curr(struct rq *rq, struct task_struct *p)
 	if (p->priodl < rq->curr->priodl)
 		resched_curr(rq);
 }
+
+#ifdef CONFIG_SCHED_HRTICK
+/*
+ * Use HR-timers to deliver accurate preemption points.
+ */
+
+static void hrtick_clear(struct rq *rq)
+{
+	if (hrtimer_active(&rq->hrtick_timer))
+		hrtimer_cancel(&rq->hrtick_timer);
+}
+
+/*
+ * High-resolution timer tick.
+ * Runs from hardirq context with interrupts disabled.
+ */
+static enum hrtimer_restart hrtick(struct hrtimer *timer)
+{
+	struct rq *rq = container_of(timer, struct rq, hrtick_timer);
+	struct task_struct *p;
+
+	WARN_ON_ONCE(cpu_of(rq) != smp_processor_id());
+
+	raw_spin_lock(&rq->lock);
+	update_rq_clock(rq);
+
+	p = rq->curr;
+	p->time_slice = 0;
+	resched_curr(rq);
+	raw_spin_unlock(&rq->lock);
+
+	return HRTIMER_NORESTART;
+}
+
+#ifdef CONFIG_SMP
+
+/*
+ * Use hrtick when:
+ *  - enabled by features
+ *  - hrtimer is actually high res
+ */
+static inline int hrtick_enabled(struct rq *rq)
+{
+	/**
+	 * VRQ doesn't support sched_feat yet
+	if (!sched_feat(HRTICK))
+		return 0;
+	*/
+	if (!cpu_active(cpu_of(rq)))
+		return 0;
+	return hrtimer_is_hres_active(&rq->hrtick_timer);
+}
+
+static void __hrtick_restart(struct rq *rq)
+{
+	struct hrtimer *timer = &rq->hrtick_timer;
+
+	hrtimer_start_expires(timer, HRTIMER_MODE_ABS_PINNED);
+}
+
+/*
+ * called from hardirq (IPI) context
+ */
+static void __hrtick_start(void *arg)
+{
+	struct rq *rq = arg;
+
+	raw_spin_lock(&rq->lock);
+	__hrtick_restart(rq);
+	rq->hrtick_csd_pending = 0;
+	raw_spin_unlock(&rq->lock);
+}
+
+/*
+ * Called to set the hrtick timer state.
+ *
+ * called with rq->lock held and irqs disabled
+ */
+void hrtick_start(struct rq *rq, u64 delay)
+{
+	struct hrtimer *timer = &rq->hrtick_timer;
+	ktime_t time;
+	s64 delta;
+
+	/*
+	 * Don't schedule slices shorter than 10000ns, that just
+	 * doesn't make sense and can cause timer DoS.
+	 */
+	delta = max_t(s64, delay, 10000LL);
+	time = ktime_add_ns(timer->base->get_time(), delta);
+
+	hrtimer_set_expires(timer, time);
+
+	if (rq == this_rq()) {
+		__hrtick_restart(rq);
+	} else if (!rq->hrtick_csd_pending) {
+		smp_call_function_single_async(cpu_of(rq), &rq->hrtick_csd);
+		rq->hrtick_csd_pending = 1;
+	}
+}
+
+#else
+/*
+ * Called to set the hrtick timer state.
+ *
+ * called with rq->lock held and irqs disabled
+ */
+void hrtick_start(struct rq *rq, u64 delay)
+{
+	/*
+	 * Don't schedule slices shorter than 10000ns, that just
+	 * doesn't make sense. Rely on vruntime for fairness.
+	 */
+	delay = max_t(u64, delay, 10000LL);
+	hrtimer_start(&rq->hrtick_timer, ns_to_ktime(delay),
+		      HRTIMER_MODE_REL_PINNED);
+}
+#endif /* CONFIG_SMP */
+
+static void init_rq_hrtick(struct rq *rq)
+{
+#ifdef CONFIG_SMP
+	rq->hrtick_csd_pending = 0;
+
+	rq->hrtick_csd.flags = 0;
+	rq->hrtick_csd.func = __hrtick_start;
+	rq->hrtick_csd.info = rq;
+#endif
+
+	hrtimer_init(&rq->hrtick_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	rq->hrtick_timer.function = hrtick;
+}
+
+static inline int rq_dither(struct rq *rq)
+{
+	if ((rq->clock - rq->last_tick > HALF_JIFFY_NS) || hrtick_enabled(rq))
+		return 0;
+
+	return HALF_JIFFY_NS;
+}
+
+#else	/* CONFIG_SCHED_HRTICK */
+static inline int hrtick_enabled(struct rq *rq)
+{
+	return 0;
+}
+
+static inline void hrtick_clear(struct rq *rq)
+{
+}
+
+static inline void init_rq_hrtick(struct rq *rq)
+{
+}
+
+static inline int rq_dither(struct rq *rq)
+{
+	return (rq->clock - rq->last_tick > HALF_JIFFY_NS)? 0:HALF_JIFFY_NS;
+}
+#endif	/* CONFIG_SCHED_HRTICK */
+
 
 #ifdef CONFIG_SMP
 /*
@@ -1817,6 +1979,7 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 		if (idleprio_task(p) || batch_task(p)) {
 			rq->curr->time_slice /= 2;
 			p->time_slice = rq->curr->time_slice;
+			hrtick_start(rq, rq->curr->time_slice);
 		} else
 			p->time_slice = rq->curr->time_slice / 2;
 		local_irq_enable();
@@ -2994,8 +3157,12 @@ static inline void set_rq_task(struct rq *rq, struct task_struct *p)
 
 	reset_rq_task(rq, p);
 
-	/* update rq->dither only switching to a new task */
-	rq->dither = (rq->clock - rq->last_tick < HALF_JIFFY_NS)? 0:HALF_JIFFY_NS;
+#ifdef CONFIG_HIGH_RES_TIMERS
+	if (!(p == rq->idle || p->policy == SCHED_FIFO))
+		hrtick_start(rq, US_TO_NS(p->time_slice));
+#endif
+	/* update rq->dither */
+	rq->dither = rq_dither(rq);
 }
 
 /*
@@ -3050,6 +3217,9 @@ static void __sched notrace __schedule(bool preempt)
 	prev = rq->curr;
 
 	schedule_debug(prev);
+
+	/* by passing sched_feat(HRTICK) checking which VRQ doesn't support */
+	hrtick_clear(rq);
 
 	local_irq_disable();
 	rcu_note_context_switch();
@@ -3116,12 +3286,12 @@ static void __sched notrace __schedule(bool preempt)
 			enqueue_task(prev, rq);
 	}
 
+	set_rq_task(rq, next);
+
 	if (likely(prev != next)) {
 		update_sched_rq_running_masks(rq, next);
 		if (unlikely(next->prio == PRIO_LIMIT))
 			schedstat_inc(rq->sched_goidle);
-
-		set_rq_task(rq, next);
 
 		/* Once next->on_cpu is set, task_access_lock...() can be locked on
 		 * task's runqueue, so set it before release rq lock
@@ -3135,10 +3305,8 @@ static void __sched notrace __schedule(bool preempt)
 		rq = context_switch(rq, prev, next); /* unlocks the rq */
 		cpu = cpu_of(rq);
 		idle = rq->idle;
-	} else {
-		set_rq_task(rq, next);
+	} else
 		raw_spin_unlock_irq(&rq->lock);
-	}
 }
 
 void __noreturn do_task_dead(void)
@@ -4942,6 +5110,13 @@ void init_idle(struct task_struct *idle, int cpu)
 	idle->prio = PRIO_LIMIT;
 	idle->deadline = 0ULL;
 	update_task_priodl(idle);
+	/**
+	 * use reset_rq_task() to update sched_rq_priodls only, not calling
+	 * set_rq_task() as rq_dither() need to check hrtick_enabled(), which is
+	 * not yet ready during boot-up
+	 */
+	reset_rq_task(rq, idle);
+
 
 	kasan_unpoison_task_stack(idle);
 
@@ -4954,7 +5129,6 @@ void init_idle(struct task_struct *idle, int cpu)
 	 */
 	set_cpus_allowed_common(idle, cpumask_of(cpu));
 #endif
-	set_rq_task(rq, idle);
 
 	/* Silence PROVE_RCU */
 	rcu_read_lock();
@@ -4971,6 +5145,7 @@ void init_idle(struct task_struct *idle, int cpu)
 	init_idle_preempt_count(idle, cpu);
 
 	ftrace_graph_init_idle_task(idle, cpu);
+	vtime_init_idle(idle, cpu);
 #ifdef CONFIG_SMP
 	sprintf(idle->comm, "%s/%d", INIT_TASK_COMM, cpu);
 #endif
@@ -5530,6 +5705,7 @@ int sched_cpu_dying(unsigned int cpu)
 	update_rq_clock(rq);
 	raw_spin_unlock_irqrestore(&rq->lock, flags);
 
+	hrtick_clear(rq);
 	return 0;
 }
 #endif
@@ -5704,6 +5880,7 @@ void __init sched_init(void)
 		atomic_set(&rq->nr_iowait, 0);
 		rq->iso_ticks = 0;
 		rq->iso_refractory = 0;
+		init_rq_hrtick(rq);
 	}
 
 	/*
