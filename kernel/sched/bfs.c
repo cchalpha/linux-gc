@@ -5795,7 +5795,7 @@ static void sched_init_topology_cpumask(void)
 		cpumask_copy(&tmp, topology_sibling_cpumask(cpu));
 		cpumask_clear_cpu(cpu, &tmp);
 		if (cpumask_weight(&tmp)) {
-			printk(KERN_INFO "vrq: sched_cpu_affinity_chk_masks[%d] smt 0x%02lu",
+			printk(KERN_INFO "vrq: sched_cpu_affinity_chk_masks[%d] smt 0x%08lx",
 			       cpu, tmp.bits[0]);
 			cpumask_copy(chk, &tmp);
 			chk++;
@@ -5804,7 +5804,7 @@ static void sched_init_topology_cpumask(void)
 #ifdef CONFIG_SCHED_MC
 		cpumask_complement(&tmp, topology_sibling_cpumask(cpu));
 		if (cpumask_and(&tmp, &tmp, cpu_coregroup_mask(cpu))) {
-			printk(KERN_INFO "vrq: sched_cpu_affinity_chk_masks[%d] coregroup 0x%02lu",
+			printk(KERN_INFO "vrq: sched_cpu_affinity_chk_masks[%d] coregroup 0x%08lx",
 			       cpu, tmp.bits[0]);
 			cpumask_copy(chk, &tmp);
 			chk++;
@@ -5820,7 +5820,7 @@ static void sched_init_topology_cpumask(void)
 
 		cpumask_complement(&tmp, cpu_coregroup_mask(cpu));
 		if (cpumask_and(&tmp, &tmp, topology_core_cpumask(cpu))) {
-			printk(KERN_INFO "vrq: sched_cpu_affinity_chk_masks[%d] core 0x%02lu",
+			printk(KERN_INFO "vrq: sched_cpu_affinity_chk_masks[%d] core 0x%08lx",
 			       cpu, tmp.bits[0]);
 			cpumask_copy(chk, &tmp);
 			chk++;
@@ -5828,7 +5828,7 @@ static void sched_init_topology_cpumask(void)
 
 		cpumask_complement(&tmp, topology_core_cpumask(cpu));
 		if (cpumask_and(&tmp, &tmp, cpu_possible_mask)) {
-			printk(KERN_INFO "vrq: sched_cpu_affinity_chk_masks[%d] others 0x%02lu",
+			printk(KERN_INFO "vrq: sched_cpu_affinity_chk_masks[%d] others 0x%08lx",
 			       cpu, tmp.bits[0]);
 			cpumask_copy(chk, &tmp);
 			chk++;
