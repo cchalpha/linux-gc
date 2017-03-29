@@ -477,6 +477,59 @@ update_sched_rq_running_masks(struct rq *rq, struct task_struct *p) {}
 static inline void update_sched_rq_queued_masks(struct rq *rq) {}
 #endif
 
+#ifdef CONFIG_NO_HZ_FULL
+/**
+ * scheduler_tick_max_deferment
+ *
+ * Keep at least one tick per second when a single
+ * active task is running because the scheduler doesn't
+ * yet completely support full dynticks environment.
+ *
+ * This makes sure that uptime, CFS vruntime, load
+ * balancing, etc... continue to move forward, even
+ * with a very low granularity.
+ *
+ * Return: Maximum deferment in nanoseconds.
+ */
+u64 scheduler_tick_max_deferment(void)
+{
+	struct rq *rq = this_rq();
+	u64 next, now = sched_clock_cpu(cpu_of(rq));
+
+	next = rq->last_tick + JIFFIES_TO_NS(HZ);
+
+	if (next <= now)
+		return 0ULL;
+
+	return next - now;
+}
+
+/*
+ * Tick may be needed by tasks in the runqueue depending on their policy and
+ * requirements. If tick is needed, lets send the target an IPI to kick it out
+ * of nohz mode if necessary.
+ */
+static inline void sched_update_tick_dependency(struct rq *rq)
+{
+	int cpu;
+
+	if (!tick_nohz_full_enabled())
+		return;
+
+	cpu = cpu_of(rq);
+
+	if (!tick_nohz_full_cpu(cpu))
+		return;
+
+	if (0 == rq->nr_queued)
+		tick_nohz_dep_clear_cpu(cpu, TICK_DEP_BIT_SCHED);
+	else
+		tick_nohz_dep_set_cpu(cpu, TICK_DEP_BIT_SCHED);
+}
+#else
+static inline void sched_update_tick_dependency(struct rq *rq) { }
+#endif
+
 /*
  * Removing from the global runqueue. Deleting a task from the skip list is done
  * via the stored node reference in the task struct and does not require a full
@@ -494,6 +547,7 @@ static void dequeue_task(struct task_struct *p, struct rq *rq)
 	if (skiplist_del_init(&rq->sl_header, &p->sl_node))
 		update_sched_rq_queued_masks(rq);
 	rq->nr_queued--;
+	sched_update_tick_dependency(rq);
 
 	sched_info_dequeued(task_rq(p), p);
 }
@@ -583,6 +637,7 @@ static void enqueue_task(struct task_struct *p, struct rq *rq)
 	if (bfs_skiplist_insert(&rq->sl_header, &p->sl_node))
 		update_sched_rq_queued_masks(rq);
 	rq->nr_queued++;
+	sched_update_tick_dependency(rq);
 
 	sched_info_queued(rq, p);
 }
