@@ -5765,6 +5765,7 @@ int sched_cpu_dying(unsigned int cpu)
 }
 #endif
 
+#ifdef CONFIG_SMP
 static void sched_init_topology_cpumask_early(void)
 {
 	int cpu, level;
@@ -5784,7 +5785,6 @@ static void sched_init_topology_cpumask_early(void)
 
 static void sched_init_topology_cpumask(void)
 {
-#ifdef CONFIG_SMP
 	int cpu;
 	cpumask_t tmp;
 	cpumask_t *chk;
@@ -5827,7 +5827,7 @@ static void sched_init_topology_cpumask(void)
 		}
 
 		cpumask_complement(&tmp, topology_core_cpumask(cpu));
-		if (cpumask_and(&tmp, &tmp, cpu_possible_mask)) {
+		if (cpumask_and(&tmp, &tmp, cpu_online_mask)) {
 			printk(KERN_INFO "vrq: sched_cpu_affinity_chk_masks[%d] others 0x%08lx",
 			       cpu, tmp.bits[0]);
 			cpumask_copy(chk, &tmp);
@@ -5836,8 +5836,8 @@ static void sched_init_topology_cpumask(void)
 
 		sched_cpu_affinity_chk_end_masks[cpu] = chk;
 	}
-#endif
 }
+#endif
 
 void __init sched_init_smp(void)
 {
