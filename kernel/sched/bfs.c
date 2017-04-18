@@ -799,8 +799,6 @@ static enum hrtimer_restart hrtick(struct hrtimer *timer)
 	return HRTIMER_NORESTART;
 }
 
-#ifdef CONFIG_SMP
-
 /*
  * Use hrtick when:
  *  - enabled by features
@@ -817,6 +815,8 @@ static inline int hrtick_enabled(struct rq *rq)
 		return 0;
 	return hrtimer_is_hres_active(&rq->hrtick_timer);
 }
+
+#ifdef CONFIG_SMP
 
 static void __hrtick_restart(struct rq *rq)
 {
