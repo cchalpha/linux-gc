@@ -3,6 +3,7 @@
 
 #include <linux/sched.h>
 #include <linux/u64_stats_sync.h>
+#include <linux/kernel_stat.h>
 #include <linux/cpuidle.h>
 #include <linux/stop_machine.h>
 #include <linux/skip_list.h>
@@ -205,8 +206,7 @@ static inline int cpu_of(struct rq *rq)
 
 #ifdef CONFIG_IRQ_TIME_ACCOUNTING
 struct irqtime {
-	u64			hardirq_time;
-	u64			softirq_time;
+	u64			tick_delta;
 	u64			irq_start_time;
 	struct u64_stats_sync	sync;
 };
@@ -216,12 +216,13 @@ DECLARE_PER_CPU(struct irqtime, cpu_irqtime);
 static inline u64 irq_time_read(int cpu)
 {
 	struct irqtime *irqtime = &per_cpu(cpu_irqtime, cpu);
+	u64 *cpustat = kcpustat_cpu(cpu).cpustat;
 	unsigned int seq;
 	u64 total;
 
 	do {
 		seq = __u64_stats_fetch_begin(&irqtime->sync);
-		total = irqtime->softirq_time + irqtime->hardirq_time;
+		total = cpustat[CPUTIME_SOFTIRQ] + cpustat[CPUTIME_IRQ];
 	} while (__u64_stats_fetch_retry(&irqtime->sync, seq));
 
 	return total;
