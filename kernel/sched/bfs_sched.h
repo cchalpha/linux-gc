@@ -2,12 +2,54 @@
 #define BFS_SCHED_H
 
 #include <linux/sched.h>
+#include <linux/sched/autogroup.h>
+#include <linux/sched/sysctl.h>
+#include <linux/sched/topology.h>
+#include <linux/sched/rt.h>
+#include <linux/sched/deadline.h>
+#include <linux/sched/clock.h>
+#include <linux/sched/wake_q.h>
+#include <linux/sched/signal.h>
+#include <linux/sched/numa_balancing.h>
+#include <linux/sched/mm.h>
+#include <linux/sched/cpufreq.h>
+#include <linux/sched/stat.h>
+#include <linux/sched/nohz.h>
+#include <linux/sched/debug.h>
+#include <linux/sched/hotplug.h>
+#include <linux/sched/task.h>
+#include <linux/sched/task_stack.h>
+#include <linux/sched/cputime.h>
+#include <linux/sched/init.h>
+
 #include <linux/u64_stats_sync.h>
+#include <linux/kernel_stat.h>
+#include <linux/binfmts.h>
+#include <linux/mutex.h>
+#include <linux/spinlock.h>
+#include <linux/stop_machine.h>
+#include <linux/irq_work.h>
+#include <linux/tick.h>
+#include <linux/slab.h>
+
+#include <linux/skip_list.h>
+
+#ifdef CONFIG_PARAVIRT
+#include <asm/paravirt.h>
+#endif
+
+#include "cpupri.h"
+#include "cpudeadline.h"
+#include "cpuacct.h"
+
+/*
+#include <linux/sched.h>
 #include <linux/kernel_stat.h>
 #include <linux/cpuidle.h>
 #include <linux/stop_machine.h>
 #include <linux/skip_list.h>
 #include "cpuacct.h"
+*/
 
 /*
  * This is the main, per-CPU runqueue data structure.

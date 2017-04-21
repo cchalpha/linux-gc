@@ -28,66 +28,44 @@
  *              a whole lot of those previous things.
  */
 
-#include <linux/kasan.h>
-#include <linux/mm.h>
-#include <linux/module.h>
-#include <linux/nmi.h>
-#include <linux/init.h>
-#include <asm/uaccess.h>
-#include <linux/highmem.h>
-#include <linux/mmu_context.h>
-#include <linux/interrupt.h>
-#include <linux/capability.h>
-#include <linux/completion.h>
-#include <linux/kernel_stat.h>
-#include <linux/debug_locks.h>
-#include <linux/perf_event.h>
-#include <linux/security.h>
-#include <linux/notifier.h>
-#include <linux/profile.h>
-#include <linux/freezer.h>
-#include <linux/vmalloc.h>
-#include <linux/blkdev.h>
-#include <linux/delay.h>
-#include <linux/smp.h>
-#include <linux/threads.h>
-#include <linux/timer.h>
-#include <linux/rcupdate.h>
-#include <linux/cpu.h>
+#include <linux/sched.h>
+#include <linux/sched/clock.h>
+#include <uapi/linux/sched/types.h>
+#include <linux/sched/loadavg.h>
+#include <linux/sched/hotplug.h>
 #include <linux/cpuset.h>
-#include <linux/cpumask.h>
-#include <linux/percpu.h>
-#include <linux/proc_fs.h>
-#include <linux/seq_file.h>
-#include <linux/syscalls.h>
-#include <linux/times.h>
-#include <linux/tsacct_kern.h>
-#include <linux/kprobes.h>
 #include <linux/delayacct.h>
-#include <linux/tick.h>
-#include <linux/ftrace.h>
-#include <linux/slab.h>
 #include <linux/init_task.h>
 #include <linux/context_tracking.h>
-#include <linux/sched/prio.h>
-#include <linux/frame.h>
-#include <linux/mutex.h>
+#include <linux/rcupdate_wait.h>
+
+#include <linux/blkdev.h>
+#include <linux/kprobes.h>
+#include <linux/mmu_context.h>
+#include <linux/module.h>
+#include <linux/nmi.h>
+#include <linux/prefetch.h>
+#include <linux/profile.h>
+#include <linux/security.h>
+#include <linux/syscalls.h>
 
 #include <asm/switch_to.h>
 #include <asm/tlb.h>
-#include <asm/irq_regs.h>
 #ifdef CONFIG_PARAVIRT
 #include <asm/paravirt.h>
 #endif
 
 #include "bfs_sched.h"
+#include <linux/freezer.h>
 #include "../workqueue_internal.h"
 #include "../smpboot.h"
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/sched.h>
 
+/*
 #include "cpupri.h"
+*/
 
 #define rt_prio(prio)		unlikely((prio) < MAX_RT_PRIO)
 #define rt_task(p)		rt_prio((p)->prio)
@@ -1236,7 +1214,7 @@ static struct rq *__migrate_task(struct rq *rq, struct task_struct *p, int
 		return rq;
 
 	/* Affinity changed (again). */
-	if (unlikely(!cpumask_test_cpu(dest_cpu, tsk_cpus_allowed(p))))
+	if (unlikely(!cpumask_test_cpu(dest_cpu, &p->cpus_allowed)))
 		return rq;
 
 	return move_queued_task(rq, p, dest_cpu);
@@ -1283,7 +1261,7 @@ static int migration_cpu_stop(void *data)
 static inline void
 set_cpus_allowed_common(struct task_struct *p, const struct cpumask *new_mask)
 {
-	cpumask_copy(tsk_cpus_allowed(p), new_mask);
+	cpumask_copy(&p->cpus_allowed, new_mask);
 	p->nr_cpus_allowed = cpumask_weight(new_mask);
 }
 
@@ -1498,14 +1476,14 @@ static int select_fallback_rq(int cpu, struct task_struct *p)
 		for_each_cpu(dest_cpu, nodemask) {
 			if (!cpu_active(dest_cpu))
 				continue;
-			if (cpumask_test_cpu(dest_cpu, tsk_cpus_allowed(p)))
+			if (cpumask_test_cpu(dest_cpu, &p->cpus_allowed))
 				return dest_cpu;
 		}
 	}
 
 	for (;;) {
 		/* Any allowed, online CPU? */
-		for_each_cpu(dest_cpu, tsk_cpus_allowed(p)) {
+		for_each_cpu(dest_cpu, &p->cpus_allowed) {
 			if (!(p->flags & PF_KTHREAD) && !cpu_active(dest_cpu))
 				continue;
 			if (!cpu_online(dest_cpu))
@@ -1584,7 +1562,7 @@ task_preemptible_rq(struct task_struct *p, int only_preempt_low_policy)
 	cpumask_t tmp, check;
 	cpumask_t *mask, *preempt_mask;
 
-	if (unlikely(!cpumask_and(&check, tsk_cpus_allowed(p),
+	if (unlikely(!cpumask_and(&check, &p->cpus_allowed,
 				  cpu_online_mask)))
 		return NULL;
 
@@ -1633,7 +1611,7 @@ static struct rq* task_balance_rq(struct task_struct *p)
 	unsigned int min_nr_queued = ~0;
 	unsigned int nr_queued;
 
-	if (unlikely(!cpumask_and(&tmp, tsk_cpus_allowed(p), cpu_online_mask))) {
+	if (unlikely(!cpumask_and(&tmp, &p->cpus_allowed, cpu_online_mask))) {
 		printk(KERN_INFO "vrq: task %d has no online cpu to run on.\n",
 		       p->pid);
 		return cpu_rq(select_fallback_rq(task_cpu(p), p));
@@ -2780,7 +2758,7 @@ static inline bool vrq_trigger_load_balance(struct rq *rq)
 	if (unlikely(NULL == p))
 		return false;
 
-	if (unlikely(!cpumask_and(&check, &check, tsk_cpus_allowed(p))))
+	if (unlikely(!cpumask_and(&check, &check, &p->cpus_allowed)))
 		return false;
 
 	raw_spin_unlock(&rq->lock);
@@ -3062,7 +3040,7 @@ rq_best_queued_task(struct rq *rq, const int cpu, const bool scaling)
 
 	do {
 		/* check for cpu affinity */
-		if (cpumask_test_cpu(cpu, tsk_cpus_allowed(p))) {
+		if (cpumask_test_cpu(cpu, &p->cpus_allowed)) {
 			if (scaling && noninteractive_task(p))
 				goto next;
 			if (p->last_ran < last_ran) {
@@ -3872,7 +3850,7 @@ static int __set_cpus_allowed_ptr(struct task_struct *p,
 		goto out;
 	}
 
-	if (cpumask_equal(tsk_cpus_allowed(p), new_mask))
+	if (cpumask_equal(&p->cpus_allowed, new_mask))
 		goto out;
 
 	if (!cpumask_intersects(new_mask, cpu_valid_mask)) {
@@ -4702,7 +4680,7 @@ long sched_getaffinity(pid_t pid, cpumask_t *mask)
 		goto out_unlock;
 
 	task_access_lock_irqsave(p, &lock, &flags);
-	cpumask_and(mask, tsk_cpus_allowed(p), cpu_active_mask);
+	cpumask_and(mask, &p->cpus_allowed, cpu_active_mask);
 	task_access_unlock_irqrestore(p, lock, &flags);
 
 out_unlock:
@@ -5471,10 +5449,10 @@ static void migrate_tasks(struct rq *dead_rq)
 		}
 
 		count++;
-		if (!cpumask_intersects(tsk_cpus_allowed(p), cpu_online_mask))
-			cpumask_set_cpu(0, tsk_cpus_allowed(p));
-		p->nr_cpus_allowed = cpumask_weight(tsk_cpus_allowed(p));
-		dest_cpu = cpumask_any_and(tsk_cpus_allowed(p), cpu_online_mask);
+		if (!cpumask_intersects(&p->cpus_allowed, cpu_online_mask))
+			cpumask_set_cpu(0, &p->cpus_allowed);
+		p->nr_cpus_allowed = cpumask_weight(&p->cpus_allowed);
+		dest_cpu = cpumask_any_and(&p->cpus_allowed, cpu_online_mask);
 
 		rq = __migrate_task(rq, p, dest_cpu);
 		raw_spin_unlock(&rq->lock);
