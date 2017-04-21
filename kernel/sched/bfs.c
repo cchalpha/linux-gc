@@ -5860,11 +5860,14 @@ void __init sched_init_smp(void)
 	free_cpumask_var(non_isolated_cpus);
 
 	sched_init_topology_cpumask();
+	sched_clock_init_late();
+
 	sched_smp_initialized = true;
 }
 #else
 void __init sched_init_smp(void)
 {
+	sched_clock_init_late();
 }
 #endif /* CONFIG_SMP */
 
@@ -5892,6 +5895,8 @@ void __init sched_init(void)
 {
 	int i;
 	struct rq *rq;
+
+	sched_clock_init();
 
 	for (i = 0; i < WAIT_TABLE_SIZE; i++)
 		init_waitqueue_head(bit_wait_table + i);
