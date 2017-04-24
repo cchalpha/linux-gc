@@ -1760,6 +1760,97 @@ static int ttwu_remote(struct task_struct *p, int wake_flags)
 	return ret;
 }
 
+/*
+ * Notes on Program-Order guarantees on SMP systems.
+ *
+ *  MIGRATION
+ *
+ * The basic program-order guarantee on SMP systems is that when a task [t]
+ * migrates, all its activity on its old CPU [c0] happens-before any subsequent
+ * execution on its new CPU [c1].
+ *
+ * For migration (of runnable tasks) this is provided by the following means:
+ *
+ *  A) UNLOCK of the rq(c0)->lock scheduling out task t
+ *  B) migration for t is required to synchronize *both* rq(c0)->lock and
+ *     rq(c1)->lock (if not at the same time, then in that order).
+ *  C) LOCK of the rq(c1)->lock scheduling in task
+ *
+ * Transitivity guarantees that B happens after A and C after B.
+ * Note: we only require RCpc transitivity.
+ * Note: the CPU doing B need not be c0 or c1
+ *
+ * Example:
+ *
+ *   CPU0            CPU1            CPU2
+ *
+ *   LOCK rq(0)->lock
+ *   sched-out X
+ *   sched-in Y
+ *   UNLOCK rq(0)->lock
+ *
+ *                                   LOCK rq(0)->lock // orders against CPU0
+ *                                   dequeue X
+ *                                   UNLOCK rq(0)->lock
+ *
+ *                                   LOCK rq(1)->lock
+ *                                   enqueue X
+ *                                   UNLOCK rq(1)->lock
+ *
+ *                   LOCK rq(1)->lock // orders against CPU2
+ *                   sched-out Z
+ *                   sched-in X
+ *                   UNLOCK rq(1)->lock
+ *
+ *
+ *  BLOCKING -- aka. SLEEP + WAKEUP
+ *
+ * For blocking we (obviously) need to provide the same guarantee as for
+ * migration. However the means are completely different as there is no lock
+ * chain to provide order. Instead we do:
+ *
+ *   1) smp_store_release(X->on_cpu, 0)
+ *   2) smp_cond_load_acquire(!X->on_cpu)
+ *
+ * Example:
+ *
+ *   CPU0 (schedule)  CPU1 (try_to_wake_up) CPU2 (schedule)
+ *
+ *   LOCK rq(0)->lock LOCK X->pi_lock
+ *   dequeue X
+ *   sched-out X
+ *   smp_store_release(X->on_cpu, 0);
+ *
+ *                    smp_cond_load_acquire(&X->on_cpu, !VAL);
+ *                    X->state = WAKING
+ *                    set_task_cpu(X,2)
+ *
+ *                    LOCK rq(2)->lock
+ *                    enqueue X
+ *                    X->state = RUNNING
+ *                    UNLOCK rq(2)->lock
+ *
+ *                                          LOCK rq(2)->lock // orders against CPU1
+ *                                          sched-out Z
+ *                                          sched-in X
+ *                                          UNLOCK rq(2)->lock
+ *
+ *                    UNLOCK X->pi_lock
+ *   UNLOCK rq(0)->lock
+ *
+ *
+ * However; for wakeups there is a second guarantee we must provide, namely we
+ * must observe the state that lead to our wakeup. That is, not only must our
+ * task observe its own prior state, it must also observe the stores prior to
+ * its wakeup.
+ *
+ * This means that any means of doing remote wakeups must order the CPU doing
+ * the wakeup against the CPU the task is going to end up running on. This,
+ * however, is already required for the regular Program-Order guarantee above,
+ * since the waking CPU is the one issueing the ACQUIRE (smp_cond_load_acquire).
+ *
+ */
+
 /***
  * try_to_wake_up - wake up a thread
  * @p: the thread to be awakened
@@ -1794,9 +1885,9 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 		goto out;
 
 	trace_sched_waking(p);
-	cpu = task_cpu(p);
 
 	success = 1;
+	cpu = task_cpu(p);
 
 	/*
 	 * Ensure we load p->on_rq _after_ p->state, otherwise it would
@@ -1823,6 +1914,7 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 	if (p->on_rq && ttwu_remote(p, wake_flags))
 		goto stat;
 
+#ifdef CONFIG_SMP
 	/*
 	 * Ensure we load p->on_cpu _after_ p->on_rq, otherwise it would be
 	 * possible to, falsely, observe p->on_cpu == 0.
@@ -1856,18 +1948,29 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
 	p->sched_contributes_to_load = !!task_contributes_to_load(p);
 	p->state = TASK_WAKING;
 
+	if (p->in_iowait) {
+		delayacct_blkio_end();
+		atomic_dec(&task_rq(p)->nr_iowait);
+	}
+
 	prq = select_task_rq(p, wake_flags);
 
-	raw_spin_lock(&prq->lock);
-
-#ifdef CONFIG_SMP
 	cpu = cpu_of(prq);
 	if (cpu != task_cpu(p)) {
 		wake_flags |= WF_MIGRATED;
 		set_task_cpu(p, cpu);
 	}
+#else /* CONFIG_SMP */
+
+	if (p->in_iowait) {
+		delayacct_blkio_end();
+		atomic_dec(&task_rq(p)->nr_iowait);
+	}
+	prq = cpu_rq(cpu);
+
 #endif
 
+	raw_spin_lock(&prq->lock);
 	ttwu_do_activate(prq, p, wake_flags);
 
 	check_preempt_curr(prq, p);
@@ -1899,8 +2002,15 @@ static void try_to_wake_up_local(struct task_struct *p)
 
 	trace_sched_waking(p);
 
-	if (!task_queued(p))
+	if (!task_queued(p)) {
+		if (p->in_iowait) {
+			delayacct_blkio_end();
+			atomic_dec(&task_rq(p)->nr_iowait);
+		}
+
 		ttwu_activate(p, rq);
+	}
+
 	ttwu_do_wakeup(rq, p, 0);
 	ttwu_stat(p, smp_processor_id(), 0);
 }
@@ -2473,6 +2583,36 @@ unsigned long long nr_context_switches(void)
 	return sum;
 }
 
+/*
+ * IO-wait accounting, and how its mostly bollocks (on SMP).
+ *
+ * The idea behind IO-wait account is to account the idle time that we could
+ * have spend running if it were not for IO. That is, if we were to improve the
+ * storage performance, we'd have a proportional reduction in IO-wait time.
+ *
+ * This all works nicely on UP, where, when a task blocks on IO, we account
+ * idle time as IO-wait, because if the storage were faster, it could've been
+ * running and we'd not be idle.
+ *
+ * This has been extended to SMP, by doing the same for each CPU. This however
+ * is broken.
+ *
+ * Imagine for instance the case where two tasks block on one CPU, only the one
+ * CPU will have IO-wait accounted, while the other has regular idle. Even
+ * though, if the storage were faster, both could've ran at the same time,
+ * utilising both CPUs.
+ *
+ * This means, that when looking globally, the current IO-wait accounting on
+ * SMP is a lower bound, by reason of under accounting.
+ *
+ * Worse, since the numbers are provided per CPU, they are sometimes
+ * interpreted per CPU, and that is nonsensical. A blocked task isn't strictly
+ * associated with any one particular CPU, it can wake to another CPU than it
+ * blocked on. This means the per CPU IO-wait number is meaningless.
+ *
+ * Task CPU affinities can make all that even more 'interesting'.
+ */
+
 unsigned long nr_iowait(void)
 {
 	unsigned long i, sum = 0;
@@ -2482,6 +2622,13 @@ unsigned long nr_iowait(void)
 
 	return sum;
 }
+
+/*
+ * Consumers of these two interfaces, like for example the cpufreq menu
+ * governor are using nonsensical data. Boosting frequency for a CPU that has
+ * IO-wait which might not even end up running the task when it does become
+ * runnable.
+ */
 
 unsigned long nr_iowait_cpu(int cpu)
 {
@@ -3272,6 +3419,11 @@ static void __sched notrace __schedule(bool preempt)
 		} else {
 			deactivate = true;
 			prev->on_rq = 0;
+
+			if (prev->in_iowait) {
+				atomic_inc(&rq->nr_iowait);
+				delayacct_blkio_start();
+			}
 
 			/*
 			 * If a worker is going to sleep, notify and
@@ -4922,19 +5074,13 @@ EXPORT_SYMBOL_GPL(yield_to);
 long __sched io_schedule_timeout(long timeout)
 {
 	int old_iowait = current->in_iowait;
-	struct rq *rq;
 	long ret;
 
 	current->in_iowait = 1;
 	blk_schedule_flush_plug(current);
 
-	delayacct_blkio_start();
-	rq = raw_rq();
-	atomic_inc(&rq->nr_iowait);
 	ret = schedule_timeout(timeout);
 	current->in_iowait = old_iowait;
-	atomic_dec(&rq->nr_iowait);
-	delayacct_blkio_end();
 
 	return ret;
 }
