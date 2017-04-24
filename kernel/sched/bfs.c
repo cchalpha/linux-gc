@@ -217,18 +217,6 @@ struct rq *uprq;
 # define finish_arch_post_lock_switch()	do { } while (0)
 #endif
 
-static void update_rq_clock_task(struct rq *rq, s64 delta);
-
-static inline void update_rq_clock(struct rq *rq)
-{
-	s64 delta = sched_clock_cpu(cpu_of(rq)) - rq->clock;
-
-	if (unlikely(delta <= 0))
-		return;
-	rq->clock += delta;
-	update_rq_clock_task(rq, delta);
-}
-
 static inline bool task_running(struct task_struct *p)
 {
 	return p->on_cpu;
@@ -314,6 +302,68 @@ struct rq
 			raw_spin_unlock_irqrestore(&p->pi_lock, *flags);
 		}
 	}
+}
+
+/*
+ * RQ-clock updating methods:
+ */
+
+static void update_rq_clock_task(struct rq *rq, s64 delta)
+{
+/*
+ * In theory, the compile should just see 0 here, and optimize out the call
+ * to sched_rt_avg_update. But I don't trust it...
+ */
+#ifdef CONFIG_IRQ_TIME_ACCOUNTING
+	s64 irq_delta = irq_time_read(cpu_of(rq)) - rq->prev_irq_time;
+
+	/*
+	 * Since irq_time is only updated on {soft,}irq_exit, we might run into
+	 * this case when a previous update_rq_clock() happened inside a
+	 * {soft,}irq region.
+	 *
+	 * When this happens, we stop ->clock_task and only update the
+	 * prev_irq_time stamp to account for the part that fit, so that a next
+	 * update will consume the rest. This ensures ->clock_task is
+	 * monotonic.
+	 *
+	 * It does however cause some slight miss-attribution of {soft,}irq
+	 * time, a more accurate solution would be to update the irq_time using
+	 * the current rq->clock timestamp, except that would require using
+	 * atomic ops.
+	 */
+	if (irq_delta > delta)
+		irq_delta = delta;
+
+	rq->prev_irq_time += irq_delta;
+	delta -= irq_delta;
+#endif
+#ifdef CONFIG_PARAVIRT_TIME_ACCOUNTING
+	if (static_key_false((&paravirt_steal_rq_enabled))) {
+		s64 steal = paravirt_steal_clock(cpu_of(rq));
+
+		steal -= rq->prev_steal_time_rq;
+
+		if (unlikely(steal > delta))
+			steal = delta;
+
+		rq->prev_steal_time_rq += steal;
+
+		delta -= steal;
+	}
+#endif
+
+	rq->clock_task += delta;
+}
+
+static inline void update_rq_clock(struct rq *rq)
+{
+	s64 delta = sched_clock_cpu(cpu_of(rq)) - rq->clock;
+
+	if (unlikely(delta <= 0))
+		return;
+	rq->clock += delta;
+	update_rq_clock_task(rq, delta);
 }
 
 static inline void prepare_lock_switch(struct rq *rq, struct task_struct *next)
@@ -2631,54 +2681,6 @@ DEFINE_PER_CPU(struct kernel_cpustat, kernel_cpustat);
 
 EXPORT_PER_CPU_SYMBOL(kstat);
 EXPORT_PER_CPU_SYMBOL(kernel_cpustat);
-
-static void update_rq_clock_task(struct rq *rq, s64 delta)
-{
-/*
- * In theory, the compile should just see 0 here, and optimize out the call
- * to sched_rt_avg_update. But I don't trust it...
- */
-#ifdef CONFIG_IRQ_TIME_ACCOUNTING
-	s64 irq_delta = irq_time_read(cpu_of(rq)) - rq->prev_irq_time;
-
-	/*
-	 * Since irq_time is only updated on {soft,}irq_exit, we might run into
-	 * this case when a previous update_rq_clock() happened inside a
-	 * {soft,}irq region.
-	 *
-	 * When this happens, we stop ->clock_task and only update the
-	 * prev_irq_time stamp to account for the part that fit, so that a next
-	 * update will consume the rest. This ensures ->clock_task is
-	 * monotonic.
-	 *
-	 * It does however cause some slight miss-attribution of {soft,}irq
-	 * time, a more accurate solution would be to update the irq_time using
-	 * the current rq->clock timestamp, except that would require using
-	 * atomic ops.
-	 */
-	if (irq_delta > delta)
-		irq_delta = delta;
-
-	rq->prev_irq_time += irq_delta;
-	delta -= irq_delta;
-#endif
-#ifdef CONFIG_PARAVIRT_TIME_ACCOUNTING
-	if (static_key_false((&paravirt_steal_rq_enabled))) {
-		s64 steal = paravirt_steal_clock(cpu_of(rq));
-
-		steal -= rq->prev_steal_time_rq;
-
-		if (unlikely(steal > delta))
-			steal = delta;
-
-		rq->prev_steal_time_rq += steal;
-
-		delta -= steal;
-	}
-#endif
-
-	rq->clock_task += delta;
-}
 
 /*
  * Return accounted runtime for the task.
