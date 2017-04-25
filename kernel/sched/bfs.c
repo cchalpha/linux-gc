@@ -1639,11 +1639,8 @@ static struct rq* task_balance_rq(struct task_struct *p)
 	unsigned int min_nr_queued = ~0;
 	unsigned int nr_queued;
 
-	if (unlikely(!cpumask_and(&tmp, &p->cpus_allowed, cpu_online_mask))) {
-		printk(KERN_INFO "vrq: task %d has no online cpu to run on.\n",
-		       p->pid);
+	if (unlikely(!cpumask_and(&tmp, &p->cpus_allowed, cpu_online_mask)))
 		return cpu_rq(select_fallback_rq(task_cpu(p), p));
-	}
 
 	for_each_cpu(cpu, &tmp)
 		if ((nr_queued = cpu_rq(cpu)->nr_queued) < min_nr_queued) {
