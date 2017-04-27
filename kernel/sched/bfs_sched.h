@@ -2,15 +2,11 @@
 #define BFS_SCHED_H
 
 #include <linux/sched.h>
-#include <linux/sched/autogroup.h>
 #include <linux/sched/sysctl.h>
 #include <linux/sched/topology.h>
-#include <linux/sched/rt.h>
-#include <linux/sched/deadline.h>
 #include <linux/sched/clock.h>
 #include <linux/sched/wake_q.h>
 #include <linux/sched/signal.h>
-#include <linux/sched/numa_balancing.h>
 #include <linux/sched/mm.h>
 #include <linux/sched/cpufreq.h>
 #include <linux/sched/stat.h>
