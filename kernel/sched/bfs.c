@@ -93,7 +93,7 @@ enum {
 
 void print_scheduler_version(void)
 {
-	printk(KERN_INFO "BFS enhancement patchset VRQ 0.95a by Alfred Chen.\n");
+	printk(KERN_INFO "BFS enhancement patchset VRQ 0.95b by Alfred Chen.\n");
 }
 
 /* task_struct::on_rq states: */
