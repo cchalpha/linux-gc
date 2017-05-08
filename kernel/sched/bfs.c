@@ -643,6 +643,14 @@ static void enqueue_task(struct task_struct *p, struct rq *rq)
 	sched_update_tick_dependency(rq);
 
 	sched_info_queued(rq, p);
+
+	/*
+	 * If in_iowait is set, the code below may not trigger any cpufreq
+	 * utilization updates, so do it here explicitly with the IOWAIT flag
+	 * passed.
+	 */
+	if (p->in_iowait)
+		cpufreq_update_this_cpu(rq, SCHED_CPUFREQ_IOWAIT);
 }
 
 /*
@@ -2789,6 +2797,8 @@ static inline void vrq_scheduler_task_tick(struct rq *rq)
 		return;
 
 	vrq_update_curr(rq, p);
+
+	cpufreq_update_util(rq, 0);
 	/*
 	 * If a SCHED_ISO task is running we increment the iso_ticks. In
 	 * order to prevent SCHED_ISO tasks from causing starvation in the
@@ -2916,7 +2926,6 @@ void scheduler_tick(void)
 
 	update_rq_clock(rq);
 	vrq_scheduler_task_tick(rq);
-	cpufreq_update_util(rq, 0);
 	calc_global_load_tick(rq);
 	rq->last_tick = rq->clock;
 
