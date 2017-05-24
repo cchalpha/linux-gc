@@ -238,21 +238,18 @@ static inline struct rq
 	struct rq *rq;
 	for (;;) {
 		rq = task_rq(p);
-		if (p->on_cpu) {
+		if (p->on_cpu || task_on_rq_queued(p)) {
 			raw_spin_lock(&rq->lock);
-			if (likely(p->on_cpu && rq == task_rq(p))) {
+			if (likely((p->on_cpu || task_on_rq_queued(p))
+				   && rq == task_rq(p))) {
 				*plock = &rq->lock;
 				return rq;
 			}
 			raw_spin_unlock(&rq->lock);
-		} else if (task_queued(p)) {
-			raw_spin_lock(&rq->lock);
-			if (likely(!p->on_cpu && task_queued(p) &&
-				   rq == task_rq(p))) {
-				*plock = &rq->lock;
-				return rq;
-			}
-			raw_spin_unlock(&rq->lock);
+		} else if (task_on_rq_migrating(p)) {
+			do {
+				cpu_relax();
+			} while (unlikely(task_on_rq_migrating(p)));
 		} else {
 			*plock = NULL;
 			return rq;
@@ -274,24 +271,21 @@ struct rq
 	struct rq *rq;
 	for (;;) {
 		rq = task_rq(p);
-		if (p->on_cpu) {
+		if (p->on_cpu || task_on_rq_queued(p)) {
 			raw_spin_lock_irqsave(&rq->lock, *flags);
-			if (likely(p->on_cpu && rq == task_rq(p))) {
+			if (likely((p->on_cpu || task_on_rq_queued(p))
+				   && rq == task_rq(p))) {
 				*plock = &rq->lock;
 				return rq;
 			}
 			raw_spin_unlock_irqrestore(&rq->lock, *flags);
-		} else if (task_queued(p)) {
-			raw_spin_lock_irqsave(&rq->lock, *flags);
-			if (likely(!p->on_cpu && task_queued(p) &&
-				   rq == task_rq(p))) {
-				*plock = &rq->lock;
-				return rq;
-			}
-			raw_spin_unlock_irqrestore(&rq->lock, *flags);
+		} else if (task_on_rq_migrating(p)) {
+			do {
+				cpu_relax();
+			} while (unlikely(task_on_rq_migrating(p)));
 		} else {
 			raw_spin_lock_irqsave(&p->pi_lock, *flags);
-			if (likely(!p->on_cpu && !task_queued(p) &&
+			if (likely(!p->on_cpu && !p->on_rq &&
 				   rq == task_rq(p))) {
 				*plock = &p->pi_lock;
 				return rq;
