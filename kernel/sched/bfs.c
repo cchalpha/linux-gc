@@ -174,6 +174,17 @@ sched_cpu_affinity_llc_end_masks[NR_CPUS] ____cacheline_aligned_in_smp;
 static cpumask_t *
 sched_cpu_affinity_chk_end_masks[NR_CPUS] ____cacheline_aligned_in_smp;
 
+#ifdef CONFIG_SCHED_SMT
+static cpumask_t sched_cpu_sg_idle_mask ____cacheline_aligned_in_smp;
+
+static unsigned int sched_cpu_nr_sibling ____cacheline_aligned_in_smp;
+
+static bool cpu_smt_capability(int dummy)
+{
+	return (sched_cpu_nr_sibling > 1);
+}
+#endif
+
 #ifndef CONFIG_64BIT
 static raw_spinlock_t sched_cpu_priodls_lock ____cacheline_aligned_in_smp;
 #endif
@@ -443,6 +454,26 @@ update_sched_rq_running_masks(struct rq *rq, struct task_struct *p)
 		cpumask_clear_cpu(cpu, &sched_rq_running_masks[last_policy]);
 		cpumask_set_cpu(cpu, &sched_rq_running_masks[policy]);
 		rq->last_running_policy_level = policy;
+
+#ifdef CONFIG_SCHED_SMT
+		if (likely(cpu_smt_capability(cpu))) {
+			if (SCHED_RQ_IDLE_TSK == last_policy) {
+				cpumask_andnot(&sched_cpu_sg_idle_mask,
+						   &sched_cpu_sg_idle_mask,
+						   cpu_smt_mask(cpu));
+			} else if (SCHED_RQ_IDLE_TSK == policy) {
+				cpumask_t tmp;
+
+				cpumask_and(&tmp,
+						&sched_rq_running_masks[SCHED_RQ_IDLE_TSK],
+						cpu_smt_mask(cpu));
+				if (sched_cpu_nr_sibling == cpumask_weight(&tmp))
+					cpumask_or(&sched_cpu_sg_idle_mask,
+						   &sched_cpu_sg_idle_mask,
+						   cpu_smt_mask(cpu));
+			}
+		}
+#endif
 	}
 }
 
@@ -1595,6 +1626,21 @@ task_preemptible_rq(struct task_struct *p, int only_preempt_low_policy)
 
 	preempt_mask = &sched_rq_running_masks[task_running_policy_level(p)];
 	mask = &sched_rq_running_masks[SCHED_RQ_IDLE_TSK];
+
+#ifdef CONFIG_SCHED_SMT
+	if(cpumask_and(&tmp, &check, mask)) {
+		if(cpu_smt_capability(cpu) &&
+		   !cpumask_and(&tmp, &tmp, &sched_cpu_sg_idle_mask)) {
+			if(unlikely(!cpumask_and(&tmp, &check, mask)))
+				goto no_idle_cpu;
+		}
+		cpu = best_mask_cpu(task_cpu(p), &tmp);
+		return cpu_rq(cpu);
+	}
+no_idle_cpu:
+	mask--;
+#endif
+
 	while (mask > preempt_mask) {
 		if(cpumask_and(&tmp, &check, mask)) {
 			cpu = best_mask_cpu(task_cpu(p), &tmp);
@@ -2837,6 +2883,162 @@ static inline void vrq_scheduler_task_tick(struct rq *rq)
 }
 
 #ifdef CONFIG_SMP
+
+#ifdef CONFIG_SCHED_SMT
+/*
+ * detach_task() -- detach the task for the migration specified in @target_cpu
+ */
+static void detach_task(struct rq *rq, struct task_struct *p, int target_cpu)
+{
+	lockdep_assert_held(&rq->lock);
+
+	if (task_contributes_to_load(p))
+		rq->nr_uninterruptible++;
+	dequeue_task(p, rq);
+	rq->nr_running--;
+	p->on_rq = TASK_ON_RQ_MIGRATING;
+	cpufreq_update_this_cpu(rq, 0);
+
+	set_task_cpu(p, target_cpu);
+}
+
+/*
+ * attach_task() -- attach the task detached by detach_task() to its new rq.
+ */
+static void attach_task(struct rq *rq, struct task_struct *p)
+{
+	lockdep_assert_held(&rq->lock);
+
+	BUG_ON(task_rq(p) != rq);
+
+	update_rq_clock(rq);
+
+	if (task_contributes_to_load(p))
+		rq->nr_uninterruptible--;
+	enqueue_task(p, rq);
+	rq->nr_running++;
+	p->on_rq = TASK_ON_RQ_QUEUED;
+	cpufreq_update_this_cpu(rq, 0);
+
+	check_preempt_curr(rq, p);
+}
+
+/*
+ * attach_one_task() -- attaches the task returned from detach_one_task() to
+ * its new rq.
+ */
+static void attach_one_task(struct rq *rq, struct task_struct *p)
+{
+	unsigned long flags;
+
+	raw_spin_lock_irqsave(&rq->lock, flags);
+	attach_task(rq, p);
+	raw_spin_unlock_irqrestore(&rq->lock, flags);
+}
+
+static int active_load_balance_cpu_stop(void *data)
+{
+	struct rq *rq = data;
+	unsigned long flags;
+	struct task_struct *p;
+	int target_cpu = rq->push_cpu;
+
+	raw_spin_lock_irqsave(&rq->lock, flags);
+
+	p = rq_first_queued_task(rq);
+	if (unlikely(NULL == p))
+		goto unlock_out;
+
+	if (unlikely(!cpumask_test_cpu(target_cpu, &p->cpus_allowed))) {
+		p = NULL;
+		goto unlock_out;
+	}
+
+	detach_task(rq, p, target_cpu);
+
+unlock_out:
+	rq->active_balance = 0;
+	raw_spin_unlock_irqrestore(&rq->lock, flags);
+
+	if (p) {
+		struct rq *target_rq = cpu_rq(target_cpu);
+		attach_one_task(target_rq, p);
+	}
+
+	return 0;
+}
+
+static __latent_entropy void vrq_run_rebalance(struct softirq_action *h)
+{
+	struct rq *this_rq = this_rq();
+	unsigned long flags;
+	struct task_struct *curr;
+	cpumask_t tmp;
+
+	raw_spin_lock_irqsave(&this_rq->lock, flags);
+	curr = this_rq->curr;
+	if (cpumask_and(&tmp, &curr->cpus_allowed, &sched_cpu_sg_idle_mask)) {
+		int active_balance = 0;
+
+		if (likely(!this_rq->active_balance)) {
+			this_rq->active_balance = 1;
+			this_rq->push_cpu = cpumask_any(&tmp);
+			active_balance = 1;
+		}
+
+		raw_spin_unlock_irqrestore(&this_rq->lock, flags);
+
+		if (likely(active_balance))
+			stop_one_cpu_nowait(cpu_of(this_rq),
+					    active_load_balance_cpu_stop, this_rq,
+					    &this_rq->active_balance_work);
+	} else
+		raw_spin_unlock_irqrestore(&this_rq->lock, flags);
+}
+
+static inline bool vrq_sg_balance(struct rq *rq)
+{
+	int cpu;
+	struct task_struct *p;
+	cpumask_t tmp;
+
+	if (unlikely(sched_cpu_nr_sibling <= 1))
+		return false;
+
+	/*
+	 * Exit if no idle sibling group to be balanced to
+	 */
+	if (likely(0 == cpumask_weight(&sched_cpu_sg_idle_mask)))
+		return false;
+
+	/*
+	 * Sibling balance only happens when only one task is running
+	 * When no task is running, there will be no need to balance
+	 * When there are queued tasks in this rq, they will be handled
+	 * in policy fair balance
+	 */
+	if (1 != rq->nr_running)
+		return false;
+
+	/*
+	 * Exit if any idle cpu in this smt group
+	 */
+	cpu = cpu_of(rq);
+	cpumask_andnot(&tmp, cpu_smt_mask(cpu),
+		       &sched_rq_running_masks[SCHED_RQ_IDLE_TSK]);
+	if (sched_cpu_nr_sibling != cpumask_weight(&tmp))
+		return false;
+
+	p = rq->curr;
+	if (cpu != cpumask_first(cpu_smt_mask(cpu))) {
+		if (cpumask_intersects(&p->cpus_allowed, &sched_cpu_sg_idle_mask))
+			raise_softirq(SCHED_SOFTIRQ);
+	}
+
+	return true;
+}
+#endif /* CONFIG_SCHED_SMT */
+
 /**
  * VRQ load balance function, be called in scheduler_tick()
  *
@@ -2849,6 +3051,11 @@ static inline bool vrq_trigger_load_balance(struct rq *rq)
 	struct task_struct *p;
 	cpumask_t check;
 	cpumask_t *preempt, *pend_mask;
+
+#ifdef CONFIG_SCHED_SMT
+	if (vrq_sg_balance(rq))
+		return false;
+#endif
 
 	/*
 	 * No task policy fairness is needed when there is no task or only IDLE
@@ -6002,6 +6209,11 @@ void __init sched_init_smp(void)
 		BUG();
 	free_cpumask_var(non_isolated_cpus);
 
+#ifdef CONFIG_SCHED_SMT
+	cpumask_setall(&sched_cpu_sg_idle_mask);
+	sched_cpu_nr_sibling = cpumask_weight(cpu_smt_mask(0));
+#endif
+
 	sched_init_topology_cpumask();
 	sched_clock_init_late();
 
@@ -6078,6 +6290,10 @@ void __init sched_init(void)
 
 		cpumask_set_cpu(i, &sched_rq_running_masks[SCHED_RQ_IDLE_TSK]);
 		rq->last_running_policy_level = SCHED_RQ_IDLE_TSK;
+
+#ifdef CONFIG_SCHED_SMT
+		rq->active_balance = 0;
+#endif
 #endif
 		rq->nr_switches = 0;
 		atomic_set(&rq->nr_iowait, 0);
@@ -6109,6 +6325,10 @@ void __init sched_init(void)
 	idle_thread_set_boot_cpu();
 
 	sched_init_topology_cpumask_early();
+
+#ifdef CONFIG_SCHED_SMT
+	open_softirq(SCHED_SOFTIRQ, vrq_run_rebalance);
+#endif
 #endif /* SMP */
 
 	init_schedstats();
