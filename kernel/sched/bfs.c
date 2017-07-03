@@ -2929,11 +2929,9 @@ static void attach_task(struct rq *rq, struct task_struct *p)
  */
 static void attach_one_task(struct rq *rq, struct task_struct *p)
 {
-	unsigned long flags;
-
-	raw_spin_lock_irqsave(&rq->lock, flags);
+	raw_spin_lock(&rq->lock);
 	attach_task(rq, p);
-	raw_spin_unlock_irqrestore(&rq->lock, flags);
+	raw_spin_unlock(&rq->lock);
 }
 
 static int active_load_balance_cpu_stop(void *data)
@@ -2942,8 +2940,11 @@ static int active_load_balance_cpu_stop(void *data)
 	unsigned long flags;
 	struct task_struct *p;
 	int target_cpu = rq->push_cpu;
+	bool migration = false;
 
-	raw_spin_lock_irqsave(&rq->lock, flags);
+	local_irq_save(flags);
+
+	raw_spin_lock(&rq->lock);
 
 	p = rq_first_queued_task(rq);
 	if (unlikely(NULL == p))
@@ -2954,16 +2955,32 @@ static int active_load_balance_cpu_stop(void *data)
 		goto unlock_out;
 	}
 
-	detach_task(rq, p, target_cpu);
+	raw_spin_unlock(&rq->lock);
+	raw_spin_lock(&p->pi_lock);
+	raw_spin_lock(&rq->lock);
+
+	/*
+	 * _something_ may have changed the task, double check again
+	 */
+	if (likely(rq_first_queued_task(rq) == p &&
+		   rq == task_rq(p) &&
+		   cpumask_test_cpu(target_cpu, &p->cpus_allowed))) {
+		detach_task(rq, p, target_cpu);
+		migration = true;
+	}
 
 unlock_out:
 	rq->active_balance = 0;
-	raw_spin_unlock_irqrestore(&rq->lock, flags);
+	raw_spin_unlock(&rq->lock);
 
-	if (p) {
+	if (migration) {
 		struct rq *target_rq = cpu_rq(target_cpu);
 		attach_one_task(target_rq, p);
 	}
+	if (p)
+		raw_spin_unlock(&p->pi_lock);
+
+	local_irq_restore(flags);
 
 	return 0;
 }
@@ -2977,7 +2994,8 @@ static __latent_entropy void vrq_run_rebalance(struct softirq_action *h)
 
 	raw_spin_lock_irqsave(&this_rq->lock, flags);
 	curr = this_rq->curr;
-	if (cpumask_and(&tmp, &curr->cpus_allowed, &sched_cpu_sg_idle_mask)) {
+	if (cpumask_and(&tmp, &curr->cpus_allowed, &sched_cpu_sg_idle_mask) &&
+	    cpumask_and(&tmp, &tmp, cpu_active_mask)) {
 		int active_balance = 0;
 
 		if (likely(!this_rq->active_balance)) {
@@ -3000,7 +3018,6 @@ static inline bool vrq_sg_balance(struct rq *rq)
 {
 	int cpu;
 	struct task_struct *p;
-	cpumask_t tmp;
 
 	if (unlikely(sched_cpu_nr_sibling <= 1))
 		return false;
@@ -3024,9 +3041,8 @@ static inline bool vrq_sg_balance(struct rq *rq)
 	 * Exit if any idle cpu in this smt group
 	 */
 	cpu = cpu_of(rq);
-	cpumask_andnot(&tmp, cpu_smt_mask(cpu),
-		       &sched_rq_running_masks[SCHED_RQ_IDLE_TSK]);
-	if (sched_cpu_nr_sibling != cpumask_weight(&tmp))
+	if (cpumask_intersects(cpu_smt_mask(cpu),
+			       &sched_rq_running_masks[SCHED_RQ_IDLE_TSK]))
 		return false;
 
 	p = rq->curr;
@@ -6210,10 +6226,11 @@ void __init sched_init_smp(void)
 	free_cpumask_var(non_isolated_cpus);
 
 #ifdef CONFIG_SCHED_SMT
-	cpumask_setall(&sched_cpu_sg_idle_mask);
+	cpumask_copy(&sched_cpu_sg_idle_mask, cpu_online_mask);
 	sched_cpu_nr_sibling = cpumask_weight(cpu_smt_mask(0));
 #endif
 
+	cpumask_copy(&sched_cpu_non_scaled_mask, cpu_online_mask);
 	sched_init_topology_cpumask();
 	sched_clock_init_late();
 
