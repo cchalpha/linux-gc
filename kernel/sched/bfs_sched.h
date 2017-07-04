@@ -35,7 +35,6 @@
 #endif
 
 #include "cpupri.h"
-#include "cpudeadline.h"
 #include "cpuacct.h"
 
 /*
