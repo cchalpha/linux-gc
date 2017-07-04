@@ -6038,13 +6038,13 @@ static void cpuset_cpu_active(void)
 		 */
 	}
 
-	cpuset_update_active_cpus(true);
+	cpuset_update_active_cpus();
 }
 
 static int cpuset_cpu_inactive(unsigned int cpu)
 {
 	if (!cpuhp_tasks_frozen) {
-		cpuset_update_active_cpus(false);
+		cpuset_update_active_cpus();
 	} else {
 		num_cpus_frozen++;
 		partition_sched_domains(1, NULL, NULL);
