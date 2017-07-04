@@ -38,15 +38,6 @@
 #include "cpuacct.h"
 
 /*
-#include <linux/sched.h>
-#include <linux/kernel_stat.h>
-#include <linux/cpuidle.h>
-#include <linux/stop_machine.h>
-#include <linux/skip_list.h>
-#include "cpuacct.h"
-*/
-
-/*
  * This is the main, per-CPU runqueue data structure.
  * This data should only be modified by the local cpu.
  */
