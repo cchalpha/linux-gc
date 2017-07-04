@@ -342,4 +342,6 @@ unsigned long arch_scale_cpu_capacity(struct sched_domain *sd, int cpu)
 #define arch_scale_freq_invariant()	(false)
 #endif
 
+extern void schedule_idle(void);
+
 #endif /* BFS_SCHED_H */
