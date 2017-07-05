@@ -1226,6 +1226,54 @@ void set_task_cpu(struct task_struct *p, unsigned int cpu)
  */
 
 /*
+ * detach_task() -- detach the task for the migration specified in @target_cpu
+ */
+static void detach_task(struct rq *rq, struct task_struct *p, int target_cpu)
+{
+	lockdep_assert_held(&rq->lock);
+
+	p->on_rq = TASK_ON_RQ_MIGRATING;
+	if (task_contributes_to_load(p))
+		rq->nr_uninterruptible++;
+	dequeue_task(p, rq);
+	rq->nr_running--;
+
+	set_task_cpu(p, target_cpu);
+}
+
+/*
+ * attach_task() -- attach the task detached by detach_task() to its new rq.
+ */
+static void attach_task(struct rq *rq, struct task_struct *p)
+{
+	lockdep_assert_held(&rq->lock);
+
+	BUG_ON(task_rq(p) != rq);
+
+	update_rq_clock(rq);
+
+	if (task_contributes_to_load(p))
+		rq->nr_uninterruptible--;
+	enqueue_task(p, rq);
+	rq->nr_running++;
+	p->on_rq = TASK_ON_RQ_QUEUED;
+	cpufreq_update_this_cpu(rq, 0);
+
+	check_preempt_curr(rq, p);
+}
+
+/*
+ * attach_one_task() -- attaches the task returned from detach_one_task() to
+ * its new rq.
+ */
+static void attach_one_task(struct rq *rq, struct task_struct *p)
+{
+	raw_spin_lock(&rq->lock);
+	attach_task(rq, p);
+	raw_spin_unlock(&rq->lock);
+}
+
+/*
  * move_queued_task - move a queued task to new rq.
  *
  * Returns (locked) new rq. Old rq's lock is released.
@@ -1233,22 +1281,13 @@ void set_task_cpu(struct task_struct *p, unsigned int cpu)
 static struct rq *move_queued_task(struct rq *rq, struct task_struct *p, int
 				   new_cpu)
 {
-	lockdep_assert_held(&rq->lock);
-
-	p->on_rq = TASK_ON_RQ_MIGRATING;
-	dequeue_task(p, rq);
-	rq->nr_running--;
-	set_task_cpu(p, new_cpu);
+	detach_task(rq, p, new_cpu);
 	raw_spin_unlock(&rq->lock);
 
 	rq = cpu_rq(new_cpu);
 
 	raw_spin_lock(&rq->lock);
-	BUG_ON(task_cpu(p) != new_cpu);
-	enqueue_task(p, rq);
-	rq->nr_running++;
-	p->on_rq = TASK_ON_RQ_QUEUED;
-	check_preempt_curr(rq, p);
+	attach_task(rq, p);
 
 	return rq;
 }
@@ -2882,55 +2921,6 @@ static inline void vrq_scheduler_task_tick(struct rq *rq)
 #ifdef CONFIG_SMP
 
 #ifdef CONFIG_SCHED_SMT
-/*
- * detach_task() -- detach the task for the migration specified in @target_cpu
- */
-static void detach_task(struct rq *rq, struct task_struct *p, int target_cpu)
-{
-	lockdep_assert_held(&rq->lock);
-
-	if (task_contributes_to_load(p))
-		rq->nr_uninterruptible++;
-	dequeue_task(p, rq);
-	rq->nr_running--;
-	p->on_rq = TASK_ON_RQ_MIGRATING;
-	cpufreq_update_this_cpu(rq, 0);
-
-	set_task_cpu(p, target_cpu);
-}
-
-/*
- * attach_task() -- attach the task detached by detach_task() to its new rq.
- */
-static void attach_task(struct rq *rq, struct task_struct *p)
-{
-	lockdep_assert_held(&rq->lock);
-
-	BUG_ON(task_rq(p) != rq);
-
-	update_rq_clock(rq);
-
-	if (task_contributes_to_load(p))
-		rq->nr_uninterruptible--;
-	enqueue_task(p, rq);
-	rq->nr_running++;
-	p->on_rq = TASK_ON_RQ_QUEUED;
-	cpufreq_update_this_cpu(rq, 0);
-
-	check_preempt_curr(rq, p);
-}
-
-/*
- * attach_one_task() -- attaches the task returned from detach_one_task() to
- * its new rq.
- */
-static void attach_one_task(struct rq *rq, struct task_struct *p)
-{
-	raw_spin_lock(&rq->lock);
-	attach_task(rq, p);
-	raw_spin_unlock(&rq->lock);
-}
-
 static int active_load_balance_cpu_stop(void *data)
 {
 	struct rq *rq = data;
