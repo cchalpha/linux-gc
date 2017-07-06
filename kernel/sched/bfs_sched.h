@@ -65,7 +65,6 @@ struct rq {
 
 #ifdef CONFIG_SCHED_SMT
 	int active_balance;
-	int push_cpu;
 	struct cpu_stop_work active_balance_work;
 #endif
 #endif /* CONFIG_SMP */
