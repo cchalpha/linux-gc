@@ -196,6 +196,10 @@ task_access_unlock_irqrestore(struct task_struct *p, raw_spinlock_t *lock,
 	raw_spin_unlock_irqrestore(lock, *flags);
 }
 
+static inline bool task_running(struct task_struct *p)
+{
+	return p->on_cpu;
+}
 
 #include "stats.h"
 
