@@ -222,11 +222,6 @@ struct rq *uprq;
 # define finish_arch_post_lock_switch()	do { } while (0)
 #endif
 
-static inline bool task_running(struct task_struct *p)
-{
-	return p->on_cpu;
-}
-
 /**
  * A task that is not running or queued will not have a node set.
  * A task that is queued but not running will have a node set.
