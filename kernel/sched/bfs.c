@@ -173,6 +173,7 @@ sched_cpu_affinity_chk_end_masks[NR_CPUS] ____cacheline_aligned_in_smp;
 
 #ifdef CONFIG_SCHED_SMT
 static cpumask_t sched_cpu_sg_idle_mask ____cacheline_aligned_in_smp;
+static cpumask_t sched_cpu_sb_suppress_mask ____cacheline_aligned_in_smp;
 
 static unsigned int sched_cpu_nr_sibling ____cacheline_aligned_in_smp;
 
@@ -441,6 +442,10 @@ update_sched_rq_running_masks(struct rq *rq, struct task_struct *p)
 	int cpu = cpu_of(rq);
 	int policy = task_running_policy_level(p);
 	int last_policy = rq->last_running_policy_level;
+
+#ifdef CONFIG_SCHED_SMT
+	cpumask_clear_cpu(cpu, &sched_cpu_sb_suppress_mask);
+#endif
 
 	if (last_policy != policy) {
 		cpumask_clear_cpu(cpu, &sched_rq_running_masks[last_policy]);
@@ -2993,7 +2998,7 @@ static inline bool vrq_sg_balance(struct rq *rq)
 		return false;
 
 	/*
-	 * Exit if no idle sibling group to be balanced to
+	 * Quick exit if no idle sibling group to be balanced to
 	 */
 	if (likely(0 == cpumask_weight(&sched_cpu_sg_idle_mask)))
 		return false;
@@ -3015,12 +3020,25 @@ static inline bool vrq_sg_balance(struct rq *rq)
 			       &sched_rq_running_masks[SCHED_RQ_IDLE_TSK]))
 		return false;
 
+	/*
+	 * First cpu in smt group does not do smt balance, unless
+	 * other cpu is smt balance suppressed.
+	 */
+	if (cpu == cpumask_first(cpu_smt_mask(cpu)) &&
+	    !cpumask_intersects(cpu_smt_mask(cpu), &sched_cpu_sb_suppress_mask))
+		return true;
+
 	p = rq->curr;
-	if (cpu != cpumask_first(cpu_smt_mask(cpu))) {
-		if (cpumask_intersects(&p->cpus_allowed, &sched_cpu_sg_idle_mask))
-			raise_softirq(SCHED_SOFTIRQ);
+	if (cpumask_intersects(&p->cpus_allowed, &sched_cpu_sg_idle_mask)) {
+		cpumask_andnot(&sched_cpu_sb_suppress_mask,
+			       &sched_cpu_sb_suppress_mask,
+			       cpu_smt_mask(cpu));
+		raise_softirq(SCHED_SOFTIRQ);
+
+		return true;
 	}
 
+	cpumask_set_cpu(cpu, &sched_cpu_sb_suppress_mask);
 	return true;
 }
 #endif /* CONFIG_SCHED_SMT */
@@ -3661,6 +3679,7 @@ static void __sched notrace __schedule(bool preempt)
 		rq->curr = next;
 		++*switch_count;
 		rq->nr_switches++;
+		rq->last_switch = rq->clock;
 
 		trace_sched_switch(preempt, prev, next);
 
@@ -6257,6 +6276,7 @@ void __init sched_init_smp(void)
 
 #ifdef CONFIG_SCHED_SMT
 	cpumask_copy(&sched_cpu_sg_idle_mask, cpu_online_mask);
+	cpumask_clear(&sched_cpu_sb_suppress_mask);
 	sched_cpu_nr_sibling = cpumask_weight(cpu_smt_mask(0));
 #endif
 
@@ -6326,6 +6346,7 @@ void __init sched_init(void)
 		FULL_INIT_SKIPLIST_NODE(&rq->sl_header);
 		rq->nr_queued = 0;
 		raw_spin_lock_init(&rq->lock);
+		rq->last_switch = 0UL;
 		rq->dither = 0;
 		rq->nr_running = rq->nr_uninterruptible = 0;
 		rq->calc_load_active = 0;
