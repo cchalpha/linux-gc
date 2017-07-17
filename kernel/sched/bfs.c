@@ -183,7 +183,7 @@ static bool cpu_smt_capability(int dummy)
 #endif
 
 #ifndef CONFIG_64BIT
-static raw_spinlock_t sched_cpu_priodls_lock ____cacheline_aligned_in_smp;
+static raw_spinlock_t sched_cpu_priodls_spinlock ____cacheline_aligned_in_smp;
 #endif
 #endif
 
@@ -403,12 +403,12 @@ static inline void update_task_priodl(struct task_struct *p)
 #if defined(CONFIG_SMP) && !defined(CONFIG_64BIT)
 static inline void sched_cpu_priodls_lock(void)
 {
-	raw_spin_lock(&sched_cpu_priodls_lock);
+	raw_spin_lock(&sched_cpu_priodls_spinlock);
 }
 
 static inline void sched_cpu_priodls_unlock(void)
 {
-	raw_spin_unlock(&sched_cpu_priodls_lock);
+	raw_spin_unlock(&sched_cpu_priodls_spinlock);
 }
 #else
 static inline void sched_cpu_priodls_lock(void) {}
@@ -6302,7 +6302,7 @@ void __init sched_init(void)
 		cpumask_clear(&sched_rq_queued_masks[i]);
 	sched_rq_queued_check_level = SCHED_RQ_RT_PL + 1;
 #ifndef CONFIG_64BIT
-	raw_spin_lock_init(&sched_cpu_priodls_lock);
+	raw_spin_lock_init(&sched_cpu_priodls_spinlock);
 #endif
 #else
 	uprq = &per_cpu(runqueues, 0);
