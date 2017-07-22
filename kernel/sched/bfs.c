@@ -159,7 +159,7 @@ ____cacheline_aligned_in_smp;
 static cpumask_t sched_rq_queued_masks[NR_SCHED_RQ_QUEUED_LEVEL]
 ____cacheline_aligned_in_smp;
 
-static int sched_rq_queued_check_level ____cacheline_aligned_in_smp;
+static cpumask_t sched_rq_pending_mask ____cacheline_aligned_in_smp;
 
 static cpumask_t
 sched_cpu_affinity_chk_masks[NR_CPUS][NR_CPU_AFFINITY_CHK_LEVEL]
@@ -425,8 +425,7 @@ static inline int task_running_policy_level(const struct task_struct *p)
 	return prio - ISO_PRIO;
 }
 
-static inline struct task_struct *
-rq_first_queued_task(struct rq *rq)
+static inline struct task_struct *rq_first_queued_task(struct rq *rq)
 {
 	struct skiplist_node *node = &rq->sl_header;
 
@@ -489,10 +488,6 @@ static inline void update_sched_rq_queued_masks(struct rq *rq)
 		cpumask_clear_cpu(cpu, &sched_rq_queued_masks[last_level]);
 		cpumask_set_cpu(cpu, &sched_rq_queued_masks[level]);
 		rq->last_tagged_queued_level = level;
-		if (unlikely(SCHED_RQ_RT_PL == level))
-			sched_rq_queued_check_level = SCHED_RQ_RT_PL;
-		if (unlikely(SCHED_RQ_RT_PL == last_level))
-			sched_rq_queued_check_level = SCHED_RQ_RT_PL + 1;
 	}
 }
 #else
@@ -546,7 +541,7 @@ static inline void sched_update_tick_dependency(struct rq *rq)
 	if (!tick_nohz_full_cpu(cpu))
 		return;
 
-	if (0 == rq->nr_queued)
+	if (rq->nr_running < 2)
 		tick_nohz_dep_clear_cpu(cpu, TICK_DEP_BIT_SCHED);
 	else
 		tick_nohz_dep_set_cpu(cpu, TICK_DEP_BIT_SCHED);
@@ -556,7 +551,7 @@ static inline void sched_update_tick_dependency(struct rq *rq) { }
 #endif
 
 /*
- * Removing from the global runqueue. Deleting a task from the skip list is done
+ * Removing from the runqueue. Deleting a task from the skip list is done
  * via the stored node reference in the task struct and does not require a full
  * look up. Thus it occurs in O(k) time where k is the "level" of the list the
  * task was stored at - usually < 4, max 16.
@@ -565,13 +560,18 @@ static inline void sched_update_tick_dependency(struct rq *rq) { }
  */
 static void dequeue_task(struct task_struct *p, struct rq *rq)
 {
+	int cpu = cpu_of(rq);
+
 	lockdep_assert_held(&rq->lock);
 
-	WARN_ONCE(task_rq(p) != rq, "bfs: dequeue task reside on cpu%d from cpu%d\n",
-		  task_cpu(p), cpu_of(rq));
+	WARN_ONCE(task_rq(p) != rq, "vrq: dequeue task reside on cpu%d from cpu%d\n",
+		  task_cpu(p), cpu);
 	if (skiplist_del_init(&rq->sl_header, &p->sl_node))
 		update_sched_rq_queued_masks(rq);
-	rq->nr_queued--;
+	rq->nr_running--;
+	if (1 == rq->nr_running)
+		cpumask_clear_cpu(cpu, &sched_rq_pending_mask);
+
 	sched_update_tick_dependency(rq);
 
 	sched_info_dequeued(task_rq(p), p);
@@ -643,6 +643,8 @@ DEFINE_SKIPLIST_INSERT_FUNC(bfs_skiplist_insert, vrq_skiplist_task_search);
  */
 static void enqueue_task(struct task_struct *p, struct rq *rq)
 {
+	int cpu = cpu_of(rq);
+
 	lockdep_assert_held(&rq->lock);
 
 	if (!rt_task(p)) {
@@ -655,13 +657,16 @@ static void enqueue_task(struct task_struct *p, struct rq *rq)
 		update_task_priodl(p);
 	}
 
-	WARN_ONCE(task_rq(p) != rq, "bfs: enqueue task reside on cpu%d to cpu%d\n",
-		  task_cpu(p), cpu_of(rq));
+	WARN_ONCE(task_rq(p) != rq, "vrq: enqueue task reside on cpu%d to cpu%d\n",
+		  task_cpu(p), cpu);
 
 	p->sl_node.level = p->sl_level;
 	if (bfs_skiplist_insert(&rq->sl_header, &p->sl_node))
 		update_sched_rq_queued_masks(rq);
-	rq->nr_queued++;
+	rq->nr_running++;
+	if (2 == rq->nr_running)
+		cpumask_set_cpu(cpu, &sched_rq_pending_mask);
+
 	sched_update_tick_dependency(rq);
 
 	sched_info_queued(rq, p);
@@ -673,6 +678,21 @@ static void enqueue_task(struct task_struct *p, struct rq *rq)
 	 */
 	if (p->in_iowait)
 		cpufreq_update_this_cpu(rq, SCHED_CPUFREQ_IOWAIT);
+}
+
+static void requeue_task(struct task_struct *p, struct rq *rq)
+{
+	lockdep_assert_held(&rq->lock);
+
+	WARN_ONCE(task_rq(p) != rq, "vrq: cpu[%d] requeue task reside on cpu%d\n",
+		  cpu_of(rq), task_cpu(p));
+
+	if (skiplist_del_init(&rq->sl_header, &p->sl_node))
+		update_sched_rq_queued_masks(rq);
+
+	p->sl_node.level = p->sl_level;
+	if (bfs_skiplist_insert(&rq->sl_header, &p->sl_node))
+		update_sched_rq_queued_masks(rq);
 }
 
 /*
@@ -1143,7 +1163,6 @@ static void activate_task(struct task_struct *p, struct rq *rq)
 	if (task_contributes_to_load(p))
 		rq->nr_uninterruptible--;
 	enqueue_task(p, rq);
-	rq->nr_running++;
 	p->on_rq = 1;
 	cpufreq_update_this_cpu(rq, 0);
 }
@@ -1158,8 +1177,8 @@ static inline void deactivate_task(struct task_struct *p, struct rq *rq)
 {
 	if (task_contributes_to_load(p))
 		rq->nr_uninterruptible++;
+	dequeue_task(p, rq);
 	p->on_rq = 0;
-	rq->nr_running--;
 	cpufreq_update_this_cpu(rq, 0);
 }
 
@@ -1236,7 +1255,6 @@ static void detach_task(struct rq *rq, struct task_struct *p, int target_cpu)
 	if (task_contributes_to_load(p))
 		rq->nr_uninterruptible++;
 	dequeue_task(p, rq);
-	rq->nr_running--;
 
 	set_task_cpu(p, target_cpu);
 }
@@ -1255,7 +1273,6 @@ static void attach_task(struct rq *rq, struct task_struct *p)
 	if (task_contributes_to_load(p))
 		rq->nr_uninterruptible--;
 	enqueue_task(p, rq);
-	rq->nr_running++;
 	p->on_rq = TASK_ON_RQ_QUEUED;
 	cpufreq_update_this_cpu(rq, 0);
 
@@ -1354,23 +1371,6 @@ void do_set_cpus_allowed(struct task_struct *p, const struct cpumask *new_mask)
 	set_cpus_allowed_common(p, new_mask);
 }
 #endif
-
-/*
- * Move a task off the global queue and take it to a CPU for it will
- * become the running task.
- */
-static inline void take_task(struct rq *rq, int cpu, struct task_struct *p)
-{
-	WARN_ONCE(rq != task_rq(p), "vrq: cpu[%d] take_task reside on %d.\n",
-		  cpu, task_cpu(p));
-	/*
-	 * We can optimise this out completely for !SMP, because the
-	 * SMP rebalancing from interrupt is the only thing that cares
-	 * here.
-	 */
-	p->on_cpu = 1;
-	dequeue_task(p, rq);
-}
 
 /* Enter with rq lock held. We know p is on the local CPU */
 static inline void __set_tsk_resched(struct task_struct *p)
@@ -1694,14 +1694,13 @@ static inline struct rq*
 task_balance_rq(struct task_struct *p, cpumask_t *chk_mask)
 {
 	int cpu, target_cpu = 0;
-	unsigned int min_nr_queued = ~0;
-	unsigned int nr_queued;
+	unsigned long nr_running, min_nr_running = ~0UL;
 
 	for_each_cpu(cpu, chk_mask)
-		if ((nr_queued = cpu_rq(cpu)->nr_queued) < min_nr_queued) {
+		if ((nr_running = cpu_rq(cpu)->nr_running) < min_nr_running) {
 			target_cpu = cpu;
-			min_nr_queued = nr_queued;
-			if (0 == min_nr_queued)
+			min_nr_running = nr_running;
+			if (0UL == min_nr_running)
 				break;
 		}
 
@@ -3118,7 +3117,9 @@ void scheduler_tick(void)
 	rq->last_tick = rq->clock;
 
 #ifdef CONFIG_SMP
+	/*
 	if (likely(!vrq_trigger_load_balance(rq)))
+	*/
 #endif
 	raw_spin_unlock(&rq->lock);
 
@@ -3257,45 +3258,26 @@ static void time_slice_expired(struct task_struct *p, struct rq *rq)
  */
 static inline void check_deadline(struct task_struct *p, struct rq *rq)
 {
+	if (rq->idle == p)
+		return;
+
 	vrq_update_curr(rq, p);
 
-	if (p->time_slice < RESCHED_US || batch_task(p))
+	if (p->time_slice < RESCHED_US || batch_task(p)) {
 		time_slice_expired(p, rq);
-}
-
-/*
- * Task selection with skiplists is a simple matter of picking off the first
- * task in the sorted list, an O(1) operation. The only time it takes longer
- * is if tasks do not have suitable affinity and then we iterate over entries
- * till we find the first that does. Worst case here is no tasks with suitable
- * affinity and taking O(n).
- */
-static inline struct task_struct *
-earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *prefer)
-{
-	struct task_struct *edt;
-	struct skiplist_node *node = &rq->sl_header;
-
-	if ((node = node->next[0]) == &rq->sl_header)
-		return prefer;
-
-	edt = skiplist_entry(node, struct task_struct, sl_node);
-
-	if (edt->priodl < prefer->priodl) {
-		take_task(rq, cpu, edt);
-		return edt;
+		if (task_queued(p))
+			requeue_task(p, rq);
 	}
-
-	return prefer;
 }
 
 #ifdef	CONFIG_SMP
 /**
- * best queued task in @rq for given @cpu
- * The most likely cache-cool task with highest prio in queue
+ * best pending task in @rq for given @cpu
+ * The most likely cache-cool task with highest prio of pending tasks
+ * in run queue.
  */
 static inline struct task_struct *
-rq_best_queued_task(struct rq *rq, const int cpu, const bool scaling)
+rq_best_pending_task(struct rq *rq, const int cpu, const bool scaling)
 {
 	struct task_struct *p, *best = NULL;
 	struct skiplist_node *node;
@@ -3303,13 +3285,19 @@ rq_best_queued_task(struct rq *rq, const int cpu, const bool scaling)
 	u64 last_ran = ~0ULL;
 
 	node = rq->sl_header.next[0];
+	/* seek to the second node, the first pending one */
+	node = node->next[0];
 	if (unlikely(node == &rq->sl_header))
 		return NULL;
 	p = skiplist_entry(node, struct task_struct, sl_node);
 	prio = p->prio;
 
 	do {
-		/* check for CPU affinity */
+		/* skip the running task */
+		if (unlikely(task_running(p)))
+			goto next;
+
+		/* check CPU affinity */
 		if (cpumask_test_cpu(cpu, &p->cpus_allowed)) {
 			if (scaling && noninteractive_task(p))
 				goto next;
@@ -3339,12 +3327,11 @@ take_queued_task_cpumask(int cpu, const bool scaling, struct cpumask *chk_mask)
 
 		trq = cpu_rq(tcpu);
 		raw_spin_lock_nested(&trq->lock, SINGLE_DEPTH_NESTING);
-		if((p = rq_best_queued_task(trq, cpu, scaling))) {
-			take_task(trq, tcpu, p);
-			trq->nr_running--;
-			set_task_cpu(p, cpu);
+		if((p = rq_best_pending_task(trq, cpu, scaling))) {
+			detach_task(trq, p, cpu);
 			raw_spin_unlock(&trq->lock);
 
+			attach_task(cpu_rq(cpu), p);
 			return p;
 		}
 		raw_spin_unlock(&trq->lock);
@@ -3352,49 +3339,37 @@ take_queued_task_cpumask(int cpu, const bool scaling, struct cpumask *chk_mask)
 	return NULL;
 }
 
-static inline struct task_struct * take_other_rq_task(int cpu)
+static inline struct task_struct *take_other_rq_task(int cpu)
 {
-	struct cpumask chk_mask, tmp;
-	struct cpumask *queued_mask, *queued_end, *affinity_mask, *end;
+	struct cpumask tmp;
+	struct cpumask *affinity_mask, *end;
 	bool scaling = is_cpu_scaling(cpu);
 
-	queued_end = scaling? &sched_rq_queued_masks[SCHED_RQ_IDLE_PL]:
-		&sched_rq_queued_masks[SCHED_RQ_EMPTY_QUEUED];
-	for (queued_mask = &sched_rq_queued_masks[sched_rq_queued_check_level];
-	     queued_mask < queued_end; queued_mask++) {
-		if (!cpumask_and(&chk_mask, queued_mask, cpu_active_mask))
-			continue;
-		affinity_mask = &sched_cpu_affinity_chk_masks[cpu][0];
-		end = sched_cpu_affinity_chk_end_masks[cpu];
-		for (;affinity_mask < end; affinity_mask++)
-			if (cpumask_and(&tmp, &chk_mask, affinity_mask)) {
-				struct task_struct *p;
-
-				p = take_queued_task_cpumask(cpu, scaling, &tmp);
-				if (p)
-					return p;
-			}
+	affinity_mask = &sched_cpu_affinity_chk_masks[cpu][0];
+	end = sched_cpu_affinity_chk_end_masks[cpu];
+	for (;affinity_mask < end; affinity_mask++) {
+		struct task_struct *p;
+		if (cpumask_and(&tmp, &sched_rq_pending_mask, affinity_mask) &&
+		    (p = take_queued_task_cpumask(cpu, scaling, &tmp)))
+			return p;
 	}
 
 	return NULL;
 }
 #endif
 
-static inline struct task_struct *
-choose_next_task(struct rq *rq, int cpu, struct task_struct *prefer)
+static inline struct task_struct *choose_next_task(struct rq *rq, int cpu)
 {
-	struct task_struct *next = earliest_deadline_task(rq, cpu, prefer);
+	struct task_struct *next;
+
+	if ((next = rq_first_queued_task(rq)))
+		return next;
+
 #ifdef	CONFIG_SMP
-	if (rq->idle == next) {
-		struct task_struct *other_rq_tsk;
-		other_rq_tsk = take_other_rq_task(cpu);
-		if (NULL != other_rq_tsk) {
-			next = other_rq_tsk;
-			rq->nr_running++;
-		}
-	}
+	if ((next = take_other_rq_task(cpu)))
+		return next;
 #endif
-	return next;
+	return rq->idle;
 }
 
 static inline unsigned long get_preempt_disable_ip(struct task_struct *p)
@@ -3520,9 +3495,8 @@ static inline void set_rq_task(struct rq *rq, struct task_struct *p)
  */
 static void __sched notrace __schedule(bool preempt)
 {
-	struct task_struct *prev, *next, *idle, *prefer;
+	struct task_struct *prev, *next;
 	unsigned long *switch_count;
-	bool deactivate = false;
 	struct rq *rq;
 	int cpu;
 
@@ -3551,7 +3525,7 @@ static void __sched notrace __schedule(bool preempt)
 		if (unlikely(signal_pending_state(prev->state, prev))) {
 			prev->state = TASK_RUNNING;
 		} else {
-			deactivate = true;
+			deactivate_task(prev, rq);
 
 			if (prev->in_iowait) {
 				atomic_inc(&rq->nr_iowait);
@@ -3580,24 +3554,9 @@ static void __sched notrace __schedule(bool preempt)
 
 	update_rq_clock(rq);
 
-	idle = rq->idle;
-	if (idle != prev) {
-		check_deadline(prev, rq);
+	check_deadline(prev, rq);
 
-		if (deactivate) {
-			deactivate_task(prev, rq);
-			prefer = idle;
-		} else {
-			prefer = prev;
-		}
-	} else
-		prefer = idle;
-
-	next = choose_next_task(rq, cpu, prefer);
-	if (next != prefer) {
-		if (idle != prefer)
-			enqueue_task(prev, rq);
-	}
+	next = choose_next_task(rq, cpu);
 
 	set_rq_task(rq, next);
 
@@ -3620,7 +3579,6 @@ static void __sched notrace __schedule(bool preempt)
 		/* Also unlocks the rq: */
 		rq = context_switch(rq, prev, next);
 		cpu = cpu_of(rq);
-		idle = rq->idle;
 	} else
 		raw_spin_unlock_irq(&rq->lock);
 }
@@ -3883,14 +3841,14 @@ check_task_changed(struct rq *rq, struct task_struct *p, int oldprio)
 	 * our priority decreased, or if we are not currently running on
 	 * this runqueue and our priority is higher than the current's
 	 */
+	if (task_queued(p))
+		requeue_task(p, rq);
+
 	if (task_running(p)) {
 		reset_rq_task(rq, p);
 		/* Resched only if we might now be preempted */
 		if (p->prio > oldprio)
 			resched_curr(rq);
-	} else if (task_queued(p)) {
-		dequeue_task(p, rq);
-		enqueue_task(p, rq);
 	}
 }
 
@@ -4042,7 +4000,8 @@ void set_user_nice(struct task_struct *p, long nice)
 
 	if (queued) {
 		enqueue_task(p, rq);
-	} else if (task_running(p)) {
+	}
+	if (task_running(p)) {
 		reset_rq_task(rq, p);
 		if (old_static < new_static)
 			resched_curr(rq);
@@ -4241,7 +4200,8 @@ static int __set_cpus_allowed_ptr(struct task_struct *p,
 		stop_one_cpu(cpu_of(rq), migration_cpu_stop, &arg);
 		tlb_migrate_finish(p->mm);
 		return 0;
-	} else if (task_queued(p)) {
+	}
+	if (task_queued(p)) {
 		/*
 		 * OK, since we're going to drop the lock immediately
 		 * afterwards anyway.
@@ -6268,7 +6228,7 @@ void __init sched_init(void)
 		cpumask_clear(&sched_rq_running_masks[i]);
 	for (i = 0; i < NR_SCHED_RQ_QUEUED_LEVEL; i++)
 		cpumask_clear(&sched_rq_queued_masks[i]);
-	sched_rq_queued_check_level = SCHED_RQ_RT_PL + 1;
+	cpumask_clear(&sched_rq_pending_mask);
 #ifndef CONFIG_64BIT
 	raw_spin_lock_init(&sched_cpu_priodls_spinlock);
 #endif
@@ -6278,7 +6238,6 @@ void __init sched_init(void)
 	for_each_possible_cpu(i) {
 		rq = cpu_rq(i);
 		FULL_INIT_SKIPLIST_NODE(&rq->sl_header);
-		rq->nr_queued = 0;
 		raw_spin_lock_init(&rq->lock);
 		rq->last_switch = 0UL;
 		rq->dither = 0;
