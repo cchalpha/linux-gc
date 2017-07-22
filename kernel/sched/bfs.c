@@ -2086,10 +2086,26 @@ static void try_to_wake_up_local(struct task_struct *p)
 {
 	struct rq *rq = task_rq(p);
 
+	if (WARN_ON_ONCE(rq != this_rq()) ||
+	    WARN_ON_ONCE(p == current))
+		return;
+
 	lockdep_assert_held(&rq->lock);
 
+	if (!raw_spin_trylock(&p->pi_lock)) {
+		/*
+		 * This is OK, because current is on_cpu, which avoids it being
+		 * picked for load-balance and preemption/IRQs are still
+		 * disabled avoiding further scheduler activity on it and we've
+		 * not yet picked a replacement task.
+		 */
+		raw_spin_unlock(&rq->lock);
+		raw_spin_lock(&p->pi_lock);
+		raw_spin_lock(&rq->lock);
+	}
+
 	if (!(p->state & TASK_NORMAL))
-		return;
+		goto out;
 
 	trace_sched_waking(p);
 
@@ -2104,6 +2120,9 @@ static void try_to_wake_up_local(struct task_struct *p)
 
 	ttwu_do_wakeup(rq, p, 0);
 	ttwu_stat(p, smp_processor_id(), 0);
+
+out:
+	raw_spin_unlock(&p->pi_lock);
 }
 
 /**
@@ -2145,6 +2164,7 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 	INIT_HLIST_HEAD(&p->preempt_notifiers);
 #endif
 	/* Should be reset in fork.c but done here for ease of bfs patching */
+	p->on_cpu =
 	p->on_rq =
 	p->utime =
 	p->stime =
@@ -2243,7 +2263,6 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 	if (unlikely(sched_info_on()))
 		memset(&p->sched_info, 0, sizeof(p->sched_info));
 #endif
-	p->on_cpu = 0;
 	init_task_preempt_count(p);
 
 	put_cpu();
@@ -3580,7 +3599,6 @@ static void __sched notrace __schedule(bool preempt)
 			prev->state = TASK_RUNNING;
 		} else {
 			deactivate = true;
-			prev->on_rq = 0;
 
 			if (prev->in_iowait) {
 				atomic_inc(&rq->nr_iowait);
@@ -3597,13 +3615,8 @@ static void __sched notrace __schedule(bool preempt)
 				struct task_struct *to_wakeup;
 
 				to_wakeup = wq_worker_sleeping(prev);
-				if (to_wakeup) {
-					/* This shouldn't happen, but does */
-					if (unlikely(to_wakeup == prev))
-						deactivate = false;
-					else
-						try_to_wake_up_local(to_wakeup);
-				}
+				if (to_wakeup)
+					try_to_wake_up_local(to_wakeup);
 			}
 		}
 		switch_count = &prev->nvcsw;
