@@ -1630,25 +1630,21 @@ can_preempt(struct task_struct *p, u64 priodl)
  * @p: task wants to preempt CPU
  * @only_preempt_low_policy: indicate only preempt rq running low policy than @p
  */
-static struct rq*
-task_preemptible_rq(struct task_struct *p, int only_preempt_low_policy)
+static inline struct rq*
+task_preemptible_rq(struct task_struct *p, cpumask_t *chk_mask,
+		    int only_preempt_low_policy)
 {
 	int cpu;
-	cpumask_t tmp, check;
-	cpumask_t *mask, *preempt_mask;
-
-	if (unlikely(!cpumask_and(&check, &p->cpus_allowed,
-				  cpu_online_mask)))
-		return NULL;
+	cpumask_t tmp, *mask, *preempt_mask;
 
 	preempt_mask = &sched_rq_running_masks[task_running_policy_level(p)];
 	mask = &sched_rq_running_masks[SCHED_RQ_IDLE_TSK];
 
 #ifdef CONFIG_SCHED_SMT
-	if(cpumask_and(&tmp, &check, mask)) {
+	if(cpumask_and(&tmp, chk_mask, mask)) {
 		if(cpu_smt_capability(cpu) &&
 		   !cpumask_and(&tmp, &tmp, &sched_cpu_sg_idle_mask)) {
-			if(unlikely(!cpumask_and(&tmp, &check, mask)))
+			if(unlikely(!cpumask_and(&tmp, chk_mask, mask)))
 				goto no_idle_cpu;
 		}
 		cpu = best_mask_cpu(task_cpu(p), &tmp);
@@ -1659,7 +1655,7 @@ no_idle_cpu:
 #endif
 
 	while (mask > preempt_mask) {
-		if(cpumask_and(&tmp, &check, mask)) {
+		if(cpumask_and(&tmp, chk_mask, mask)) {
 			cpu = best_mask_cpu(task_cpu(p), &tmp);
 			return cpu_rq(cpu);
 		}
@@ -1677,34 +1673,31 @@ no_idle_cpu:
 	if (p->policy == SCHED_IDLEPRIO)
 		return NULL;
 
-	if (!cpumask_and(&check, &check, preempt_mask))
+	if (!cpumask_and(&tmp, chk_mask, preempt_mask))
 		return NULL;
 
 	sched_cpu_priodls_lock();
-	cpu = cpumask_first(&check);
+	cpu = cpumask_first(&tmp);
 	do {
 		if (likely(can_preempt(p, sched_rq_priodls[cpu]))) {
 			sched_cpu_priodls_unlock();
 			return cpu_rq(cpu);
 		}
-		cpu = cpumask_next(cpu, &check);
+		cpu = cpumask_next(cpu, &tmp);
 	} while(cpu < nr_cpu_ids);
 	sched_cpu_priodls_unlock();
 
 	return NULL;
 }
 
-static struct rq* task_balance_rq(struct task_struct *p)
+static inline struct rq*
+task_balance_rq(struct task_struct *p, cpumask_t *chk_mask)
 {
-	cpumask_t tmp;
 	int cpu, target_cpu = 0;
 	unsigned int min_nr_queued = ~0;
 	unsigned int nr_queued;
 
-	if (unlikely(!cpumask_and(&tmp, &p->cpus_allowed, cpu_online_mask)))
-		return cpu_rq(select_fallback_rq(task_cpu(p), p));
-
-	for_each_cpu(cpu, &tmp)
+	for_each_cpu(cpu, chk_mask)
 		if ((nr_queued = cpu_rq(cpu)->nr_queued) < min_nr_queued) {
 			target_cpu = cpu;
 			min_nr_queued = nr_queued;
@@ -1725,7 +1718,11 @@ static struct rq* task_balance_rq(struct task_struct *p)
 static inline struct rq *
 select_task_rq(struct task_struct *p, int wake_flags)
 {
+	cpumask_t chk_mask;
 	struct rq *rq;
+
+	if (unlikely(!cpumask_and(&chk_mask, &p->cpus_allowed, cpu_online_mask)))
+		return cpu_rq(select_fallback_rq(task_cpu(p), p));
 
 	/*
 	 * Sync wakeups (i.e. those types of wakeups where the waker
@@ -1733,9 +1730,9 @@ select_task_rq(struct task_struct *p, int wake_flags)
 	 * don't trigger a preemption if there are no idle cpus,
 	 * instead waiting for current to deschedule.
 	 */
-	rq = task_preemptible_rq(p, wake_flags & WF_SYNC);
+	rq = task_preemptible_rq(p, &chk_mask, wake_flags & WF_SYNC);
 	if (NULL == rq)
-		rq = task_balance_rq(p);
+		rq = task_balance_rq(p, &chk_mask);
 
 	return rq;
 }
