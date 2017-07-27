@@ -1328,7 +1328,8 @@ static int migration_cpu_stop(void *data)
 	 * we're holding p->pi_lock.
 	 */
 	if (task_rq(p) == rq)
-		rq = __migrate_task(rq, p, arg->dest_cpu);
+		if (task_on_rq_queued(p))
+			rq = __migrate_task(rq, p, arg->dest_cpu);
 	raw_spin_unlock(&rq->lock);
 	raw_spin_unlock(&p->pi_lock);
 
@@ -1363,7 +1364,7 @@ static inline void take_task(struct rq *rq, int cpu, struct task_struct *p)
 	 * here.
 	 */
 	p->on_cpu = 1;
-	dequeue_task(p, task_rq(p));
+	dequeue_task(p, rq);
 }
 
 /* Enter with rq lock held. We know p is on the local CPU */
