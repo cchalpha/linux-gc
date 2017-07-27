@@ -1626,15 +1626,6 @@ can_preempt(struct task_struct *p, u64 priodl)
 
 #ifdef CONFIG_SMP
 /*
- * Check to see if p can run on COU, and if not, whether there are any online
- * CPUs it can run on instead.
- */
-static inline bool needs_other_cpu(struct task_struct *p, int cpu)
-{
-	return !cpumask_test_cpu(cpu, &p->cpus_allowed);
-}
-
-/*
  * task_preemptible_rq - return the rq which the given task can preempt on
  * @p: task wants to preempt CPU
  * @only_preempt_low_policy: indicate only preempt rq running low policy than @p
@@ -1749,11 +1740,6 @@ select_task_rq(struct task_struct *p, int wake_flags)
 	return rq;
 }
 #else /* CONFIG_SMP */
-static inline bool needs_other_cpu(struct task_struct *p, int cpu)
-{
-	return false;
-}
-
 static inline struct rq *
 select_task_rq(struct task_struct *p, int wake_flags)
 {
