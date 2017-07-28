@@ -146,11 +146,11 @@ static inline int timeslice(void)
 #ifdef CONFIG_SMP
 static cpumask_t sched_cpu_non_scaled_mask ____cacheline_aligned_in_smp;
 
-#define	SCHED_RQ_RT_PL				0
-#define	SCHED_RQ_NORMAL_PL			1
-#define	SCHED_RQ_IDLE_PL			2
+#define	SCHED_RQ_RT			0
+#define	SCHED_RQ_NORMAL			1
+#define	SCHED_RQ_IDLE			2
 #define	SCHED_RQ_EMPTY			3
-#define	NR_SCHED_RQ_QUEUED_LEVEL		4
+#define	NR_SCHED_RQ_QUEUED_LEVEL	4
 
 static cpumask_t sched_rq_queued_masks[NR_SCHED_RQ_QUEUED_LEVEL]
 ____cacheline_aligned_in_smp;
@@ -417,7 +417,7 @@ static inline int task_running_policy_level(const struct task_struct *p)
 {
 	int prio = p->prio;
 	if (prio <= ISO_PRIO)
-		return SCHED_RQ_RT_PL;
+		return SCHED_RQ_RT;
 	return prio - ISO_PRIO;
 }
 
@@ -435,7 +435,7 @@ static inline void update_sched_rq_queued_masks(struct rq *rq)
 {
 	int cpu = cpu_of(rq);
 	struct task_struct *p;
-	int level, last_level = rq->last_tagged_queued_level;
+	int level, last_level = rq->queued_level;
 
 	if ((p = rq_first_queued_task(rq)) == NULL)
 		level = SCHED_RQ_EMPTY;
@@ -447,7 +447,7 @@ static inline void update_sched_rq_queued_masks(struct rq *rq)
 
 	cpumask_clear_cpu(cpu, &sched_rq_queued_masks[last_level]);
 	cpumask_set_cpu(cpu, &sched_rq_queued_masks[level]);
-	rq->last_tagged_queued_level = level;
+	rq->queued_level = level;
 
 #ifdef CONFIG_SCHED_SMT
 	if (likely(cpu_smt_capability(cpu))) {
@@ -3023,11 +3023,11 @@ static inline bool vrq_trigger_load_balance(struct rq *rq)
 	 * No task policy fairness is needed when there is no task or only IDLE
 	 * policy tasks in current rq queue.
 	 */
-	if (rq->last_tagged_queued_level >= SCHED_RQ_IDLE_PL)
+	if (rq->queued_level >= SCHED_RQ_IDLE)
 		return false;
 
-	pend_mask = &sched_rq_queued_masks[rq->last_tagged_queued_level];
-	preempt = &sched_rq_queued_masks[SCHED_RQ_IDLE_PL];
+	pend_mask = &sched_rq_queued_masks[rq->queued_level];
+	preempt = &sched_rq_queued_masks[SCHED_RQ_IDLE];
 
 	cpumask_copy(&check, preempt);
 	preempt--;
@@ -6221,7 +6221,7 @@ void __init sched_init(void)
 		rq->online = false;
 		rq->cpu = i;
 
-		rq->last_tagged_queued_level = SCHED_RQ_EMPTY;
+		rq->queued_level = SCHED_RQ_EMPTY;
 
 #ifdef CONFIG_SCHED_SMT
 		rq->active_balance = 0;

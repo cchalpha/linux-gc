@@ -89,7 +89,7 @@ struct rq {
 	unsigned long nr_running;
 	unsigned long nr_uninterruptible;
 
-	int last_tagged_queued_level;
+	int queued_level;
 
 #ifdef CONFIG_SCHED_HRTICK
 #ifdef CONFIG_SMP
