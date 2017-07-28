@@ -680,18 +680,19 @@ static void enqueue_task(struct task_struct *p, struct rq *rq)
 		cpufreq_update_this_cpu(rq, SCHED_CPUFREQ_IOWAIT);
 }
 
-static void requeue_task(struct task_struct *p, struct rq *rq)
+static inline void requeue_task(struct task_struct *p, struct rq *rq)
 {
+	bool b_first;
+
 	lockdep_assert_held(&rq->lock);
 
 	WARN_ONCE(task_rq(p) != rq, "vrq: cpu[%d] requeue task reside on cpu%d\n",
 		  cpu_of(rq), task_cpu(p));
 
-	if (skiplist_del_init(&rq->sl_header, &p->sl_node))
-		update_sched_rq_queued_masks(rq);
+	b_first = skiplist_del_init(&rq->sl_header, &p->sl_node);
 
 	p->sl_node.level = p->sl_level;
-	if (bfs_skiplist_insert(&rq->sl_header, &p->sl_node))
+	if (bfs_skiplist_insert(&rq->sl_header, &p->sl_node) || b_first)
 		update_sched_rq_queued_masks(rq);
 }
 
