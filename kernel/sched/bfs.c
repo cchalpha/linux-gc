@@ -431,6 +431,19 @@ static inline struct task_struct *rq_first_queued_task(struct rq *rq)
 	return skiplist_entry(node, struct task_struct, sl_node);
 }
 
+static inline struct task_struct *rq_first_pending_task(struct rq *rq)
+{
+	struct skiplist_node *node = &rq->sl_header;
+
+	if (rq->curr == rq->idle)
+		return NULL;
+
+	if ((node = rq->curr->sl_node.next[0]) == &rq->sl_header)
+		return NULL;
+
+	return skiplist_entry(node, struct task_struct, sl_node);
+}
+
 static inline void update_sched_rq_queued_masks(struct rq *rq)
 {
 	int cpu = cpu_of(rq);
@@ -3011,47 +3024,48 @@ static inline bool vrq_trigger_load_balance(struct rq *rq)
 {
 	int cpu;
 	struct task_struct *p;
-	cpumask_t check;
-	cpumask_t *preempt, *pend_mask;
+	cpumask_t check = { CPU_BITS_NONE };
+	cpumask_t *preempt, *preempt_end;
 
 #ifdef CONFIG_SCHED_SMT
+	/*
 	if (vrq_sg_balance(rq))
 		return false;
+	*/
 #endif
 
-	/*
-	 * No task policy fairness is needed when there is no task or only IDLE
-	 * policy tasks in current rq queue.
-	 */
-	if (rq->queued_level >= SCHED_RQ_IDLE)
+	cpu = cpu_of(rq);
+
+	if (!cpumask_test_cpu(cpu, &sched_rq_pending_mask))
 		return false;
 
-	pend_mask = &sched_rq_queued_masks[rq->queued_level];
+	/* Exit when rq is not settle down */
+	if (unlikely(rq->sl_header.next[0] != &rq->curr->sl_node))
+		return false;
+
+	p = rq_first_pending_task(rq);
+	if (unlikely(NULL == p))
+		return false;
+
+	/*
+	 * balance preempt start from SCHED_RQ_IDLE mask,
+	 * SCHED_RQ_EMPTY mask should be handled in ttwu
+	 */
 	preempt = &sched_rq_queued_masks[SCHED_RQ_IDLE];
+	preempt_end = &sched_rq_queued_masks[task_running_policy_level(p)];
 
-	cpumask_copy(&check, preempt);
-	preempt--;
-
-	for (; preempt > pend_mask; preempt--)
+	while (preempt > preempt_end) {
 		cpumask_or(&check, &check, preempt);
+		preempt--;
+	}
 
-	cpu = cpu_of(rq);
 	/*
 	 * Only balance within same physical CPU
 	 */
 	if (likely(!cpumask_and(&check, &check, topology_core_cpumask(cpu))))
 		return false;
 
-	/*
-	 * @rq may have a higher priority task queued but not yet running, in
-	 * this case, no balance is needed.
-	 */
-	if (unlikely(cpumask_test_cpu(cpu, &check)))
-		return false;
-
-	p = rq_first_queued_task(rq);
-	if (unlikely(NULL == p))
-		return false;
+	WARN_ON_ONCE(cpumask_test_cpu(cpu, &check));
 
 	if (unlikely(!cpumask_and(&check, &check, &p->cpus_allowed)))
 		return false;
@@ -3063,9 +3077,9 @@ static inline bool vrq_trigger_load_balance(struct rq *rq)
 	/*
 	 * _something_ may have changed the task, double check again
 	 */
-	if (likely(rq_first_queued_task(rq) == p &&
-		   rq == task_rq(p)))
+	if (likely(!p->on_cpu && task_on_rq_queued(p) && rq == task_rq(p))) {
 		rq = __migrate_task(rq, p, cpumask_any(&check));
+	}
 
 	raw_spin_unlock(&rq->lock);
 	raw_spin_unlock(&p->pi_lock);
@@ -3093,9 +3107,7 @@ void scheduler_tick(void)
 	rq->last_tick = rq->clock;
 
 #ifdef CONFIG_SMP
-	/*
 	if (likely(!vrq_trigger_load_balance(rq)))
-	*/
 #endif
 	raw_spin_unlock(&rq->lock);
 
