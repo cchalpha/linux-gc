@@ -2903,11 +2903,12 @@ static inline void vrq_scheduler_task_tick(struct rq *rq)
 #ifdef CONFIG_SCHED_SMT
 static int active_load_balance_cpu_stop(void *data)
 {
-	struct rq *rq = this_rq();
+	struct rq *origin_rq, *rq = this_rq();
 	struct task_struct *p = data;
 	cpumask_t tmp;
 	unsigned long flags;
 
+	origin_rq = rq;
 	local_irq_save(flags);
 
 	raw_spin_lock(&p->pi_lock);
@@ -2922,7 +2923,7 @@ static int active_load_balance_cpu_stop(void *data)
 	    cpumask_and(&tmp, &tmp, cpu_active_mask))
 		rq = __migrate_task(rq, p, cpumask_any(&tmp));
 
-	rq->active_balance = 0;
+	origin_rq->active_balance = 0;
 
 	raw_spin_unlock(&rq->lock);
 	raw_spin_unlock(&p->pi_lock);
@@ -3028,10 +3029,8 @@ static inline bool vrq_trigger_load_balance(struct rq *rq)
 	cpumask_t *preempt, *preempt_end;
 
 #ifdef CONFIG_SCHED_SMT
-	/*
 	if (vrq_sg_balance(rq))
 		return false;
-	*/
 #endif
 
 	cpu = cpu_of(rq);
