@@ -473,7 +473,7 @@ static inline void update_sched_rq_queued_masks(struct rq *rq)
 
 			cpumask_and(&tmp, cpu_smt_mask(cpu),
 				    &sched_rq_queued_masks[SCHED_RQ_EMPTY]);
-			if (sched_cpu_nr_sibling == cpumask_weight(&tmp))
+			if (cpumask_equal(&tmp, cpu_smt_mask(cpu)))
 				cpumask_or(&sched_cpu_sg_idle_mask,
 					   &sched_cpu_sg_idle_mask,
 					   cpu_smt_mask(cpu));
@@ -1005,7 +1005,7 @@ static inline int best_mask_cpu(const int cpu, cpumask_t *cpumask)
 {
 	struct cpumask non_scaled_mask, tmp, *mask;
 
-	if (cpumask_weight(cpumask) == 1)
+	if (unlikely(cpumask_weight(cpumask)) == 1)
 		return cpumask_first(cpumask);
 
 	if (cpumask_and(&non_scaled_mask, cpumask, &sched_cpu_non_scaled_mask)) {
@@ -1630,16 +1630,16 @@ task_preemptible_rq(struct task_struct *p, cpumask_t *chk_mask,
 	mask = &sched_rq_queued_masks[SCHED_RQ_EMPTY];
 
 #ifdef CONFIG_SCHED_SMT
-	if(cpumask_and(&tmp, chk_mask, mask)) {
-		if(cpu_smt_capability(cpu) &&
-		   !cpumask_and(&tmp, &tmp, &sched_cpu_sg_idle_mask)) {
-			if(unlikely(!cpumask_and(&tmp, chk_mask, mask)))
-				goto no_idle_cpu;
+	if (cpumask_and(&tmp, chk_mask, mask)) {
+		cpumask_t smt_tmp;
+
+		if (cpumask_and(&smt_tmp, &tmp, &sched_cpu_sg_idle_mask)) {
+			cpu = best_mask_cpu(task_cpu(p), &smt_tmp);
+			return cpu_rq(cpu);
 		}
 		cpu = best_mask_cpu(task_cpu(p), &tmp);
 		return cpu_rq(cpu);
 	}
-no_idle_cpu:
 	mask--;
 #endif
 
@@ -2966,11 +2966,10 @@ static inline bool vrq_sg_balance(struct rq *rq)
 	int cpu;
 	struct task_struct *p;
 
-	if (unlikely(sched_cpu_nr_sibling <= 1))
-		return false;
-
 	/*
-	 * Quick exit if no idle sibling group to be balanced to
+	 * Quick exit if no idle sibling group to be balanced to, or
+	 * in case cpu has no smt capability, which sched_cpu_sg_idle_mask will
+	 * not be changed.
 	 */
 	if (likely(0 == cpumask_weight(&sched_cpu_sg_idle_mask)))
 		return false;
@@ -6154,9 +6153,8 @@ void __init sched_init_smp(void)
 	free_cpumask_var(non_isolated_cpus);
 
 #ifdef CONFIG_SCHED_SMT
-	cpumask_copy(&sched_cpu_sg_idle_mask, cpu_online_mask);
-	cpumask_clear(&sched_cpu_sb_suppress_mask);
 	sched_cpu_nr_sibling = cpumask_weight(cpu_smt_mask(0));
+	cpumask_clear(&sched_cpu_sb_suppress_mask);
 #endif
 
 	cpumask_copy(&sched_cpu_non_scaled_mask, cpu_online_mask);
