@@ -1652,28 +1652,25 @@ task_preemptible_rq(struct task_struct *p, cpumask_t *chk_mask,
 	}
 
 	/*
-	 * only_preempt_low_policy indicate just preempt rq running low policy
-	 * task than p
+	 * only_preempt_low_policy indicate just preempt rq running lower
+	 * policy task than p
 	 */
 	if (unlikely(only_preempt_low_policy))
 		return NULL;
 
 	/* IDLEPRIO tasks never preempt anything but idle */
-	if (p->policy == SCHED_IDLEPRIO)
+	if (unlikely(idleprio_task(p)))
 		return NULL;
 
 	if (!cpumask_and(&tmp, chk_mask, preempt_mask))
 		return NULL;
 
 	sched_cpu_priodls_lock();
-	cpu = cpumask_first(&tmp);
-	do {
+	for_each_cpu (cpu, &tmp)
 		if (likely(can_preempt(p, sched_rq_priodls[cpu]))) {
 			sched_cpu_priodls_unlock();
 			return cpu_rq(cpu);
 		}
-		cpu = cpumask_next(cpu, &tmp);
-	} while(cpu < nr_cpu_ids);
 	sched_cpu_priodls_unlock();
 
 	return NULL;
