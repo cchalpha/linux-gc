@@ -412,15 +412,6 @@ static inline void sched_cpu_priodls_lock(void) {}
 static inline void sched_cpu_priodls_unlock(void) {}
 #endif
 
-#ifdef	CONFIG_SMP
-static inline int task_running_policy_level(const struct task_struct *p)
-{
-	int prio = p->prio;
-	if (prio <= ISO_PRIO)
-		return SCHED_RQ_RT;
-	return prio - ISO_PRIO;
-}
-
 static inline struct task_struct *rq_first_queued_task(struct rq *rq)
 {
 	struct skiplist_node *node = &rq->sl_header;
@@ -429,6 +420,15 @@ static inline struct task_struct *rq_first_queued_task(struct rq *rq)
 		return NULL;
 
 	return skiplist_entry(node, struct task_struct, sl_node);
+}
+
+#ifdef	CONFIG_SMP
+static inline int task_running_policy_level(const struct task_struct *p)
+{
+	int prio = p->prio;
+	if (prio <= ISO_PRIO)
+		return SCHED_RQ_RT;
+	return prio - ISO_PRIO;
 }
 
 static inline struct task_struct *rq_first_pending_task(struct rq *rq)
@@ -557,8 +557,10 @@ static void dequeue_task(struct task_struct *p, struct rq *rq)
 	if (skiplist_del_init(&rq->sl_header, &p->sl_node))
 		update_sched_rq_queued_masks(rq);
 	rq->nr_running--;
+#ifdef CONFIG_SMP
 	if (1 == rq->nr_running)
 		cpumask_clear_cpu(cpu, &sched_rq_pending_mask);
+#endif
 
 	sched_update_tick_dependency(rq);
 
@@ -652,8 +654,10 @@ static void enqueue_task(struct task_struct *p, struct rq *rq)
 	if (bfs_skiplist_insert(&rq->sl_header, &p->sl_node))
 		update_sched_rq_queued_masks(rq);
 	rq->nr_running++;
+#ifdef CONFIG_SMP
 	if (2 == rq->nr_running)
 		cpumask_set_cpu(cpu, &sched_rq_pending_mask);
+#endif
 
 	sched_update_tick_dependency(rq);
 
