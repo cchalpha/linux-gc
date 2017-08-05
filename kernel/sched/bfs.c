@@ -391,10 +391,7 @@ static inline void finish_lock_switch(struct rq *rq, struct task_struct *prev)
 
 static inline void update_task_priodl(struct task_struct *p)
 {
-	if (p->prio <= ISO_PRIO)
-		p->priodl = (((u64) (p->prio))<<56);
-	else
-		p->priodl = (((u64) (p->prio))<<56) | ((p->deadline)>>8);
+	p->priodl = (((u64) (p->prio))<<56) | ((p->deadline)>>8);
 }
 
 #if defined(CONFIG_SMP) && !defined(CONFIG_64BIT)
@@ -2191,13 +2188,6 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 	}
 
 	/*
-	 * child should has earlier deadline than parent, which will do
-	 * child-runs-first in anticipation of an exec. usually avoids a lot of
-	 * COW overhead.
-	 */
-	p->deadline = current->deadline - MIN_VISIBLE_DEADLINE;
-
-	/*
 	 * Share the timeslice between parent and child, thus the
 	 * total amount of pending timeslices in the system doesn't change,
 	 * resulting in more scheduling fairness. But this limited the fork
@@ -2218,9 +2208,17 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 
 		if (p->time_slice < RESCHED_US)
 			time_slice_expired(p, rq);
-		else
+		else {
+			/*
+			 * child should has earlier deadline than parent,
+			 * which will do child-runs-first in anticipation
+			 * of an exec. usually avoids a lot of COW overhead.
+			 */
+			p->deadline -= MIN_VISIBLE_DEADLINE;
 			update_task_priodl(p);
-	}
+		}
+	} else
+		update_task_priodl(p);
 
 	/*
 	 * The child is not yet in the pid-hash so no cgroup attach races,
@@ -2880,8 +2878,8 @@ static inline void vrq_scheduler_task_tick(struct rq *rq)
 		}
 	}
 
-	/* idle and SCHED_FIFO tasks never run out of timeslice. */
-	if (unlikely(p == rq->idle || p->policy == SCHED_FIFO))
+	/* SCHED_FIFO tasks never run out of timeslice. */
+	if (unlikely(p->policy == SCHED_FIFO))
 		return;
 	/*
 	 * Tasks that were scheduled in the first half of a tick are not
@@ -4236,6 +4234,9 @@ static void __setscheduler_params(struct task_struct *p,
 		policy = p->policy;
 
 	p->policy = policy;
+
+	if (unlikely(p->policy == SCHED_FIFO))
+		p->deadline = 0ULL;
 
 	/*
 	 * allow normal nice value to be set, but will not have any
