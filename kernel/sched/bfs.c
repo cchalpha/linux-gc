@@ -146,10 +146,10 @@ static inline int timeslice(void)
 #ifdef CONFIG_SMP
 static cpumask_t sched_cpu_non_scaled_mask ____cacheline_aligned_in_smp;
 
-#define	SCHED_RQ_RT			0
-#define	SCHED_RQ_NORMAL			1
-#define	SCHED_RQ_IDLE			2
-#define	SCHED_RQ_EMPTY			3
+#define	SCHED_RQ_EMPTY			0
+#define	SCHED_RQ_IDLE			1
+#define	SCHED_RQ_NORMAL			2
+#define	SCHED_RQ_RT			3
 #define	NR_SCHED_RQ_QUEUED_LEVEL	4
 
 static cpumask_t sched_rq_queued_masks[NR_SCHED_RQ_QUEUED_LEVEL]
@@ -425,7 +425,7 @@ static inline int task_running_policy_level(const struct task_struct *p)
 	int prio = p->prio;
 	if (prio <= ISO_PRIO)
 		return SCHED_RQ_RT;
-	return prio - ISO_PRIO;
+	return PRIO_LIMIT - prio;
 }
 
 static inline struct task_struct *rq_first_pending_task(struct rq *rq)
@@ -1641,15 +1641,15 @@ task_preemptible_rq(struct task_struct *p, cpumask_t *chk_mask,
 		cpu = best_mask_cpu(task_cpu(p), &tmp);
 		return cpu_rq(cpu);
 	}
-	mask--;
+	mask++;
 #endif
 
-	while (mask > preempt_mask) {
+	while (mask < preempt_mask) {
 		if(cpumask_and(&tmp, chk_mask, mask)) {
 			cpu = best_mask_cpu(task_cpu(p), &tmp);
 			return cpu_rq(cpu);
 		}
-		mask--;
+		mask++;
 	}
 
 	/*
@@ -3051,9 +3051,9 @@ static inline bool vrq_trigger_load_balance(struct rq *rq)
 	preempt = &sched_rq_queued_masks[SCHED_RQ_IDLE];
 	preempt_end = &sched_rq_queued_masks[task_running_policy_level(p)];
 
-	while (preempt > preempt_end) {
+	while (preempt < preempt_end) {
 		cpumask_or(&check, &check, preempt);
-		preempt--;
+		preempt++;
 	}
 
 	/*
