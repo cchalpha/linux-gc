@@ -155,6 +155,9 @@ static cpumask_t sched_cpu_non_scaled_mask ____cacheline_aligned_in_smp;
 static cpumask_t sched_rq_queued_masks[NR_SCHED_RQ_QUEUED_LEVEL]
 ____cacheline_aligned_in_smp;
 
+static DECLARE_BITMAP(sched_rq_queued_masks_bitmap, NR_SCHED_RQ_QUEUED_LEVEL)
+____cacheline_aligned_in_smp;
+
 static cpumask_t sched_rq_pending_mask ____cacheline_aligned_in_smp;
 
 static cpumask_t
@@ -456,7 +459,12 @@ static inline void update_sched_rq_queued_masks(struct rq *rq)
 		return;
 
 	cpumask_clear_cpu(cpu, &sched_rq_queued_masks[last_level]);
+	if (cpumask_empty(&sched_rq_queued_masks[last_level]))
+		clear_bit(last_level, sched_rq_queued_masks_bitmap);
+
 	cpumask_set_cpu(cpu, &sched_rq_queued_masks[level]);
+	set_bit(level, sched_rq_queued_masks_bitmap);
+
 	rq->queued_level = level;
 
 #ifdef CONFIG_SCHED_SMT
@@ -1624,33 +1632,34 @@ static inline struct rq*
 task_preemptible_rq(struct task_struct *p, cpumask_t *chk_mask,
 		    int only_preempt_low_policy)
 {
-	int cpu;
-	cpumask_t tmp, *mask, *preempt_mask;
+	cpumask_t tmp;
+	int cpu, level, preempt_level;
 
-	preempt_mask = &sched_rq_queued_masks[task_running_policy_level(p)];
-	mask = &sched_rq_queued_masks[SCHED_RQ_EMPTY];
+	preempt_level = task_running_policy_level(p);
+	level = find_first_bit(sched_rq_queued_masks_bitmap,
+			       NR_SCHED_RQ_QUEUED_LEVEL);
 
+	while (level < preempt_level) {
+		if(cpumask_and(&tmp, chk_mask, &sched_rq_queued_masks[level])) {
 #ifdef CONFIG_SCHED_SMT
-	if (cpumask_and(&tmp, chk_mask, mask)) {
-		cpumask_t smt_tmp;
+			cpumask_t smt_tmp;
 
-		if (cpumask_and(&smt_tmp, &tmp, &sched_cpu_sg_idle_mask)) {
-			cpu = best_mask_cpu(task_cpu(p), &smt_tmp);
-			return cpu_rq(cpu);
-		}
-		cpu = best_mask_cpu(task_cpu(p), &tmp);
-		return cpu_rq(cpu);
-	}
-	mask++;
+			if (SCHED_RQ_EMPTY == level &&
+			    cpumask_and(&smt_tmp, &tmp, &sched_cpu_sg_idle_mask)) {
+				cpu = best_mask_cpu(task_cpu(p), &smt_tmp);
+				return cpu_rq(cpu);
+			}
 #endif
-
-	while (mask < preempt_mask) {
-		if(cpumask_and(&tmp, chk_mask, mask)) {
 			cpu = best_mask_cpu(task_cpu(p), &tmp);
 			return cpu_rq(cpu);
 		}
-		mask++;
+		level = find_next_bit(sched_rq_queued_masks_bitmap,
+				      NR_SCHED_RQ_QUEUED_LEVEL,
+				      ++level);
 	}
+
+	if (likely(level != preempt_level))
+		return NULL;
 
 	/*
 	 * only_preempt_low_policy indicate just preempt rq running lower
@@ -1663,7 +1672,7 @@ task_preemptible_rq(struct task_struct *p, cpumask_t *chk_mask,
 	if (unlikely(idleprio_task(p)))
 		return NULL;
 
-	if (!cpumask_and(&tmp, chk_mask, preempt_mask))
+	if (!cpumask_and(&tmp, chk_mask, &sched_rq_queued_masks[preempt_level]))
 		return NULL;
 
 	sched_cpu_priodls_lock();
@@ -3021,10 +3030,9 @@ static inline bool vrq_sg_balance(struct rq *rq)
  */
 static inline bool vrq_trigger_load_balance(struct rq *rq)
 {
-	int cpu;
+	int cpu, level, preempt_level;
 	struct task_struct *p;
 	cpumask_t check = { CPU_BITS_NONE };
-	cpumask_t *preempt, *preempt_end;
 
 #ifdef CONFIG_SCHED_SMT
 	if (vrq_sg_balance(rq))
@@ -3048,12 +3056,14 @@ static inline bool vrq_trigger_load_balance(struct rq *rq)
 	 * balance preempt start from SCHED_RQ_IDLE mask,
 	 * SCHED_RQ_EMPTY mask should be handled in ttwu
 	 */
-	preempt = &sched_rq_queued_masks[SCHED_RQ_IDLE];
-	preempt_end = &sched_rq_queued_masks[task_running_policy_level(p)];
+	level = find_next_bit(sched_rq_queued_masks_bitmap,
+			      NR_SCHED_RQ_QUEUED_LEVEL, SCHED_RQ_IDLE);
+	preempt_level = task_running_policy_level(p);
 
-	while (preempt < preempt_end) {
-		cpumask_or(&check, &check, preempt);
-		preempt++;
+	while (level < preempt_level) {
+		cpumask_or(&check, &check, &sched_rq_queued_masks[level]);
+		level = find_next_bit(sched_rq_queued_masks_bitmap,
+				      NR_SCHED_RQ_QUEUED_LEVEL, ++level);
 	}
 
 	/*
@@ -6160,6 +6170,8 @@ void __init sched_init_smp(void)
 #endif
 
 	cpumask_copy(&sched_cpu_non_scaled_mask, cpu_online_mask);
+	cpumask_copy(&sched_rq_queued_masks[SCHED_RQ_EMPTY], cpu_online_mask);
+
 	sched_init_topology_cpumask();
 	sched_clock_init_late();
 
@@ -6211,6 +6223,8 @@ void __init sched_init(void)
 
 	for (i = 0; i < NR_SCHED_RQ_QUEUED_LEVEL; i++)
 		cpumask_clear(&sched_rq_queued_masks[i]);
+	cpumask_setall(&sched_rq_queued_masks[SCHED_RQ_EMPTY]);
+	set_bit(SCHED_RQ_EMPTY, sched_rq_queued_masks_bitmap);
 
 	cpumask_clear(&sched_rq_pending_mask);
 #ifndef CONFIG_64BIT
