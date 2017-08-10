@@ -159,6 +159,7 @@ static DECLARE_BITMAP(sched_rq_queued_masks_bitmap, NR_SCHED_RQ_QUEUED_LEVEL)
 ____cacheline_aligned_in_smp;
 
 static cpumask_t sched_rq_pending_mask ____cacheline_aligned_in_smp;
+static unsigned int sched_nr_rq_pending ____cacheline_aligned_in_smp;
 
 static cpumask_t
 sched_cpu_affinity_chk_masks[NR_CPUS][NR_CPU_AFFINITY_CHK_LEVEL]
@@ -563,8 +564,10 @@ static void dequeue_task(struct task_struct *p, struct rq *rq)
 		update_sched_rq_queued_masks(rq);
 	rq->nr_running--;
 #ifdef CONFIG_SMP
-	if (1 == rq->nr_running)
+	if (1 == rq->nr_running) {
 		cpumask_clear_cpu(cpu, &sched_rq_pending_mask);
+		sched_nr_rq_pending = cpumask_weight(&sched_rq_pending_mask);
+	}
 #endif
 
 	sched_update_tick_dependency(rq);
@@ -660,8 +663,10 @@ static void enqueue_task(struct task_struct *p, struct rq *rq)
 		update_sched_rq_queued_masks(rq);
 	rq->nr_running++;
 #ifdef CONFIG_SMP
-	if (2 == rq->nr_running)
+	if (2 == rq->nr_running) {
 		cpumask_set_cpu(cpu, &sched_rq_pending_mask);
+		sched_nr_rq_pending = cpumask_weight(&sched_rq_pending_mask);
+	}
 #endif
 
 	sched_update_tick_dependency(rq);
@@ -3338,7 +3343,15 @@ static inline struct task_struct *take_other_rq_task(int cpu)
 {
 	struct cpumask tmp;
 	struct cpumask *affinity_mask, *end;
-	bool scaling = is_cpu_scaling(cpu);
+	bool scaling;
+
+	if (0 == sched_nr_rq_pending)
+		return NULL;
+
+	scaling = is_cpu_scaling(cpu);
+	if (1 == sched_nr_rq_pending)
+		return take_queued_task_cpumask(cpu, scaling,
+						&sched_rq_pending_mask);
 
 	affinity_mask = &sched_cpu_affinity_chk_masks[cpu][0];
 	end = sched_cpu_affinity_chk_end_masks[cpu];
