@@ -1271,8 +1271,6 @@ static void attach_task(struct rq *rq, struct task_struct *p)
 
 	BUG_ON(task_rq(p) != rq);
 
-	update_rq_clock(rq);
-
 	if (task_contributes_to_load(p))
 		rq->nr_uninterruptible--;
 	enqueue_task(p, rq);
@@ -1296,6 +1294,8 @@ static struct rq *move_queued_task(struct rq *rq, struct task_struct *p, int
 	rq = cpu_rq(new_cpu);
 
 	raw_spin_lock(&rq->lock);
+	update_rq_clock(rq);
+
 	attach_task(rq, p);
 
 	return rq;
@@ -1325,6 +1325,7 @@ static struct rq *__migrate_task(struct rq *rq, struct task_struct *p, int
 	if (unlikely(!cpumask_test_cpu(dest_cpu, &p->cpus_allowed)))
 		return rq;
 
+	update_rq_clock(rq);
 	return move_queued_task(rq, p, dest_cpu);
 }
 
@@ -2211,18 +2212,18 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 	 * as is its last_ran value.
 	 */
 	if (likely(p->policy != SCHED_FIFO)) {
-		local_irq_disable();
+		raw_spin_lock_irqsave(&rq->lock, flags);
 		if (idleprio_task(p) || batch_task(p)) {
 			rq->curr->time_slice /= 2;
 			p->time_slice = rq->curr->time_slice;
 			hrtick_start(rq, rq->curr->time_slice);
 		} else
 			p->time_slice = rq->curr->time_slice / 2;
-		local_irq_enable();
 
-		if (p->time_slice < RESCHED_US)
+		if (p->time_slice < RESCHED_US) {
+			update_rq_clock(rq);
 			time_slice_expired(p, rq);
-		else {
+		} else {
 			/*
 			 * child should has earlier deadline than parent,
 			 * which will do child-runs-first in anticipation
@@ -2231,6 +2232,7 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 			p->deadline -= MIN_VISIBLE_DEADLINE;
 			update_task_priodl(p);
 		}
+		raw_spin_unlock_irqrestore(&rq->lock, flags);
 	} else
 		update_task_priodl(p);
 
@@ -3110,10 +3112,10 @@ void scheduler_tick(void)
 	struct rq *rq = cpu_rq(cpu);
 
 	sched_clock_tick();
-	/* update rq clock */
-	raw_spin_lock(&rq->lock);
 
+	raw_spin_lock(&rq->lock);
 	update_rq_clock(rq);
+
 	vrq_scheduler_task_tick(rq);
 	calc_global_load_tick(rq);
 	rq->last_tick = rq->clock;
@@ -3327,6 +3329,7 @@ take_queued_task_cpumask(int cpu, const bool scaling, struct cpumask *chk_mask)
 
 		trq = cpu_rq(tcpu);
 		raw_spin_lock_nested(&trq->lock, SINGLE_DEPTH_NESTING);
+		update_rq_clock(trq);
 		if((p = rq_best_pending_task(trq, cpu, scaling))) {
 			detach_task(trq, p, cpu);
 			raw_spin_unlock(&trq->lock);
@@ -3528,6 +3531,8 @@ static void __sched notrace __schedule(bool preempt)
 	smp_mb__before_spinlock();
 	raw_spin_lock(&rq->lock);
 
+	update_rq_clock(rq);
+
 	switch_count = &prev->nivcsw;
 	if (!preempt && prev->state) {
 		if (unlikely(signal_pending_state(prev->state, prev))) {
@@ -3559,8 +3564,6 @@ static void __sched notrace __schedule(bool preempt)
 
 	clear_tsk_need_resched(prev);
 	clear_preempt_need_resched();
-
-	update_rq_clock(rq);
 
 	check_deadline(prev, rq);
 
@@ -4216,6 +4219,7 @@ static int __set_cpus_allowed_ptr(struct task_struct *p,
 		 * OK, since we're going to drop the lock immediately
 		 * afterwards anyway.
 		 */
+		update_rq_clock(rq);
 		rq = move_queued_task(rq, p, dest_cpu);
 		lock = &rq->lock;
 	}
