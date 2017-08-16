@@ -1645,17 +1645,24 @@ task_preemptible_rq(struct task_struct *p, cpumask_t *chk_mask,
 	level = find_first_bit(sched_rq_queued_masks_bitmap,
 			       NR_SCHED_RQ_QUEUED_LEVEL);
 
+#ifdef CONFIG_SCHED_SMT
+	if (SCHED_RQ_EMPTY == level) {
+		if (cpumask_and(&tmp, chk_mask, &sched_cpu_sg_idle_mask)) {
+			cpu = best_mask_cpu(task_cpu(p), &tmp);
+			return cpu_rq(cpu);
+		}
+		if(cpumask_and(&tmp, chk_mask, &sched_rq_queued_masks[level])) {
+			cpu = best_mask_cpu(task_cpu(p), &tmp);
+			return cpu_rq(cpu);
+		}
+		level = find_next_bit(sched_rq_queued_masks_bitmap,
+				      NR_SCHED_RQ_QUEUED_LEVEL,
+				      ++level);
+	}
+#endif
+
 	while (level < preempt_level) {
 		if(cpumask_and(&tmp, chk_mask, &sched_rq_queued_masks[level])) {
-#ifdef CONFIG_SCHED_SMT
-			cpumask_t smt_tmp;
-
-			if (SCHED_RQ_EMPTY == level &&
-			    cpumask_and(&smt_tmp, &tmp, &sched_cpu_sg_idle_mask)) {
-				cpu = best_mask_cpu(task_cpu(p), &smt_tmp);
-				return cpu_rq(cpu);
-			}
-#endif
 			cpu = best_mask_cpu(task_cpu(p), &tmp);
 			return cpu_rq(cpu);
 		}
