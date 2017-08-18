@@ -1702,21 +1702,20 @@ task_preemptible_rq(struct task_struct *p, cpumask_t *chk_mask,
 	return NULL;
 }
 
-static inline struct rq*
-task_balance_rq(struct task_struct *p, cpumask_t *chk_mask)
+/*
+ * cpumask_random - get a random cpu from a cpumask
+ * @rand: random seed cpu to start with
+ * @srcp: the cpumask pointer
+ *
+ * Returns >= nr_cpu_ids if no cpus set.
+ */
+static inline unsigned int cpumask_random(unsigned int rand,
+					  const cpumask_t *srcp)
 {
-	int cpu, target_cpu = 0;
-	unsigned long nr_running, min_nr_running = ~0UL;
+	if ((rand = cpumask_next(rand, srcp)) >= nr_cpu_ids)
+		rand = cpumask_first(srcp);
 
-	for_each_cpu(cpu, chk_mask)
-		if ((nr_running = cpu_rq(cpu)->nr_running) < min_nr_running) {
-			target_cpu = cpu;
-			min_nr_running = nr_running;
-			if (0UL == min_nr_running)
-				break;
-		}
-
-	return cpu_rq(target_cpu);
+	return rand;
 }
 
 /*
@@ -1743,7 +1742,7 @@ select_task_rq(struct task_struct *p, int wake_flags)
 	 */
 	rq = task_preemptible_rq(p, &chk_mask, wake_flags & WF_SYNC);
 	if (NULL == rq)
-		rq = task_balance_rq(p, &chk_mask);
+		rq = cpu_rq(cpumask_random(task_cpu(p), &chk_mask));
 
 	return rq;
 }
