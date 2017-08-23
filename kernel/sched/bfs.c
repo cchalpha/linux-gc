@@ -5579,32 +5579,6 @@ void resched_cpu(int cpu)
 	raw_spin_unlock_irqrestore(&rq->lock, flags);
 }
 
-int cpuset_cpumask_can_shrink(const struct cpumask __maybe_unused *cur,
-			      const struct cpumask __maybe_unused *trial)
-{
-	return 1;
-}
-
-int task_can_attach(struct task_struct *p,
-		    const struct cpumask *cs_cpus_allowed)
-{
-	int ret = 0;
-
-	/*
-	 * Kthreads which disallow setaffinity shouldn't be moved
-	 * to a new cpuset; we don't want to change their CPU
-	 * affinity and isolating such threads by their set of
-	 * allowed nodes is unnecessary.  Thus, cpusets are not
-	 * applicable for such threads.  This prevents checking for
-	 * success of set_cpus_allowed_ptr() on all attached tasks
-	 * before cpus_allowed may be changed.
-	 */
-	if (p->flags & PF_NO_SETAFFINITY)
-		ret = -EINVAL;
-
-	return ret;
-}
-
 void wake_q_add(struct wake_q_head *head, struct task_struct *task)
 {
 	struct wake_q_node *node = &task->wake_q;
@@ -5652,6 +5626,32 @@ void wake_up_q(struct wake_q_head *head)
 }
 
 #ifdef CONFIG_SMP
+
+int cpuset_cpumask_can_shrink(const struct cpumask __maybe_unused *cur,
+			      const struct cpumask __maybe_unused *trial)
+{
+	return 1;
+}
+
+int task_can_attach(struct task_struct *p,
+		    const struct cpumask *cs_cpus_allowed)
+{
+	int ret = 0;
+
+	/*
+	 * Kthreads which disallow setaffinity shouldn't be moved
+	 * to a new cpuset; we don't want to change their CPU
+	 * affinity and isolating such threads by their set of
+	 * allowed nodes is unnecessary.  Thus, cpusets are not
+	 * applicable for such threads.  This prevents checking for
+	 * success of set_cpus_allowed_ptr() on all attached tasks
+	 * before cpus_allowed may be changed.
+	 */
+	if (p->flags & PF_NO_SETAFFINITY)
+		ret = -EINVAL;
+
+	return ret;
+}
 
 static bool sched_smp_initialized __read_mostly;
 
