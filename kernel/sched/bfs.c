@@ -4145,6 +4145,35 @@ static inline struct task_struct *find_process_by_pid(pid_t pid)
 }
 
 #ifdef CONFIG_SMP
+void sched_set_stop_task(int cpu, struct task_struct *stop)
+{
+	struct sched_param stop_param = { .sched_priority = STOP_PRIO };
+	struct sched_param start_param = { .sched_priority = 0 };
+	struct task_struct *old_stop = cpu_rq(cpu)->stop;
+
+	if (stop) {
+		/*
+		 * Make it appear like a SCHED_FIFO task, its something
+		 * userspace knows about and won't get confused about.
+		 *
+		 * Also, it will make PI more or less work without too
+		 * much confusion -- but then, stop work should not
+		 * rely on PI working anyway.
+		 */
+		sched_setscheduler_nocheck(stop, SCHED_FIFO, &stop_param);
+	}
+
+	cpu_rq(cpu)->stop = stop;
+
+	if (old_stop) {
+		/*
+		 * Reset it back to a normal scheduling policy so that
+		 * it can die in pieces.
+		 */
+		sched_setscheduler_nocheck(old_stop, SCHED_NORMAL, &start_param);
+	}
+}
+
 /*
  * Change a given task's CPU affinity. Migrate the thread to a
  * proper CPU and schedule it away if the CPU it's executing on
@@ -5709,38 +5738,7 @@ void idle_task_exit(void)
 	}
 	mmdrop(mm);
 }
-#endif /* CONFIG_HOTPLUG_CPU */
 
-void sched_set_stop_task(int cpu, struct task_struct *stop)
-{
-	struct sched_param stop_param = { .sched_priority = STOP_PRIO };
-	struct sched_param start_param = { .sched_priority = 0 };
-	struct task_struct *old_stop = cpu_rq(cpu)->stop;
-
-	if (stop) {
-		/*
-		 * Make it appear like a SCHED_FIFO task, its something
-		 * userspace knows about and won't get confused about.
-		 *
-		 * Also, it will make PI more or less work without too
-		 * much confusion -- but then, stop work should not
-		 * rely on PI working anyway.
-		 */
-		sched_setscheduler_nocheck(stop, SCHED_FIFO, &stop_param);
-	}
-
-	cpu_rq(cpu)->stop = stop;
-
-	if (old_stop) {
-		/*
-		 * Reset it back to a normal scheduling policy so that
-		 * it can die in pieces.
-		 */
-		sched_setscheduler_nocheck(old_stop, SCHED_NORMAL, &start_param);
-	}
-}
-
-#ifdef CONFIG_HOTPLUG_CPU
 /*
  * Migrate all tasks from the rq, sleeping tasks will be migrated by
  * try_to_wake_up()->select_task_rq().
