@@ -115,6 +115,24 @@ static inline int task_on_rq_migrating(struct task_struct *p)
  */
 int rr_interval __read_mostly = 6;
 
+static int __init rr_interval_set(char *str)
+{
+	u32 rr;
+
+	pr_info("rr_interval: ");
+	if (kstrtouint(str, 0, &rr)) {
+		pr_cont("using default of %u, unable to parse %s\n",
+			rr_interval, str);
+		return 1;
+	}
+
+	rr_interval = rr;
+	pr_cont("%d\n", rr_interval);
+
+	return 1;
+}
+__setup("rr_interval=", rr_interval_set);
+
 /*
  * sched_iso_cpu - sysctl which determines the CPUs percentage SCHED_ISO tasks
  * are allowed to run five seconds as real time tasks. This is the total over
