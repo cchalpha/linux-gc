@@ -133,6 +133,18 @@ static int __init rr_interval_set(char *str)
 }
 __setup("rr_interval=", rr_interval_set);
 
+
+static u64 sched_prio_to_deadline[NICE_WIDTH] __read_mostly;
+
+static void sched_init_prio_to_deadline(void)
+{
+	int i;
+
+	sched_prio_to_deadline[0] = 128 * rr_interval * (MS_TO_NS(1) / 128);
+	for (i = 1 ; i < NICE_WIDTH ; i++)
+		sched_prio_to_deadline[i] = sched_prio_to_deadline[i - 1] * 11 / 10;
+}
+
 /*
  * sched_iso_cpu - sysctl which determines the CPUs percentage SCHED_ISO tasks
  * are allowed to run five seconds as real time tasks. This is the total over
@@ -147,11 +159,6 @@ int sched_iso_cpu __read_mostly = 70;
  * 2: Expire timeslice and recalculate deadline.
  */
 int sched_yield_type __read_mostly = 1;
-
-/*
- * The relative length of deadline for each priority(nice) level.
- */
-static int prio_ratios[NICE_WIDTH] __read_mostly;
 
 /*
  * The quota handed out to tasks of all priority levels when refilling their
@@ -715,25 +722,6 @@ static inline void requeue_task(struct task_struct *p, struct rq *rq)
 	p->sl_node.level = p->sl_level;
 	if (bfs_skiplist_insert(&rq->sl_header, &p->sl_node) || b_first)
 		update_sched_rq_queued_masks(rq);
-}
-
-/*
- * Returns the relative length of deadline all compared to the shortest
- * deadline which is that of nice -20.
- */
-static inline int task_prio_ratio(struct task_struct *p)
-{
-	return prio_ratios[TASK_USER_PRIO(p)];
-}
-
-/*
- * task_timeslice - all tasks of all priorities get the exact same timeslice
- * length. CPU distribution is handled by giving different deadlines to
- * tasks of different priorities. Use 128 as the base value for fast shifts.
- */
-static inline int task_timeslice(struct task_struct *p)
-{
-	return (rr_interval * task_prio_ratio(p) / 128);
 }
 
 /*
@@ -3242,7 +3230,7 @@ static inline void preempt_latency_stop(int val) { }
  */
 static inline u64 prio_deadline_diff(int user_prio)
 {
-	return (prio_ratios[user_prio] * rr_interval * (MS_TO_NS(1) / 128));
+	return sched_prio_to_deadline[user_prio];
 }
 
 static inline u64 task_deadline_diff(struct task_struct *p)
@@ -3255,14 +3243,9 @@ static inline u64 static_deadline_diff(int static_prio)
 	return prio_deadline_diff(USER_PRIO(static_prio));
 }
 
-static inline int longest_deadline_diff(void)
+static inline u64 longest_deadline_diff(void)
 {
 	return prio_deadline_diff(39);
-}
-
-static inline int ms_longest_deadline_diff(void)
-{
-	return NS_TO_MS(longest_deadline_diff());
 }
 
 /*
@@ -4122,7 +4105,7 @@ int task_prio(const struct task_struct *p)
 	preempt_disable();
 	delta = NS_TO_MS(p->deadline - this_rq()->clock);
 	preempt_enable();
-	delta = delta * 40 / ms_longest_deadline_diff();
+	delta = delta * 40 / NS_TO_MS(longest_deadline_diff());
 	if (delta > 0 && delta <= 80)
 		prio += delta;
 	if (idleprio_task(p))
@@ -5427,7 +5410,7 @@ SYSCALL_DEFINE2(sched_rr_get_interval, pid_t, pid,
 		goto out_unlock;
 
 	task_access_lock_irqsave(p, &lock, &flags);
-	time_slice = p->policy == SCHED_FIFO ? 0 : MS_TO_NS(task_timeslice(p));
+	time_slice = p->policy == SCHED_FIFO ? 0 : MS_TO_NS(rr_interval);
 	task_access_unlock_irqrestore(p, lock, &flags);
 
 	rcu_read_unlock();
@@ -6234,9 +6217,7 @@ void __init sched_init(void)
 
 	wait_bit_init();
 
-	prio_ratios[0] = 128;
-	for (i = 1 ; i < NICE_WIDTH ; i++)
-		prio_ratios[i] = prio_ratios[i - 1] * 11 / 10;
+	sched_init_prio_to_deadline();
 
 #ifdef CONFIG_SMP
 	cpumask_setall(&sched_cpu_non_scaled_mask);
