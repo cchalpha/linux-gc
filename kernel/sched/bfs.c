@@ -134,16 +134,16 @@ static int __init rr_interval_set(char *str)
 __setup("rr_interval=", rr_interval_set);
 
 
-static u64 sched_prio_to_deadline[NICE_WIDTH] __read_mostly;
-
-static void sched_init_prio_to_deadline(void)
-{
-	int i;
-
-	sched_prio_to_deadline[0] = 128 * rr_interval * (MS_TO_NS(1) / 128);
-	for (i = 1 ; i < NICE_WIDTH ; i++)
-		sched_prio_to_deadline[i] = sched_prio_to_deadline[i - 1] * 11 / 10;
-}
+static const u64 sched_prio_to_deadline[NICE_WIDTH] = {
+/* -20 */	  6291456,   6920601,   7612661,   8373927,   9211319,
+/* -15 */	 10132450,  11145695,  12260264,  13486290,  14834919,
+/* -10 */	 16318410,  17950251,  19745276,  21719803,  23891783,
+/*  -5 */	 26280961,  28909057,  31799962,  34979958,  38477953,
+/*   0 */	 42325748,  46558322,  51214154,  56335569,  61969125,
+/*   5 */	 68166037,  74982640,  82480904,  90728994,  99801893,
+/*  10 */	109782082, 120760290, 132836319, 146119950, 160731945,
+/*  15 */	176805139, 194485652, 213934217, 235327638, 258860401
+};
 
 /*
  * sched_iso_cpu - sysctl which determines the CPUs percentage SCHED_ISO tasks
@@ -172,11 +172,19 @@ static inline int timeslice(void)
 #ifdef CONFIG_SMP
 static cpumask_t sched_cpu_non_scaled_mask ____cacheline_aligned_in_smp;
 
-#define	SCHED_RQ_EMPTY			0
-#define	SCHED_RQ_IDLE			1
-#define	SCHED_RQ_NORMAL			2
-#define	SCHED_RQ_RT			3
-#define	NR_SCHED_RQ_QUEUED_LEVEL	4
+enum {
+SCHED_RQ_EMPTY		=	0,
+SCHED_RQ_IDLE,
+SCHED_RQ_NORMAL_0,
+SCHED_RQ_NORMAL_1,
+SCHED_RQ_NORMAL_2,
+SCHED_RQ_NORMAL_3,
+SCHED_RQ_NORMAL_4,
+SCHED_RQ_NORMAL_5,
+SCHED_RQ_NORMAL_6,
+SCHED_RQ_RT,
+NR_SCHED_RQ_QUEUED_LEVEL
+};
 
 static cpumask_t sched_rq_queued_masks[NR_SCHED_RQ_QUEUED_LEVEL]
 ____cacheline_aligned_in_smp;
@@ -439,6 +447,35 @@ static inline void sched_cpu_priodls_lock(void) {}
 static inline void sched_cpu_priodls_unlock(void) {}
 #endif
 
+/*
+ * Deadline is "now" in niffies + (offset by priority). Setting the deadline
+ * is the key to everything. It distributes CPU fairly amongst tasks of the
+ * same nice value, it proportions CPU according to nice level, it means the
+ * task that last woke up the longest ago has the earliest deadline, thus
+ * ensuring that interactive tasks get low latency on wake up. The CPU
+ * proportion works out to the square of the virtual deadline difference, so
+ * this equation will give nice 19 3% CPU compared to nice 0.
+ */
+static inline u64 prio_deadline_diff(int user_prio)
+{
+	return sched_prio_to_deadline[user_prio];
+}
+
+static inline u64 task_deadline_diff(const struct task_struct *p)
+{
+	return prio_deadline_diff(TASK_USER_PRIO(p));
+}
+
+static inline u64 static_deadline_diff(int static_prio)
+{
+	return prio_deadline_diff(USER_PRIO(static_prio));
+}
+
+static inline u64 longest_deadline_diff(void)
+{
+	return prio_deadline_diff(39);
+}
+
 static inline struct task_struct *rq_first_queued_task(struct rq *rq)
 {
 	struct skiplist_node *node = &rq->sl_header;
@@ -450,9 +487,30 @@ static inline struct task_struct *rq_first_queued_task(struct rq *rq)
 }
 
 #ifdef	CONFIG_SMP
-static inline int task_running_policy_level(const struct task_struct *p)
+static const int task_dl_hash_tbl[] = {
+/*	0           4           8           12           */
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1,
+/*	16          20          24          28           */
+	1, 1, 1, 2, 2, 2, 2, 2, 3, 3, 3, 4, 4, 5, 6, 6
+};
+
+static inline int
+task_deadline_level(const struct task_struct *p, const struct rq *rq)
+{
+	u64 delta = (rq->clock + prio_deadline_diff(39) - p->deadline) >> 26;
+
+	delta = min((size_t)delta, ARRAY_SIZE(task_dl_hash_tbl) - 1);
+	return task_dl_hash_tbl[delta];
+}
+
+static inline int
+task_running_policy_level(const struct task_struct *p, const struct rq *rq)
 {
 	int prio = p->prio;
+
+	if (NORMAL_PRIO == prio)
+		return SCHED_RQ_NORMAL_0 + task_deadline_level(p, rq);
+
 	if (prio <= ISO_PRIO)
 		return SCHED_RQ_RT;
 	return PRIO_LIMIT - prio;
@@ -471,6 +529,36 @@ static inline struct task_struct *rq_first_pending_task(struct rq *rq)
 	return skiplist_entry(node, struct task_struct, sl_node);
 }
 
+static inline void
+__update_sched_rq_queued_masks(struct rq *rq, const int cpu,
+			       const int last_level, const int level)
+{
+	cpumask_clear_cpu(cpu, &sched_rq_queued_masks[last_level]);
+	if (cpumask_empty(&sched_rq_queued_masks[last_level]))
+		clear_bit(last_level, sched_rq_queued_masks_bitmap);
+
+	cpumask_set_cpu(cpu, &sched_rq_queued_masks[level]);
+	set_bit(level, sched_rq_queued_masks_bitmap);
+
+	rq->queued_level = level;
+}
+
+static inline void update_sched_rq_queued_masks_normal(struct rq *rq)
+{
+	int cpu = cpu_of(rq);
+	struct task_struct *p = rq->curr;
+
+	if (p->prio == NORMAL_PRIO && rq_first_queued_task(rq) == p) {
+		int level = task_running_policy_level(p, rq);
+		int last_level = rq->queued_level;
+
+		if (last_level == level)
+			return;
+
+		__update_sched_rq_queued_masks(rq, cpu, last_level, level);
+	}
+}
+
 static inline void update_sched_rq_queued_masks(struct rq *rq)
 {
 	int cpu = cpu_of(rq);
@@ -480,19 +568,12 @@ static inline void update_sched_rq_queued_masks(struct rq *rq)
 	if ((p = rq_first_queued_task(rq)) == NULL)
 		level = SCHED_RQ_EMPTY;
 	else
-		level = task_running_policy_level(p);
+		level = task_running_policy_level(p, rq);
 
 	if (last_level == level)
 		return;
 
-	cpumask_clear_cpu(cpu, &sched_rq_queued_masks[last_level]);
-	if (cpumask_empty(&sched_rq_queued_masks[last_level]))
-		clear_bit(last_level, sched_rq_queued_masks_bitmap);
-
-	cpumask_set_cpu(cpu, &sched_rq_queued_masks[level]);
-	set_bit(level, sched_rq_queued_masks_bitmap);
-
-	rq->queued_level = level;
+	__update_sched_rq_queued_masks(rq, cpu, last_level, level);
 
 #ifdef CONFIG_SCHED_SMT
 	if (likely(cpu_smt_capability(cpu))) {
@@ -1008,23 +1089,29 @@ static inline int rq_dither(struct rq *rq)
  */
 
 #define BEST_LLC_CPU(cpu, cpumask)	\
+{\
+	cpumask_t tmp, *mask;\
 	if (cpumask_test_cpu((cpu), (cpumask)))\
 		return (cpu);\
 \
 	mask = &sched_cpu_affinity_chk_masks[(cpu)][0];\
 	for (; mask < sched_cpu_affinity_llc_end_masks[(cpu)]; mask++)\
 		if (cpumask_and(&tmp, (cpumask), mask))\
-			return cpumask_any(&tmp);
+			return cpumask_any(&tmp);\
+}
 
 #define BEST_NONLLC_CPU(cpu, cpumask)	\
+{\
+	cpumask_t tmp, *mask;\
 	mask = sched_cpu_affinity_llc_end_masks[(cpu)];\
 	for (; mask < sched_cpu_affinity_chk_end_masks[(cpu)]; mask++)\
 		if (cpumask_and(&tmp, (cpumask), mask))\
-			return cpumask_any(&tmp);
+			return cpumask_any(&tmp);\
+}
 
 static inline int best_mask_cpu(const int cpu, cpumask_t *cpumask)
 {
-	struct cpumask non_scaled_mask, tmp, *mask;
+	struct cpumask non_scaled_mask;
 
 	if (unlikely(cpumask_weight(cpumask)) == 1)
 		return cpumask_first(cpumask);
@@ -1648,7 +1735,7 @@ task_preemptible_rq(struct task_struct *p, cpumask_t *chk_mask,
 	cpumask_t tmp;
 	int cpu, level, preempt_level;
 
-	preempt_level = task_running_policy_level(p);
+	preempt_level = task_running_policy_level(p, this_rq());
 	level = find_first_bit(sched_rq_queued_masks_bitmap,
 			       NR_SCHED_RQ_QUEUED_LEVEL);
 
@@ -3080,7 +3167,7 @@ static inline bool vrq_trigger_load_balance(struct rq *rq)
 	 */
 	level = find_next_bit(sched_rq_queued_masks_bitmap,
 			      NR_SCHED_RQ_QUEUED_LEVEL, SCHED_RQ_IDLE);
-	preempt_level = task_running_policy_level(p);
+	preempt_level = task_running_policy_level(p, rq);
 
 	while (level < preempt_level) {
 		cpumask_or(&check, &check, &sched_rq_queued_masks[level]);
@@ -3132,6 +3219,7 @@ void scheduler_tick(void)
 	update_rq_clock(rq);
 
 	vrq_scheduler_task_tick(rq);
+	update_sched_rq_queued_masks_normal(rq);
 	calc_global_load_tick(rq);
 	rq->last_tick = rq->clock;
 
@@ -3220,41 +3308,17 @@ static inline void preempt_latency_stop(int val) { }
 #endif
 
 /*
- * Deadline is "now" in niffies + (offset by priority). Setting the deadline
- * is the key to everything. It distributes CPU fairly amongst tasks of the
- * same nice value, it proportions CPU according to nice level, it means the
- * task that last woke up the longest ago has the earliest deadline, thus
- * ensuring that interactive tasks get low latency on wake up. The CPU
- * proportion works out to the square of the virtual deadline difference, so
- * this equation will give nice 19 3% CPU compared to nice 0.
- */
-static inline u64 prio_deadline_diff(int user_prio)
-{
-	return sched_prio_to_deadline[user_prio];
-}
-
-static inline u64 task_deadline_diff(struct task_struct *p)
-{
-	return prio_deadline_diff(TASK_USER_PRIO(p));
-}
-
-static inline u64 static_deadline_diff(int static_prio)
-{
-	return prio_deadline_diff(USER_PRIO(static_prio));
-}
-
-static inline u64 longest_deadline_diff(void)
-{
-	return prio_deadline_diff(39);
-}
-
-/*
  * The time_slice is only refilled when it is empty and that is when we set a
  * new deadline.
  */
 static void time_slice_expired(struct task_struct *p, struct rq *rq)
 {
+	if (unlikely(p->policy == SCHED_FIFO))
+		return;
 	p->time_slice = timeslice();
+
+	if (unlikely(p->policy == SCHED_RR))
+		return;
 	p->deadline = rq->clock + task_deadline_diff(p);
 	update_task_priodl(p);
 }
@@ -4095,21 +4159,19 @@ SYSCALL_DEFINE1(nice, int, increment)
  */
 int task_prio(const struct task_struct *p)
 {
-	int delta, prio = p->prio - MAX_RT_PRIO;
+	int level, prio = p->prio - MAX_RT_PRIO;
+	const int level_to_nice_prio[] = {0, 7, 14, 20, 26, 33, 39};
 
 	/* rt tasks and iso tasks */
 	if (prio <= 0)
 		goto out;
 
-	/* Convert to ms to avoid overflows */
 	preempt_disable();
-	delta = NS_TO_MS(p->deadline - this_rq()->clock);
+	level = task_deadline_level(p, this_rq());
 	preempt_enable();
-	delta = delta * 40 / NS_TO_MS(longest_deadline_diff());
-	if (delta > 0 && delta <= 80)
-		prio += delta;
+	prio += level_to_nice_prio[level];
 	if (idleprio_task(p))
-		prio += 40;
+		prio += NICE_WIDTH;
 out:
 	return prio;
 }
@@ -4285,6 +4347,20 @@ __set_cpus_allowed_ptr(struct task_struct *p,
 }
 #endif
 
+static u64 task_init_deadline(const struct task_struct *p)
+{
+	return task_rq(p)->clock + task_deadline_diff(p);
+}
+
+u64 (* task_init_deadline_func_tbl[])(const struct task_struct *p) = {
+	task_init_deadline,	/* SCHED_NORMAL */
+	NULL,			/* SCHED_FIFO */
+	NULL,			/* SCHED_RR */
+	task_init_deadline,	/* SCHED_BATCH */
+	NULL,			/* SCHED_ISO */
+	task_init_deadline	/* SCHED_IDLE */
+};
+
 /*
  * sched_setparam() passes in -1 for its policy, to let the functions
  * it calls know not to change it.
@@ -4294,15 +4370,13 @@ __set_cpus_allowed_ptr(struct task_struct *p,
 static void __setscheduler_params(struct task_struct *p,
 		const struct sched_attr *attr)
 {
+	int old_policy = p->policy;
 	int policy = attr->sched_policy;
 
 	if (policy == SETPARAM_POLICY)
 		policy = p->policy;
 
 	p->policy = policy;
-
-	if (unlikely(p->policy == SCHED_FIFO))
-		p->deadline = 0ULL;
 
 	/*
 	 * allow normal nice value to be set, but will not have any
@@ -4318,6 +4392,10 @@ static void __setscheduler_params(struct task_struct *p,
 	 */
 	p->rt_priority = attr->sched_priority;
 	p->normal_prio = normal_prio(p);
+
+	if (old_policy != policy)
+		p->deadline = (task_init_deadline_func_tbl[p->policy])?
+			task_init_deadline_func_tbl[p->policy](p):0ULL;
 }
 
 /* Actually do priority change: must hold rq lock. */
@@ -5527,7 +5605,7 @@ void init_idle(struct task_struct *idle, int cpu)
 	idle->flags |= PF_IDLE;
 	/* Setting prio to illegal value shouldn't matter when never queued */
 	idle->prio = PRIO_LIMIT;
-	idle->deadline = 0ULL;
+	idle->deadline = rq_clock(rq) + task_deadline_diff(idle);
 	update_task_priodl(idle);
 	/**
 	 * use reset_rq_task() to update sched_rq_priodls only, not calling
@@ -6216,8 +6294,6 @@ void __init sched_init(void)
 	sched_clock_init();
 
 	wait_bit_init();
-
-	sched_init_prio_to_deadline();
 
 #ifdef CONFIG_SMP
 	cpumask_setall(&sched_cpu_non_scaled_mask);
