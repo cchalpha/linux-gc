@@ -540,10 +540,10 @@ struct task_struct {
 	unsigned int			flags;
 	unsigned int			ptrace;
 
-#if defined(CONFIG_SMP) && !defined(CONFIG_SCHED_BFS)
+#if defined(CONFIG_SMP) && !defined(CONFIG_SCHED_PDS)
 	struct llist_node		wake_entry;
 #endif
-#if defined(CONFIG_SMP) || defined(CONFIG_SCHED_BFS)
+#if defined(CONFIG_SMP) || defined(CONFIG_SCHED_PDS)
 	int				on_cpu;
 #endif
 #ifdef CONFIG_SMP
@@ -564,7 +564,7 @@ struct task_struct {
 	int				normal_prio;
 	unsigned int			rt_priority;
 
-#ifdef CONFIG_SCHED_BFS
+#ifdef CONFIG_SCHED_PDS
 	int				time_slice;
 	u64				deadline;
 	/* skip list level */
@@ -585,7 +585,7 @@ struct task_struct {
 	bool				zerobound;
 #endif
 	unsigned long			rt_timeout;
-#else /* CONFIG_SCHED_BFS */
+#else /* CONFIG_SCHED_PDS */
 	const struct sched_class	*sched_class;
 	struct sched_entity		se;
 	struct sched_rt_entity		rt;
@@ -1133,7 +1133,7 @@ struct task_struct {
 	 */
 };
 
-#ifdef CONFIG_SCHED_BFS
+#ifdef CONFIG_SCHED_PDS
 void cpu_scaling(int cpu);
 void cpu_nonscaling(int cpu);
 #define tsk_seruntime(t)		((t)->sched_time)
@@ -1165,7 +1165,7 @@ static inline void print_scheduler_version(void)
 }
 
 #define iso_task(p)		(false)
-#endif /* CONFIG_SCHED_BFS */
+#endif /* CONFIG_SCHED_PDS */
 
 static inline struct pid *task_pid(struct task_struct *task)
 {

@@ -22,7 +22,7 @@ static int show_schedstat(struct seq_file *seq, void *v)
 	} else {
 		struct rq *rq;
 #ifdef CONFIG_SMP
-#ifndef CONFIG_SCHED_BFS
+#ifndef CONFIG_SCHED_PDS
 		struct sched_domain *sd;
 		int dcount = 0;
 #endif
@@ -42,7 +42,7 @@ static int show_schedstat(struct seq_file *seq, void *v)
 		seq_printf(seq, "\n");
 
 #ifdef CONFIG_SMP
-#ifndef CONFIG_SCHED_BFS
+#ifndef CONFIG_SCHED_PDS
 		/* domain-specific stats */
 		rcu_read_lock();
 		for_each_domain(cpu, sd) {

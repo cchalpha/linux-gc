@@ -285,7 +285,7 @@ static int klp_check_stack(struct task_struct *task, char *err_buf)
 static bool klp_try_switch_task(struct task_struct *task)
 {
 	struct rq *rq;
-#ifdef	CONFIG_SCHED_BFS
+#ifdef	CONFIG_SCHED_PDS
 	raw_spinlock_t *lock;
 	unsigned long flags;
 #else
@@ -313,7 +313,7 @@ static bool klp_try_switch_task(struct task_struct *task)
 	 * functions.  If all goes well, switch the task to the target patch
 	 * state.
 	 */
-#ifdef	CONFIG_SCHED_BFS
+#ifdef	CONFIG_SCHED_PDS
 	rq = task_access_lock_irqsave(task, &lock, &flags);
 
 	if (task_running(task) && task != current) {
@@ -338,7 +338,7 @@ static bool klp_try_switch_task(struct task_struct *task)
 	task->patch_state = klp_target_state;
 
 done:
-#ifdef	CONFIG_SCHED_BFS
+#ifdef	CONFIG_SCHED_PDS
 	task_access_unlock_irqrestore(task, lock, &flags);
 #else
 	task_rq_unlock(rq, task, &flags);

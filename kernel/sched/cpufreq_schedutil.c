@@ -156,7 +156,7 @@ static unsigned int get_next_freq(struct sugov_policy *sg_policy,
 
 static void sugov_get_util(unsigned long *util, unsigned long *max)
 {
-#ifdef CONFIG_SCHED_BFS
+#ifdef CONFIG_SCHED_PDS
 	*util = *max = arch_scale_cpu_capacity(NULL, smp_processor_id());
 #else
 	struct rq *rq = this_rq();

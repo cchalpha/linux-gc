@@ -1,9 +1,14 @@
 /*
- *  kernel/sched/bfs.c, was kernel/sched.c
+ *  kernel/sched/pds.c, was kernel/sched.c
  *
- *  VRQ Core kernel scheduler code and related syscalls
+ *  PDS-mq Core kernel scheduler code and related syscalls
  *
  *  Copyright (C) 1991-2002  Linus Torvalds
+ *
+ *  2009-08-13	Brainfuck deadline scheduling policy by Con Kolivas deletes
+ *		a whole lot of those previous things.
+ *  2017-09-06	Priority and Deadline based Skip list multiple queue kernel
+ *		scheduler by Alfred Chen.
  */
 
 #include <uapi/linux/sched/types.h>
@@ -31,7 +36,7 @@
 #include <asm/paravirt.h>
 #endif
 
-#include "bfs_sched.h"
+#include "pds_sched.h"
 #include <linux/freezer.h>
 #include "../workqueue_internal.h"
 #include "../smpboot.h"
@@ -91,7 +96,7 @@ enum {
 
 void print_scheduler_version(void)
 {
-	printk(KERN_INFO "BFS enhancement patchset VRQ 0.97b by Alfred Chen.\n");
+	printk(KERN_INFO "pds: PDS-mq CPU Scheduler 0.97b by Alfred Chen.\n");
 }
 
 /* task_struct::on_rq states: */
@@ -666,7 +671,7 @@ static void dequeue_task(struct task_struct *p, struct rq *rq)
 
 	lockdep_assert_held(&rq->lock);
 
-	WARN_ONCE(task_rq(p) != rq, "vrq: dequeue task reside on cpu%d from cpu%d\n",
+	WARN_ONCE(task_rq(p) != rq, "pds: dequeue task reside on cpu%d from cpu%d\n",
 		  task_cpu(p), cpu);
 	if (skiplist_del_init(&rq->sl_header, &p->sl_node))
 		update_sched_rq_queued_masks(rq);
@@ -703,8 +708,8 @@ static bool isoprio_suitable(struct rq *rq)
 }
 
 /*
- * vrq_skiplist_random_level -- Returns a pseudo-random level number for skip
- * list node which is used in BFS run queue.
+ * pds_skiplist_random_level -- Returns a pseudo-random level number for skip
+ * list node which is used in PDS run queue.
  *
  * In current implementation, based on testing, the first 8 bits in microseconds
  * of niffies are suitable for random level population.
@@ -716,13 +721,13 @@ static bool isoprio_suitable(struct rq *rq)
  * skiplist level is set to task's sl_node->level, the skiplist insert function
  * may change it based on current level of the skip lsit.
  */
-static inline int vrq_skiplist_random_level(const long unsigned int randseed)
+static inline int pds_skiplist_random_level(const long unsigned int randseed)
 {
 	return find_first_bit(&randseed, NUM_SKIPLIST_LEVEL - 1);
 }
 
 /**
- * vrq_skiplist_task_search -- search function used in BFS run queue skip list
+ * pds_skiplist_task_search -- search function used in PDS run queue skip list
  * node insert operation.
  * @it: iterator pointer to the node in the skip list
  * @node: pointer to the skiplist_node to be inserted
@@ -731,16 +736,16 @@ static inline int vrq_skiplist_random_level(const long unsigned int randseed)
  * false.
  */
 static inline bool
-vrq_skiplist_task_search(struct skiplist_node *it, struct skiplist_node *node)
+pds_skiplist_task_search(struct skiplist_node *it, struct skiplist_node *node)
 {
 	return (skiplist_entry(it, struct task_struct, sl_node)->priodl <=
 		skiplist_entry(node, struct task_struct, sl_node)->priodl);
 }
 
 /*
- * Define the skip list insert function for BFS
+ * Define the skip list insert function for PDS
  */
-DEFINE_SKIPLIST_INSERT_FUNC(bfs_skiplist_insert, vrq_skiplist_task_search);
+DEFINE_SKIPLIST_INSERT_FUNC(pds_skiplist_insert, pds_skiplist_task_search);
 
 /*
  * Adding task to the runqueue.
@@ -763,11 +768,11 @@ static void enqueue_task(struct task_struct *p, struct rq *rq)
 		update_task_priodl(p);
 	}
 
-	WARN_ONCE(task_rq(p) != rq, "vrq: enqueue task reside on cpu%d to cpu%d\n",
+	WARN_ONCE(task_rq(p) != rq, "pds: enqueue task reside on cpu%d to cpu%d\n",
 		  task_cpu(p), cpu);
 
 	p->sl_node.level = p->sl_level;
-	if (bfs_skiplist_insert(&rq->sl_header, &p->sl_node))
+	if (pds_skiplist_insert(&rq->sl_header, &p->sl_node))
 		update_sched_rq_queued_masks(rq);
 	rq->nr_running++;
 #ifdef CONFIG_SMP
@@ -796,13 +801,13 @@ static inline void requeue_task(struct task_struct *p, struct rq *rq)
 
 	lockdep_assert_held(&rq->lock);
 
-	WARN_ONCE(task_rq(p) != rq, "vrq: cpu[%d] requeue task reside on cpu%d\n",
+	WARN_ONCE(task_rq(p) != rq, "pds: cpu[%d] requeue task reside on cpu%d\n",
 		  cpu_of(rq), task_cpu(p));
 
 	b_first = skiplist_del_init(&rq->sl_header, &p->sl_node);
 
 	p->sl_node.level = p->sl_level;
-	if (bfs_skiplist_insert(&rq->sl_header, &p->sl_node) || b_first)
+	if (pds_skiplist_insert(&rq->sl_header, &p->sl_node) || b_first)
 		update_sched_rq_queued_masks(rq);
 }
 
@@ -952,7 +957,7 @@ static enum hrtimer_restart hrtick(struct hrtimer *timer)
 static inline int hrtick_enabled(struct rq *rq)
 {
 	/**
-	 * VRQ doesn't support sched_feat yet
+	 * PDS doesn't support sched_feat yet
 	if (!sched_feat(HRTICK))
 		return 0;
 	*/
@@ -1862,7 +1867,7 @@ ttwu_stat(struct task_struct *p, int cpu, int wake_flags)
 	if (cpu == rq->cpu)
 		schedstat_inc(rq->ttwu_local);
 	else {
-		/** VRQ ToDo:
+		/** PDS ToDo:
 		 * How to do ttwu_wake_remote
 		 */
 	}
@@ -1894,7 +1899,7 @@ static inline void ttwu_activate(struct task_struct *p, struct rq *rq)
 	activate_task(p, rq);
 
 	/*
-	 * if a worker is waking up, notify workqueue. Note that on BFS, we
+	 * if a worker is waking up, notify workqueue. Note that on PDS, we
 	 * don't really know what CPU it will be, so we fake it for
 	 * wq_worker_waking_up :/
 	 */
@@ -2256,7 +2261,7 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 #ifdef CONFIG_PREEMPT_NOTIFIERS
 	INIT_HLIST_HEAD(&p->preempt_notifiers);
 #endif
-	/* Should be reset in fork.c but done here for ease of bfs patching */
+	/* Should be reset in fork.c but done here for ease of PDS patching */
 	p->on_cpu =
 	p->on_rq =
 	p->utime =
@@ -2267,7 +2272,7 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 	 * Some architectures don't have better than microsecond resolution
 	 * so mask out ~microseconds as the random seed for skiplist insertion.
 	 */
-	p->sl_level = vrq_skiplist_random_level(task_rq(p)->clock >> 10);
+	p->sl_level = pds_skiplist_random_level(task_rq(p)->clock >> 10);
 	INIT_SKIPLIST_NODE(&p->sl_node);
 
 	/*
@@ -2841,7 +2846,7 @@ unsigned long nr_iowait_cpu(int cpu)
 	return atomic_read(&this->nr_iowait);
 }
 
-/* Beyond a task running on this CPU, load is equal everywhere on BFS, so we
+/* Beyond a task running on this CPU, load is equal everywhere on PDS, so we
  * base it on the number of running or queued tasks with their ->rq pointer
  * set to this CPU as being the CPU they're more likely to run on. */
 void get_iowait_load(unsigned long *nr_waiters, unsigned long *load)
@@ -2948,7 +2953,7 @@ static inline void no_iso_tick(struct rq *rq)
 	}
 }
 
-static inline void vrq_update_curr(struct rq *rq, struct task_struct *p)
+static inline void pds_update_curr(struct rq *rq, struct task_struct *p)
 {
 	s64 ns = rq->clock_task - p->last_ran;
 
@@ -2963,14 +2968,14 @@ static inline void vrq_update_curr(struct rq *rq, struct task_struct *p)
 }
 
 /* This manages tasks that have run out of timeslice during a scheduler_tick */
-static inline void vrq_scheduler_task_tick(struct rq *rq)
+static inline void pds_scheduler_task_tick(struct rq *rq)
 {
 	struct task_struct *p = rq->curr;
 
 	if (is_idle_task(p))
 		return;
 
-	vrq_update_curr(rq, p);
+	pds_update_curr(rq, p);
 
 	cpufreq_update_util(rq, 0);
 	/*
@@ -3051,7 +3056,7 @@ static int active_load_balance_cpu_stop(void *data)
 	return 0;
 }
 
-static __latent_entropy void vrq_run_rebalance(struct softirq_action *h)
+static __latent_entropy void pds_run_rebalance(struct softirq_action *h)
 {
 	struct rq *this_rq = this_rq();
 	unsigned long flags;
@@ -3079,7 +3084,7 @@ static __latent_entropy void vrq_run_rebalance(struct softirq_action *h)
 		raw_spin_unlock_irqrestore(&this_rq->lock, flags);
 }
 
-static inline bool vrq_sg_balance(struct rq *rq)
+static inline bool pds_sg_balance(struct rq *rq)
 {
 	int cpu;
 	struct task_struct *p;
@@ -3133,19 +3138,19 @@ static inline bool vrq_sg_balance(struct rq *rq)
 #endif /* CONFIG_SCHED_SMT */
 
 /**
- * VRQ load balance function, be called in scheduler_tick()
+ * PDS load balance function, be called in scheduler_tick()
  *
  * return: true if balance happened with rq->lock released, otherwise false.
  * context: interrupt disabled, rq->lock
  */
-static inline bool vrq_trigger_load_balance(struct rq *rq)
+static inline bool pds_trigger_load_balance(struct rq *rq)
 {
 	int cpu, level, preempt_level;
 	struct task_struct *p;
 	cpumask_t check = { CPU_BITS_NONE };
 
 #ifdef CONFIG_SCHED_SMT
-	if (vrq_sg_balance(rq))
+	if (pds_sg_balance(rq))
 		return false;
 #endif
 
@@ -3219,13 +3224,13 @@ void scheduler_tick(void)
 	raw_spin_lock(&rq->lock);
 	update_rq_clock(rq);
 
-	vrq_scheduler_task_tick(rq);
+	pds_scheduler_task_tick(rq);
 	update_sched_rq_queued_masks_normal(rq);
 	calc_global_load_tick(rq);
 	rq->last_tick = rq->clock;
 
 #ifdef CONFIG_SMP
-	if (likely(!vrq_trigger_load_balance(rq)))
+	if (likely(!pds_trigger_load_balance(rq)))
 #endif
 	raw_spin_unlock(&rq->lock);
 
@@ -3338,7 +3343,7 @@ static inline void check_deadline(struct task_struct *p, struct rq *rq)
 	if (rq->idle == p)
 		return;
 
-	vrq_update_curr(rq, p);
+	pds_update_curr(rq, p);
 
 	if (p->time_slice < RESCHED_US || batch_task(p)) {
 		time_slice_expired(p, rq);
@@ -3592,7 +3597,7 @@ static void __sched notrace __schedule(bool preempt)
 
 	schedule_debug(prev);
 
-	/* by passing sched_feat(HRTICK) checking which VRQ doesn't support */
+	/* by passing sched_feat(HRTICK) checking which PDS doesn't support */
 	hrtick_clear(rq);
 
 	local_irq_disable();
@@ -4536,7 +4541,7 @@ recheck:
 	raw_spin_lock_irqsave(&p->pi_lock, flags);
 
 	/*
-	 * To be able to change p->policy safely, task_vrq_lock()
+	 * To be able to change p->policy safely, task_access_lock()
 	 * must be called.
 	 * IF use task_access_lock() here:
 	 * For the task p which is not running, reading rq->stop is
@@ -5315,7 +5320,7 @@ EXPORT_SYMBOL(yield);
  * It's the caller's job to ensure that the target task struct
  * can't go away on us before we can do any checks.
  *
- * In VRQ, only accelerate the thread toward the processor it's on.
+ * In PDS, only accelerate the thread toward the processor it's on.
  *
  * Return:
  *	true (>0) if we indeed boosted the target task.
@@ -5565,7 +5570,7 @@ void show_state_filter(unsigned long state_filter)
 	}
 
 #ifdef CONFIG_SCHED_DEBUG
-	/* BFS/VRQ TODO: should support this
+	/* PDS TODO: should support this
 	if (!state_filter)
 		sysrq_sched_debug_show();
 	*/
@@ -6022,7 +6027,7 @@ void partition_sched_domains(int ndoms_new, cpumask_var_t doms_new[],
 			     struct sched_domain_attr *dattr_new)
 {
 	/**
-	 * VRQ doesn't depend on sched domains, but just keep this api
+	 * PDS doesn't depend on sched domains, but just keep this api
 	 */
 }
 
@@ -6137,7 +6142,7 @@ static void sched_rq_cpu_starting(unsigned int cpu)
 int sched_cpu_starting(unsigned int cpu)
 {
 	/*
-	 * BFS doesn't have rq start time record
+	 * PDS doesn't have rq start time record
 	 * set_cpu_rq_start_time(cpu);
 	 */
 	sched_rq_cpu_starting(cpu);
@@ -6155,7 +6160,7 @@ int sched_cpu_dying(unsigned int cpu)
 	migrate_tasks(rq);
 
 	/*
-	 * VRQ: TODO debug load to test still need set rq to idle?
+	 * PDS: TODO debug load to test still need set rq to idle?
 	 * clear sched_rq_queued_masks[SCHED_RQ_EMPTY]when CPU is offline,
 	 * let it looks *busy*
 	 */
@@ -6198,7 +6203,7 @@ static void sched_init_topology_cpumask(void)
 		cpumask_copy(&tmp, topology_sibling_cpumask(cpu));
 		cpumask_clear_cpu(cpu, &tmp);
 		if (cpumask_weight(&tmp)) {
-			printk(KERN_INFO "vrq: sched_cpu_affinity_chk_masks[%d] smt 0x%08lx",
+			printk(KERN_INFO "pds: sched_cpu_affinity_chk_masks[%d] smt 0x%08lx",
 			       cpu, tmp.bits[0]);
 			cpumask_copy(chk, &tmp);
 			chk++;
@@ -6207,7 +6212,7 @@ static void sched_init_topology_cpumask(void)
 #ifdef CONFIG_SCHED_MC
 		cpumask_complement(&tmp, topology_sibling_cpumask(cpu));
 		if (cpumask_and(&tmp, &tmp, cpu_coregroup_mask(cpu))) {
-			printk(KERN_INFO "vrq: sched_cpu_affinity_chk_masks[%d] coregroup 0x%08lx",
+			printk(KERN_INFO "pds: sched_cpu_affinity_chk_masks[%d] coregroup 0x%08lx",
 			       cpu, tmp.bits[0]);
 			cpumask_copy(chk, &tmp);
 			chk++;
@@ -6223,7 +6228,7 @@ static void sched_init_topology_cpumask(void)
 
 		cpumask_complement(&tmp, cpu_coregroup_mask(cpu));
 		if (cpumask_and(&tmp, &tmp, topology_core_cpumask(cpu))) {
-			printk(KERN_INFO "vrq: sched_cpu_affinity_chk_masks[%d] core 0x%08lx",
+			printk(KERN_INFO "pds: sched_cpu_affinity_chk_masks[%d] core 0x%08lx",
 			       cpu, tmp.bits[0]);
 			cpumask_copy(chk, &tmp);
 			chk++;
@@ -6231,7 +6236,7 @@ static void sched_init_topology_cpumask(void)
 
 		cpumask_complement(&tmp, topology_core_cpumask(cpu));
 		if (cpumask_and(&tmp, &tmp, cpu_online_mask)) {
-			printk(KERN_INFO "vrq: sched_cpu_affinity_chk_masks[%d] others 0x%08lx",
+			printk(KERN_INFO "pds: sched_cpu_affinity_chk_masks[%d] others 0x%08lx",
 			       cpu, tmp.bits[0]);
 			cpumask_copy(chk, &tmp);
 			chk++;
@@ -6362,7 +6367,7 @@ void __init sched_init(void)
 	sched_init_topology_cpumask_early();
 
 #ifdef CONFIG_SCHED_SMT
-	open_softirq(SCHED_SOFTIRQ, vrq_run_rebalance);
+	open_softirq(SCHED_SOFTIRQ, pds_run_rebalance);
 #endif
 #endif /* SMP */
 

@@ -1,5 +1,5 @@
-#ifdef CONFIG_SCHED_BFS
-#include "bfs_sched.h"
+#ifdef CONFIG_SCHED_PDS
+#include "pds_sched.h"
 #else
 
 #include <linux/sched.h>
@@ -2096,4 +2096,4 @@ static inline void cpufreq_update_this_cpu(struct rq *rq, unsigned int flags) {}
 #define arch_scale_freq_invariant()	(false)
 #endif
 
-#endif /* CONFIG_SCHED_BFS */
+#endif /* CONFIG_SCHED_PDS */

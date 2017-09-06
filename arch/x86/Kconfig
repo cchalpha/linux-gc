@@ -951,7 +951,7 @@ config SCHED_SMT
 
 config SMT_NICE
 	bool "SMT (Hyperthreading) aware nice priority and policy support"
-	depends on SCHED_BFS && SCHED_SMT
+	depends on SCHED_PDS && SCHED_SMT
 	default y
 	---help---
 	  Enabling Hyperthreading on Intel CPUs decreases the effectiveness

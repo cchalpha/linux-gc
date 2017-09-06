@@ -125,7 +125,7 @@ void account_user_time(struct task_struct *p, u64 cputime)
 	p->utime += cputime;
 	account_group_user_time(p, cputime);
 
-#ifdef	CONFIG_SCHED_BFS
+#ifdef	CONFIG_SCHED_PDS
 	index = (task_nice(p) > 0 || idleprio_task(p)) ? CPUTIME_NICE :
 		CPUTIME_USER;
 #else
@@ -154,7 +154,7 @@ void account_guest_time(struct task_struct *p, u64 cputime)
 	p->gtime += cputime;
 
 	/* Add guest time to cpustat. */
-#ifdef	CONFIG_SCHED_BFS
+#ifdef	CONFIG_SCHED_PDS
 	if (task_nice(p) > 0 || idleprio_task(p)) {
 #else
 	if (task_nice(p) > 0) {
@@ -286,7 +286,7 @@ static inline u64 read_sum_exec_runtime(struct task_struct *t)
 }
 #else
 
-#ifdef	CONFIG_SCHED_BFS
+#ifdef	CONFIG_SCHED_PDS
 static u64 read_sum_exec_runtime(struct task_struct *t)
 {
 	u64 ns;

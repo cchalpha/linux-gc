@@ -1,5 +1,5 @@
-#ifndef BFS_SCHED_H
-#define BFS_SCHED_H
+#ifndef PDS_SCHED_H
+#define PDS_SCHED_H
 
 #include <linux/sched.h>
 #include <linux/sched/sysctl.h>
@@ -336,4 +336,4 @@ unsigned long arch_scale_cpu_capacity(struct sched_domain *sd, int cpu)
 
 extern void schedule_idle(void);
 
-#endif /* BFS_SCHED_H */
+#endif /* PDS_SCHED_H */
