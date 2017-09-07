@@ -1023,7 +1023,6 @@ struct task_struct {
 #ifdef CONFIG_LATENCYTOP
 	int				latency_record_count;
 	struct latency_record		latency_record[LT_SAVECOUNT];
-
 #endif
 	/*
 	 * Time slack values; these are used to round up poll() and
@@ -1139,8 +1138,6 @@ void cpu_nonscaling(int cpu);
 #define tsk_seruntime(t)		((t)->sched_time)
 #define tsk_rttimeout(t)		((t)->rt_timeout)
 
-void print_scheduler_version(void);
-
 #define is_idle_policy(policy)	((policy) == SCHED_IDLEPRIO)
 #define idleprio_task(p)	unlikely(is_idle_policy((p)->policy))
 
@@ -1158,11 +1155,6 @@ static inline void cpu_nonscaling(int cpu)
 }
 #define tsk_seruntime(t)	((t)->se.sum_exec_runtime)
 #define tsk_rttimeout(t)	((t)->rt.timeout)
-
-static inline void print_scheduler_version(void)
-{
-	printk(KERN_INFO"CFS CPU scheduler.\n");
-}
 
 #define iso_task(p)		(false)
 #endif /* CONFIG_SCHED_PDS */

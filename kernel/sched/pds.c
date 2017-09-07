@@ -94,7 +94,7 @@ enum {
 	NR_CPU_AFFINITY_CHK_LEVEL
 };
 
-void print_scheduler_version(void)
+static inline void print_scheduler_version(void)
 {
 	printk(KERN_INFO "pds: PDS-mq CPU Scheduler 0.97b by Alfred Chen.\n");
 }
@@ -6296,6 +6296,8 @@ void __init sched_init(void)
 {
 	int i;
 	struct rq *rq;
+
+	print_scheduler_version();
 
 	sched_clock_init();
 

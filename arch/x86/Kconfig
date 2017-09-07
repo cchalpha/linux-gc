@@ -945,7 +945,7 @@ config SCHED_SMT
 	depends on SMP
 	---help---
 	  SMT scheduler support improves the CPU scheduler's decision making
-	  when dealing with Intel P4/Core 2 chips with HyperThreading at a
+	  when dealing with Intel Pentium 4 chips with HyperThreading at a
 	  cost of slightly increased overhead in some places. If unsure say
 	  N here.
 
