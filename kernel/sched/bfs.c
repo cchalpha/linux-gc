@@ -486,7 +486,6 @@ static inline struct task_struct *rq_first_queued_task(struct rq *rq)
 	return skiplist_entry(node, struct task_struct, sl_node);
 }
 
-#ifdef	CONFIG_SMP
 static const int task_dl_hash_tbl[] = {
 /*	0           4           8           12           */
 	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1,
@@ -503,6 +502,7 @@ task_deadline_level(const struct task_struct *p, const struct rq *rq)
 	return task_dl_hash_tbl[delta];
 }
 
+#ifdef	CONFIG_SMP
 static inline int
 task_running_policy_level(const struct task_struct *p, const struct rq *rq)
 {
@@ -596,6 +596,7 @@ static inline void update_sched_rq_queued_masks(struct rq *rq)
 }
 #else /* CONFIG_SMP */
 static inline void update_sched_rq_queued_masks(struct rq *rq) {}
+static inline void update_sched_rq_queued_masks_normal(struct rq *rq) {}
 #endif
 
 #ifdef CONFIG_NO_HZ_FULL
