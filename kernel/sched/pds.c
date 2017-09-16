@@ -3927,20 +3927,22 @@ int default_wake_function(wait_queue_entry_t *curr, unsigned mode, int wake_flag
 EXPORT_SYMBOL(default_wake_function);
 
 static inline void
-check_task_changed(struct rq *rq, struct task_struct *p, int oldprio)
+check_task_changed(struct rq *rq, struct task_struct *p)
 {
 	/*
-	 * Reschedule if we are currently running on this runqueue and
-	 * our priority decreased, or if we are not currently running on
-	 * this runqueue and our priority is higher than the current's
+	 * Trigger changes when task priority/deadline modified.
 	 */
-	if (task_queued(p))
+	if (task_queued(p)) {
+		struct task_struct *first;
+
 		requeue_task(p, rq);
 
-	if (task_running(p)) {
-		reset_rq_task(rq, p);
-		/* Resched only if we might now be preempted */
-		if (p->prio > oldprio)
+		if (task_running(p))
+			reset_rq_task(rq, p);
+
+		/* Resched if first queued task not running and not IDLE */
+		if ((first = rq_first_queued_task(rq)) != rq->curr &&
+		    !task_running_idle(first))
 			resched_curr(rq);
 	}
 }
@@ -3975,7 +3977,7 @@ static inline int rt_effective_prio(struct task_struct *p, int prio)
  */
 void rt_mutex_setprio(struct task_struct *p, struct task_struct *pi_task)
 {
-	int prio, oldprio;
+	int prio;
 	struct rq *rq;
 	raw_spinlock_t *lock;
 
@@ -4026,11 +4028,10 @@ void rt_mutex_setprio(struct task_struct *p, struct task_struct *pi_task)
 	}
 
 	trace_sched_pi_setprio(p, pi_task);
-	oldprio = p->prio;
 	p->prio = prio;
 	update_task_priodl(p);
 
-	check_task_changed(rq, p, oldprio);
+	check_task_changed(rq, p);
 
 out_unlock:
 	__task_access_unlock(p, lock);
@@ -4053,7 +4054,7 @@ static inline void adjust_deadline(struct task_struct *p, int new_prio)
 
 void set_user_nice(struct task_struct *p, long nice)
 {
-	int queued, new_static, old_static;
+	int new_static;
 	unsigned long flags;
 	struct rq *rq;
 	raw_spinlock_t *lock;
@@ -4080,25 +4081,13 @@ void set_user_nice(struct task_struct *p, long nice)
 		p->static_prio = new_static;
 		goto out_unlock;
 	}
-	queued = task_queued(p);
-	if (queued) {
-		dequeue_task(p, rq);
-	}
 
 	adjust_deadline(p, new_static);
-	old_static = p->static_prio;
 	p->static_prio = new_static;
 	p->prio = effective_prio(p);
 	update_task_priodl(p);
 
-	if (queued) {
-		enqueue_task(p, rq);
-	}
-	if (task_running(p)) {
-		reset_rq_task(rq, p);
-		if (old_static < new_static)
-			resched_curr(rq);
-	}
+	check_task_changed(rq, p);
 out_unlock:
 	__task_access_unlock(p, lock);
 	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
@@ -4440,7 +4429,7 @@ __sched_setscheduler(struct task_struct *p,
 		     const struct sched_attr *attr, bool user, bool pi)
 {
 	int newprio = MAX_RT_PRIO - 1 - attr->sched_priority;
-	int retval, oldprio, oldpolicy = -1;
+	int retval, oldpolicy = -1;
 	int policy = attr->sched_policy;
 	unsigned long flags;
 	struct rq *rq;
@@ -4579,7 +4568,6 @@ recheck:
 	}
 
 	p->sched_reset_on_fork = reset_on_fork;
-	oldprio = p->prio;
 
 	if (pi) {
 		/*
@@ -4589,7 +4577,7 @@ recheck:
 		 * the runqueue. This will be done when the task deboost
 		 * itself.
 		 */
-		if (rt_effective_prio(p, newprio) == oldprio) {
+		if (rt_effective_prio(p, newprio) == p->prio) {
 			__setscheduler_params(p, attr);
 			__task_access_unlock(p, lock);
 			raw_spin_unlock_irqrestore(&p->pi_lock, flags);
@@ -4599,7 +4587,7 @@ recheck:
 
 	__setscheduler(rq, p, attr, pi);
 
-	check_task_changed(rq, p, oldprio);
+	check_task_changed(rq, p);
 
 	__task_access_unlock(p, lock);
 	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
@@ -5176,21 +5164,6 @@ SYSCALL_DEFINE3(sched_getaffinity, pid_t, pid, unsigned int, len,
 	return ret;
 }
 
-/*
- * this_rq_lock - lock this runqueue and disable interrupts.
- */
-static struct rq *this_rq_lock(void)
-	__acquires(rq->lock)
-{
-	struct rq *rq;
-
-	local_irq_disable();
-	rq = this_rq();
-	raw_spin_lock(&rq->lock);
-
-	return rq;
-}
-
 /**
  * sys_sched_yield - yield the current processor to other threads.
  *
@@ -5207,10 +5180,14 @@ SYSCALL_DEFINE0(sched_yield)
 	if (unlikely(!sched_yield_type))
 		return 0;
 
-	rq = this_rq_lock();
+	local_irq_disable();
+	rq = this_rq();
+	raw_spin_lock(&rq->lock);
 
-	if (unlikely(sched_yield_type > 1))
+	if (unlikely(sched_yield_type > 1)) {
 		time_slice_expired(current, rq);
+		requeue_task(current, rq);
+	}
 	schedstat_inc(rq->yld_count);
 
 	/*
@@ -5344,14 +5321,17 @@ int __sched yield_to(struct task_struct *p, bool preempt)
 
 	rq_curr = rq->curr;
 	yielded = 1;
-	if (p->deadline > rq_curr->deadline) {
-		p->deadline = rq_curr->deadline;
-		update_task_priodl(p);
-	}
 	p->time_slice += rq_curr->time_slice;
 	if (p->time_slice > timeslice())
 		p->time_slice = timeslice();
 	time_slice_expired(rq_curr, rq);
+	requeue_task(rq_curr, rq);
+
+	if (p->deadline > rq_curr->deadline) {
+		p->deadline = rq_curr->deadline;
+		update_task_priodl(p);
+		requeue_task(p, rq);
+	}
 	if (preempt && cpu_of(rq) != smp_processor_id())
 		resched_curr(rq);
 out_unlock:
