@@ -4155,7 +4155,7 @@ SYSCALL_DEFINE1(nice, int, increment)
 int task_prio(const struct task_struct *p)
 {
 	int level, prio = p->prio - MAX_RT_PRIO;
-	const int level_to_nice_prio[] = {0, 7, 14, 20, 26, 33, 39};
+	static const int level_to_nice_prio[] = {0, 7, 14, 20, 26, 33, 39};
 
 	/* rt tasks and iso tasks */
 	if (prio <= 0)
