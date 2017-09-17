@@ -721,8 +721,20 @@ static bool isoprio_suitable(struct rq *rq)
  * skiplist level is set to task's sl_node->level, the skiplist insert function
  * may change it based on current level of the skip lsit.
  */
-static inline int pds_skiplist_random_level(const long unsigned int randseed)
+static inline int pds_skiplist_random_level(const struct task_struct *p)
 {
+	long unsigned int randseed;
+
+	/*
+	 * 1. Some architectures don't have better than microsecond resolution
+	 * so mask out ~microseconds as a factor of the random seed for skiplist
+	 * insertion.
+	 * 2. Use address of task structure pointer as another factor of the
+	 * random seed for task burst forking scenario. Shift right 9 bits to
+	 * remove the aligned zero bits in the task structure address.
+	 */
+	randseed = (task_rq(p)->clock >> 10) ^ ((long unsigned int)p >> 9);
+
 	return find_first_bit(&randseed, NUM_SKIPLIST_LEVEL - 1);
 }
 
@@ -2268,11 +2280,7 @@ int sched_fork(unsigned long __maybe_unused clone_flags, struct task_struct *p)
 	p->stime =
 	p->sched_time = 0;
 
-	/*
-	 * Some architectures don't have better than microsecond resolution
-	 * so mask out ~microseconds as the random seed for skiplist insertion.
-	 */
-	p->sl_level = pds_skiplist_random_level(task_rq(p)->clock >> 10);
+	p->sl_level = pds_skiplist_random_level(p);
 	INIT_SKIPLIST_NODE(&p->sl_node);
 
 	/*
