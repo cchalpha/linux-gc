@@ -45,9 +45,9 @@ workload or with the growing of the cpu numbers.
 ------------------
 
 PDS is described as a multiple run queues cpu scheduler. Each cpu has its own
-run queue. A heavry customized skiplist is used as the backend data structure
+run queue. A heavily customized skiplist is used as the backend data structure
 of the cpu run queue. Tasks in run queue is sorted by priority then virtual
-deadline(simplfy to just deadline from here on). In PDS, balance action among
+deadline(simplify to just deadline from here on). In PDS, balance action among
 run queues are kept as less as possible to reduce the migration cost. Cpumask
 data structure is widely used in cpu affinity checking and cpu preemption/
 selection to make PDS scalable with increasing cpu number.
